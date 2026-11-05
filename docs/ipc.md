@@ -226,6 +226,22 @@ It installs into `~/.local/bin` and never `/usr/local/bin`: writing there needs 
 
 The gate is a MARKER (`cli_user_link_installed`), not "install whenever it is missing", and that distinction is the whole design. On disk the two look identical and mean opposite things: a command that was never installed wants installing, and a command the user DELETED wants leaving alone. The marker is set on the first attempt, success or failure, so a user who removes the link is never re-installed behind their back, and a failing install does not retry on every launch.
 
+**Task badges (wire v25).** `badge_set { key, text, color? }`,
+`badge_remove { key }` and `badge_list`, each with the usual `task` /
+`project` / `cwd`, reply `ReplyData::Badges` (`BadgesData { task_id, task,
+badges, changed }`, `changed` omitted when false); `TaskSummary.badges`
+carries them on `list` and `status`. Unlike `prop`, `group` and `rename`,
+no Tauri command is involved: `handle_badge` writes the task file itself
+through `CliHost::write_task_badges` (`task_badges_write`), then, only when
+something changed, queues the full list as a best-effort `task_badges`
+RPC (`push_task_badges`) and replies without waiting for it. One sender
+thread drains the queue, and `handle_badge` holds a lock across the write
+and the enqueue, so two writes to one task reach the webview in write
+order. A push dequeued before the webview ready latch is set is dropped,
+and a failed one is logged: the file is the record and the next `loadAll`
+catches the sidebar up. `badge_remove` of a missing key is ok with
+`changed` false.
+
 **Paired machines (wire v22).** `Request` gains `peer` (the global
 `--peer` flag: forward the whole verb to that paired machine) and
 `from_task` (the caller's `$TERMIC_TASK_ID`, sent only with `peer`, so the

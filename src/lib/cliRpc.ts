@@ -71,7 +71,7 @@ import { slugify } from "@/lib/utils";
 import { checkoutTaskName, remoteNames } from "@/lib/existingBranch";
 import { padHandler } from "@/lib/scratchCli";
 import { scheduleHandler } from "@/lib/scheduleCli";
-import type { CreateMultiMember, SandboxMode, Task, TerminalTab } from "@/lib/types";
+import type { CreateMultiMember, SandboxMode, Task, TaskBadge, TerminalTab } from "@/lib/types";
 import {
   collectTaskProps, propKeyProblem, propValueProblem, PROP_KEYS_PER_TAB, type CollectedProp,
 } from "@/lib/tabProps";
@@ -1379,6 +1379,19 @@ export async function tabPropsHandler(params: unknown): Promise<TabPropsReply> {
   };
 }
 
+/** `task_badges`: the CLI server already wrote the task file; mirror the
+ *  list into the store. Never `loadAll`: that would replace every Task and
+ *  re-render every sidebar row for one task's badges. */
+export async function taskBadgesHandler(params: unknown): Promise<null> {
+  const p = params as { taskId?: unknown; badges?: unknown };
+  const ok = typeof p?.taskId === "string" && !!p.taskId && Array.isArray(p.badges)
+    && p.badges.every(b => typeof b === "object" && b !== null
+      && typeof b.key === "string" && typeof b.text === "string" && typeof b.color === "string");
+  if (!ok) throw new Error("task_badges requires a taskId and badges");
+  useApp.getState().setTaskBadges(p.taskId as string, p.badges as TaskBadge[]);
+  return null;
+}
+
 /** Typed domain failures for `tab close`, same sentinel scheme as
  *  `sendErr` (decoded by cli_server.rs `parse_tab_close_error`). */
 function closeTabErr(code: string, msg: string): Error {
@@ -1462,6 +1475,7 @@ const handlers: Record<string, Handler> = {
   close_tab: closeTabHandler,
   rename_tab: renameTabHandler,
   tab_props: tabPropsHandler,
+  task_badges: taskBadgesHandler,
   list_agents: listAgentsHandler,
   list_prompts: listPromptsHandler,
   send_prompt: sendPromptHandler,

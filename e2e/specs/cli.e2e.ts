@@ -19,7 +19,7 @@ import path from "node:path";
 import { execSync } from "node:child_process";
 import os from "node:os";
 import { dataDir } from "../../wdio.conf.js";
-import { archiveTask, cliRpc as rpc, openTask, requireTermicApi, runCli, waitForAppShell, waitForClisDetected, rmTree } from "../helpers.js";
+import { archiveTask, cliRpc as rpc, openTask, requireTermicApi, runCli, snap, waitForAppShell, waitForClisDetected, rmTree } from "../helpers.js";
 
 /**
  * Poll a tab's live PTY (spawn is async), through BOTH sides that have to
@@ -361,6 +361,198 @@ describe("termic prop: tab properties on the sidebar row (GH #358)", () => {
     await browser.execute((p) => window.__termic!.useUI.getState().setTaskFilterText(p, "zzz-no-such"), pid);
     await browser.waitUntil(async () => !(await present()), { timeout: 5_000, timeoutMsg: "the filter kept a non-match" });
     await browser.execute((p) => window.__termic!.useUI.getState().setTaskFilterText(p, ""), pid);
+  });
+});
+
+describe("termic badge: status badges under the task's name", () => {
+  const OPEN = "cli-badges";
+  const STOPPED = "cli-badges-stopped";
+  let openId: string;
+  let stoppedId: string;
+
+  after(async () => {
+    if (openId) await archiveTask(openId);
+    if (stoppedId) await archiveTask(stoppedId);
+  });
+
+  before(async () => {
+    await waitForAppShell();
+    await requireTermicApi();
+    openId = await openTask(OPEN);
+    stoppedId = await openTask(STOPPED, false);
+  });
+
+  const set = (task: string, key: string, text: string, color?: string) =>
+    rpc({ cmd: "badge_set", task, key, text, ...(color ? { color } : {}) });
+  const rm = (task: string, key: string) => rpc({ cmd: "badge_remove", task, key });
+
+  /** [key, text, data-badge-color] per rendered badge, in DOM order. */
+  const rendered = (tid: string) =>
+    browser.execute(
+      (id) => [...document.querySelectorAll(`[data-sidebar-task-id="${id}"] [data-testid="task-badge"]`)]
+        .map(e => [e.getAttribute("data-badge-key"), e.textContent, e.getAttribute("data-badge-color")]),
+      tid,
+    );
+  const waitBadges = async (tid: string, want: string[][]) => {
+    let last: unknown = null;
+    await browser.waitUntil(async () => JSON.stringify(last = await rendered(tid)) === JSON.stringify(want), {
+      timeout: 8_000,
+      timeoutMsg: `badges: wanted ${JSON.stringify(want)}, saw ${JSON.stringify(last)}`,
+    });
+  };
+  const headerHeight = (tid: string) =>
+    browser.execute((id) => {
+      const el = document.querySelector<HTMLElement>(`[data-sidebar-task-id="${id}"]`)!;
+      const rowH = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--task-row-h"));
+      return { header: el.getBoundingClientRect().height, rowH };
+    }, tid);
+
+  it("draws one badge per tone and a hex, in first-set order, in the resolved colours", async () => {
+    for (const [key, text, color] of [
+      ["ci", "passing", "good"], ["lint", "2 warnings", "warning"],
+      ["deploy", "failed", "error"], ["note", "fyi", undefined], ["owner", "alice", "#3b82f6"],
+    ]) {
+      expect((await set(OPEN, key!, text!, color)).ok).toBe(true);
+    }
+
+    await waitBadges(openId, [
+      ["ci", "passing", "good"], ["lint", "2 warnings", "warning"], ["deploy", "failed", "error"],
+      ["note", "fyi", "neutral"], ["owner", "alice", "#3b82f6"],
+    ]);
+    const colours = await browser.execute((id) => {
+      const resolve = (v: string) => {
+        const probe = document.createElement("span");
+        probe.style.color = v;
+        document.body.appendChild(probe);
+        const c = getComputedStyle(probe).color;
+        probe.remove();
+        return c;
+      };
+      return [...document.querySelectorAll<HTMLElement>(`[data-sidebar-task-id="${id}"] [data-testid="task-badge"]`)]
+        .map(e => ({
+          got: getComputedStyle(e).color,
+          want: resolve(e.style.getPropertyValue("--badge")),
+          bg: getComputedStyle(e).backgroundColor,
+        }));
+    }, openId);
+    for (const c of colours) {
+      expect(c.got).toBe(c.want);
+      expect(c.bg).not.toBe("rgba(0, 0, 0, 0)");
+    }
+    await snap("badges-01-tones.png");
+  });
+
+  it("re-setting a key replaces its text and colour in place", async () => {
+    const r = await set(OPEN, "ci", "failing", "error");
+
+    expect(r.ok).toBe(true);
+    expect(r.data.changed).toBe(true);
+    await waitBadges(openId, [
+      ["ci", "failing", "error"], ["lint", "2 warnings", "warning"], ["deploy", "failed", "error"],
+      ["note", "fyi", "neutral"], ["owner", "alice", "#3b82f6"],
+    ]);
+  });
+
+  it("keeps the chevron and the trailing slot centred on the title line", async () => {
+    const centres = await browser.execute((id) => {
+      const header = document.querySelector(`[data-sidebar-task-id="${id}"]`)!;
+      const mid = (sel: string) => {
+        const r = header.querySelector(sel)!.getBoundingClientRect();
+        return r.top + r.height / 2;
+      };
+      return { line: mid("[data-task-row-line]"), lead: mid('[data-testid="task-row-lead"]'), slot: mid('[data-testid="task-state-slot"]') };
+    }, openId);
+
+    expect(Math.abs(centres.lead - centres.line)).toBeLessThanOrEqual(1);
+    expect(Math.abs(centres.slot - centres.line)).toBeLessThanOrEqual(1);
+    const h = await headerHeight(openId);
+    expect(h.header).toBeGreaterThan(h.rowH);
+  });
+
+  it("in branch-below mode keeps the chevron centred on the two-line title and the badges under the branch", async () => {
+    const before = await browser.execute(() => window.__termic!.usePrefs.getState().taskBranchName);
+    await browser.execute(() => window.__termic!.usePrefs.getState().setTaskBranchName("below"));
+
+    try {
+      const geo = () => browser.execute((id) => {
+        const header = document.querySelector(`[data-sidebar-task-id="${id}"]`)!;
+        const rect = (sel: string) => header.querySelector(sel)?.getBoundingClientRect() ?? null;
+        const line = rect("[data-task-row-line]")!, lead = rect('[data-testid="task-row-lead"]')!;
+        const branch = rect('[data-testid="task-branch"][data-placement="below"]');
+        const badges = [...header.querySelectorAll('[data-testid="task-badge"]')].map(e => e.getBoundingClientRect().top);
+        return {
+          lineMid: line.top + line.height / 2, leadMid: lead.top + lead.height / 2, lineH: line.height,
+          branchBottom: branch?.bottom ?? null, lineBottom: line.bottom, firstBadgeTop: Math.min(...badges),
+        };
+      }, openId);
+      await browser.waitUntil(async () => (await geo()).branchBottom !== null, { timeout: 5_000, timeoutMsg: "branch never moved below" });
+      const g = await geo();
+      const rowH = (await headerHeight(openId)).rowH;
+
+      expect(g.lineH).toBeGreaterThan(rowH);
+      expect(Math.abs(g.leadMid - g.lineMid)).toBeLessThanOrEqual(1);
+      expect(g.branchBottom!).toBeLessThanOrEqual(g.lineBottom);
+      expect(g.firstBadgeTop).toBeGreaterThanOrEqual(g.lineBottom);
+      await snap("badges-04-branch-below.png");
+    } finally {
+      await browser.execute((m) => window.__termic!.usePrefs.getState().setTaskBranchName(m), before);
+    }
+  });
+
+  it("wraps eight long badges onto more than one line and refuses a ninth", async () => {
+    for (let i = 0; i < 3; i++) {
+      expect((await set(OPEN, `long-${i}`, `a fairly long badge text ${i}`)).ok).toBe(true);
+    }
+    await browser.waitUntil(async () => (await rendered(openId)).length === 8, { timeout: 8_000 });
+
+    const tops = await browser.execute((id) =>
+      new Set([...document.querySelectorAll<HTMLElement>(`[data-sidebar-task-id="${id}"] [data-testid="task-badge"]`)]
+        .map(e => e.offsetTop)).size, openId);
+    const ninth = await set(OPEN, "ninth", "x");
+
+    expect(tops).toBeGreaterThanOrEqual(2);
+    expect(ninth.ok).toBe(false);
+    expect(ninth.error.code).toBe("bad_request");
+    await snap("badges-02-wrap.png");
+  });
+
+  it("sets a badge on a task the UI has not opened through the real CLI and $TERMIC_TASK_ID", async () => {
+    const stdout = runCli(["--no-launch", "badge", "set", "review", "waiting", "--color", "warning"], {
+      TERMIC_DATA_DIR: dataDir, TERMIC_TASK_ID: stoppedId,
+    });
+
+    expect(stdout).toContain("Set badge review on");
+    await waitBadges(stoppedId, [["review", "waiting", "warning"]]);
+    const list = JSON.parse(runCli(["--no-launch", "--json", "badge", "list", "--task", stoppedId], { TERMIC_DATA_DIR: dataDir }));
+    expect(list.badges).toEqual([{ key: "review", text: "waiting", color: "warning" }]);
+    const mounted = await browser.execute((id) => window.__termic!.useApp.getState().mountedTasks.has(id), stoppedId);
+    expect(mounted).toBe(false);
+    await snap("badges-03-stopped.png");
+  });
+
+  it("rm brings back the fixed row height, a missing key is ok, and status --json carries badges", async () => {
+    const st = await rpc({ cmd: "status", task: STOPPED });
+    expect(st.data.task.badges).toEqual([{ key: "review", text: "waiting", color: "warning" }]);
+
+    const gone = await rm(STOPPED, "review");
+    const again = await rm(STOPPED, "review");
+
+    expect(gone.data.changed).toBe(true);
+    expect(again.ok).toBe(true);
+    expect(again.data.changed ?? false).toBe(false);
+    await waitBadges(stoppedId, []);
+    const h = await headerHeight(stoppedId);
+    expect(h.header).toBe(h.rowH);
+  });
+
+  it("refuses a bad colour, key or empty text and changes nothing", async () => {
+    const before = await rendered(openId);
+
+    for (const r of [await set(OPEN, "ci", "x", "red"), await set(OPEN, "Bad Key", "x"), await set(OPEN, "ci", "  ")]) {
+      expect(r.ok).toBe(false);
+      expect(r.error.code).toBe("bad_request");
+    }
+    expect(await rendered(openId)).toEqual(before);
   });
 });
 

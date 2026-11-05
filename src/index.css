@@ -625,6 +625,13 @@ html.termic-mod-held .xterm .xterm-cursor-pointer { cursor: pointer; }
   animation: termic-spotlight-wave 2s ease-in-out infinite;
 }
 
+/* Task badges (components/sidebar/TaskBadges.tsx). --badge is a theme token
+   for a tone, or the hex an agent chose, which is data, not an app colour. */
+.termic-badge {
+  color: var(--badge);
+  background: color-mix(in srgb, var(--badge) 16%, transparent);
+}
+
 /* Pending review-comments pill (ReviewCommentsBar). Comments are HELD until
    the user explicitly sends them to an agent, so the affordance has to be
    loud or people leave them stranded. An expanding-ring ripple (box-shadow,

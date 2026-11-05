@@ -60,6 +60,7 @@ import { BoardFilterBar } from "@/components/views/BoardFilterBar";
 import { useTaskQuery } from "@/hooks/useTaskQuery";
 import { setTreeFold, treeFoldKey, type TreeFold } from "@/lib/treeFold";
 import { SpawnedFromMark, SpawnLinksOverlay } from "./SpawnLinks";
+import { TaskBadges } from "./TaskBadges";
 import { crossProjectStrays, flattenSegments, groupColorCss as taskGroupColorCss, groupLabel, layoutTaskList, liveGroups, nextGroupColor } from "@/lib/taskGroups";
 import { taskNeedsAttention, taskWorkDone, taskWorking, taskDelegated, taskMarkedUnread } from "@/lib/taskWorkState";
 import { delegatedTitle } from "@/lib/delegatedWork";
@@ -3259,12 +3260,8 @@ function TaskRow({ w, compact, dragging = false, dragTy = 0, onDragPointerDown, 
         // the kebab button (which it anchors to).
         onContextMenu={(e) => { e.preventDefault(); setMenuOpen(true); }}
         className={cn(
-          // Fixed height rather than padding around a line box: the line box
-          // is the system's to decide (see --task-row-h) and the rows have to
-          // stay level with each other and with the empty-project placeholder.
-          "group/wsrow ml-3 flex items-center gap-1 rounded-md px-1 text-[13px] cursor-pointer select-none transition-colors",
-          // "Below" is a two-line row by choice; every other row keeps the fixed height.
-          branchBelow ? "min-h-[var(--task-row-h)] py-1" : "h-[var(--task-row-h)]",
+          // A column: the title line, then the badge line when there are badges.
+          "group/wsrow ml-3 flex flex-col rounded-md px-1 text-[13px] cursor-pointer select-none transition-colors",
           // Strong selection on the header when active AND no child row
           // carries it: collapsed (children hidden) OR the active tab is an
           // edit/diff view (no row). Expanded with an active terminal tab
@@ -3279,9 +3276,21 @@ function TaskRow({ w, compact, dragging = false, dragTy = 0, onDragPointerDown, 
           dragging && "bg-[var(--color-accent)]/15 text-[var(--color-accent)] shadow-lg",
         )}
       >
+        <div
+          data-task-row-line
+          className={cn(
+            "flex items-center gap-1",
+            // Fixed height rather than padding around a line box: the line box
+            // is the system's to decide (see --task-row-h) and the rows have to
+            // stay level with each other and with the empty-project placeholder.
+            // "Below" is a two-line row by choice; every other title line keeps the fixed height.
+            branchBelow ? "min-h-[var(--task-row-h)] py-1" : "h-[var(--task-row-h)]",
+          )}
+        >
         {terminalTabs.length === 0
-          ? <Moon className="shrink-0 h-3.5 w-3.5 mx-0.5 text-[var(--color-fg-faint)] opacity-40" />
+          ? <Moon data-testid="task-row-lead" className="shrink-0 h-3.5 w-3.5 mx-0.5 text-[var(--color-fg-faint)] opacity-40" />
           : <button
+              data-testid="task-row-lead"
               onClick={(e) => { e.stopPropagation(); setTaskCollapsed(w.id, !collapsed); }}
               className="shrink-0 rounded p-0.5 hover:bg-[var(--color-bg-3)] transition-colors"
               data-no-drag
@@ -3825,6 +3834,8 @@ function TaskRow({ w, compact, dragging = false, dragTy = 0, onDragPointerDown, 
             : null)}
           </span>
         </span>
+        </div>
+        {w.badges?.length ? <TaskBadges badges={w.badges} /> : null}
       </div>
 
       {/* Tab children — terminal tabs only; edit/diff are transient file views */}

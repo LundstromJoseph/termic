@@ -121,7 +121,12 @@ use std::io::{self, BufRead, Read, Write};
 /// the field and create a task with no member worktrees, or with every
 /// member linked, which reads as success. `project list` reports each
 /// project's `type` and members.
-pub const PROTOCOL_VERSION: u32 = 24;
+///
+/// v25: `badge_set`, `badge_remove` and `badge_list` set, remove and list a
+/// task's badges, and `TaskSummary` carries them. A v24 server does not know
+/// the verbs, and the version check says "restart the app" where the bare
+/// failure would read as a broken command.
+pub const PROTOCOL_VERSION: u32 = 25;
 
 /// A pasted "123", "#123", "!123" or a PR / MR link, reduced to its number.
 /// None for anything else. The webview's `parsePrRef` (src/lib/prReview.ts)
@@ -228,15 +233,19 @@ pub const PROP_KEYS_PER_TAB: usize = 8;
 /// Why `key` cannot be a property key: `[a-z0-9][a-z0-9_-]*`, at most
 /// `PROP_KEY_MAX` characters.
 pub fn prop_key_problem(key: &str) -> Option<String> {
+    key_problem("property", key, PROP_KEY_MAX)
+}
+
+fn key_problem(noun: &str, key: &str, max: usize) -> Option<String> {
     let first_ok = key.chars().next().is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit());
     let rest_ok = key.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-');
     if !first_ok || !rest_ok {
         return Some(format!(
-            "property key \"{key}\" must be lowercase letters, digits, - and _, starting with a letter or digit"
+            "{noun} key \"{key}\" must be lowercase letters, digits, - and _, starting with a letter or digit"
         ));
     }
-    if key.chars().count() > PROP_KEY_MAX {
-        return Some(format!("a property key is longer than {PROP_KEY_MAX} characters"));
+    if key.chars().count() > max {
+        return Some(format!("a {noun} key is longer than {max} characters"));
     }
     None
 }
@@ -252,6 +261,52 @@ pub fn prop_value_problem(value: &str) -> Option<String> {
         return Some(format!("a property value is longer than {PROP_VALUE_MAX} characters"));
     }
     None
+}
+
+/// Badge limits (v25). Like properties, badge text comes from agents and is
+/// validated, not escaped.
+pub const BADGE_KEY_MAX: usize = 32;
+pub const BADGE_TEXT_MAX: usize = 40;
+pub const BADGES_PER_TASK: usize = 8;
+/// The named tones a badge colour may be; anything else must be a hex.
+pub const BADGE_TONES: &[&str] = &["good", "warning", "error", "neutral"];
+pub const BADGE_DEFAULT_COLOR: &str = "neutral";
+
+/// Why `key` cannot be a badge key: the property key rule.
+pub fn badge_key_problem(key: &str) -> Option<String> {
+    key_problem("badge", key, BADGE_KEY_MAX)
+}
+
+/// Why `text` cannot be a badge text: one line, no control characters, not
+/// blank, at most `BADGE_TEXT_MAX` characters once trimmed.
+pub fn badge_text_problem(text: &str) -> Option<String> {
+    if text.chars().any(char::is_control) {
+        return Some("a badge text must be one line, with no control characters".into());
+    }
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Some("a badge text cannot be empty; `badge rm <key>` removes a badge".into());
+    }
+    if trimmed.chars().count() > BADGE_TEXT_MAX {
+        return Some(format!("a badge text is longer than {BADGE_TEXT_MAX} characters"));
+    }
+    None
+}
+
+/// Why `color` cannot be a badge colour: a `BADGE_TONES` entry or a hex
+/// (#rgb, #rrggbb, #rrggbbaa).
+pub fn badge_color_problem(color: &str) -> Option<String> {
+    if BADGE_TONES.contains(&color) {
+        return None;
+    }
+    if let Some(hex) = color.strip_prefix('#') {
+        if matches!(hex.len(), 3 | 6 | 8) && hex.chars().all(|c| c.is_ascii_hexdigit()) {
+            return None;
+        }
+    }
+    Some(format!(
+        "unknown colour \"{color}\" (good, warning, error, neutral, or a hex like #3b82f6)"
+    ))
 }
 
 /// serde default for `QuitData::running`.
@@ -643,6 +698,43 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         value: Option<String>,
         /// The CLI's working directory, for worktree-first resolution.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cwd: Option<String>,
+    },
+    /// v25: set a badge on a task. Re-setting `key` replaces its text and
+    /// colour in place. Replies `ReplyData::Badges`.
+    BadgeSet {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project: Option<String>,
+        key: String,
+        text: String,
+        /// A `BADGE_TONES` entry or a hex; the server defaults it to
+        /// `BADGE_DEFAULT_COLOR`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        color: Option<String>,
+        /// The CLI's working directory, for worktree-first resolution.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cwd: Option<String>,
+    },
+    /// v25: remove a task's badge by key. A missing key is not an error:
+    /// the reply's `changed` is false.
+    BadgeRemove {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project: Option<String>,
+        key: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cwd: Option<String>,
+    },
+    /// v25: list a task's badges.
+    BadgeList {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cwd: Option<String>,
     },
@@ -1125,6 +1217,8 @@ pub enum ReplyData {
     Tab(TabData),
     TabClose(TabCloseData),
     Prop(PropData),
+    /// `badge set`, `badge rm` and `badge list` (v25).
+    Badges(BadgesData),
     Quit(QuitData),
     Archive(ArchiveData),
     Rename(RenameData),
@@ -1182,6 +1276,26 @@ pub struct PropData {
     pub tab_id: Option<String>,
     pub tabs: Vec<TabProps>,
     pub collected: Vec<CollectedProp>,
+}
+
+/// One badge on a task (v25), in the order its key was first set.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct BadgeEntry {
+    pub key: String,
+    pub text: String,
+    pub color: String,
+}
+
+/// The badge verbs' reply: the task's badges after the write (if any).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BadgesData {
+    pub task_id: String,
+    /// `project/name`.
+    pub task: String,
+    pub badges: Vec<BadgeEntry>,
+    /// Whether a set or remove changed anything.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub changed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1756,6 +1870,9 @@ pub struct TaskSummary {
     /// not reported the task's tabs.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub props: Vec<CollectedProp>,
+    /// v25: the task's badges.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub badges: Vec<BadgeEntry>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -2542,6 +2659,21 @@ mod tests {
                 key: Some("status".into()), value: Some(String::new()), cwd: None,
             },
             Command::Prop { task: None, project: None, tab: None, key: None, value: None, cwd: Some("/t".into()) },
+            // v25: badges.
+            Command::BadgeSet {
+                task: Some("fix-auth".into()),
+                project: Some("web".into()),
+                key: "ci".into(),
+                text: "passing".into(),
+                color: Some("good".into()),
+                cwd: None,
+            },
+            Command::BadgeSet {
+                task: None, project: None, key: "ci".into(), text: "queued".into(), color: None,
+                cwd: Some("/t".into()),
+            },
+            Command::BadgeRemove { task: Some("fix-auth".into()), project: None, key: "ci".into(), cwd: None },
+            Command::BadgeList { task: None, project: None, cwd: Some("/t".into()) },
             Command::Agents,
             Command::Prompts { selector: None },
             Command::Prompts { selector: Some("builtin:review".into()) },
@@ -2782,6 +2914,7 @@ mod tests {
     fn roundtrip_every_reply() {
         let summary = TaskSummary {
             props: Default::default(),
+            badges: vec![BadgeEntry { key: "ci".into(), text: "passing".into(), color: "good".into() }],
             id: "w1".into(),
             name: "fix-auth".into(),
             project: "web".into(),
@@ -2860,6 +2993,15 @@ mod tests {
                     props: vec![PropEntry { key: "ticket".into(), value: "ABC-1".into() }],
                 }],
                 collected: vec![CollectedProp { key: "ticket".into(), values: vec!["ABC-1".into()] }],
+            }),
+            ReplyData::Badges(BadgesData {
+                task_id: "w1".into(),
+                task: "web/fix-auth".into(),
+                badges: vec![BadgeEntry { key: "ci".into(), text: "passing".into(), color: "#3b82f6".into() }],
+                changed: true,
+            }),
+            ReplyData::Badges(BadgesData {
+                task_id: "w1".into(), task: "web/fix-auth".into(), badges: Vec::new(), changed: false,
             }),
             ReplyData::Open(OpenData { task: Some(summary.clone()), raised: true }),
             ReplyData::Open(OpenData { task: None, raised: true }),
@@ -3321,6 +3463,54 @@ mod tests {
         assert!(prop_value_problem(&"v".repeat(PROP_VALUE_MAX + 1)).unwrap().contains("longer"));
         assert!(prop_value_problem("a\nb").unwrap().contains("one line"));
         assert!(prop_value_problem("a\u{1b}[31m").is_some());
+    }
+
+    #[test]
+    fn badge_keys_texts_and_colors_are_validated() {
+        for ok in ["ci", "build-1", "x_y", "2fa"] {
+            assert_eq!(badge_key_problem(ok), None, "{ok}");
+        }
+        for bad in ["", "CI", "-x", "a b"] {
+            assert!(badge_key_problem(bad).unwrap().starts_with("badge key"), "{bad:?}");
+        }
+        assert_eq!(badge_key_problem(&"k".repeat(BADGE_KEY_MAX)), None);
+        assert!(badge_key_problem(&"k".repeat(BADGE_KEY_MAX + 1)).unwrap().contains("a badge key is longer"));
+
+        assert_eq!(badge_text_problem("passing"), None);
+        assert_eq!(badge_text_problem(&format!("  {}  ", "t".repeat(BADGE_TEXT_MAX))), None, "trimmed");
+        assert!(badge_text_problem(&"t".repeat(BADGE_TEXT_MAX + 1)).unwrap().contains("longer"));
+        assert!(badge_text_problem("a\nb").unwrap().contains("one line"));
+        assert!(badge_text_problem("   ").unwrap().contains("badge rm <key>"));
+        assert!(badge_text_problem("").is_some());
+
+        for ok in BADGE_TONES.iter().copied().chain(["#abc", "#AABBCC", "#aabbccdd"]) {
+            assert_eq!(badge_color_problem(ok), None, "{ok}");
+        }
+        for bad in ["#abcd", "red", "Good", "#ggg", "abc", ""] {
+            assert!(badge_color_problem(bad).is_some(), "{bad:?}");
+        }
+        assert!(BADGE_TONES.contains(&BADGE_DEFAULT_COLOR));
+
+        let msgs = [
+            badge_key_problem("A").unwrap(),
+            badge_text_problem("").unwrap(),
+            badge_text_problem("\t").unwrap(),
+            badge_color_problem("red").unwrap(),
+        ];
+        for m in msgs {
+            assert!(!m.contains('\u{2014}'), "em dash in {m:?}");
+        }
+    }
+
+    #[test]
+    fn badges_data_omits_changed_when_false_and_summary_omits_empty_badges() {
+        let data = BadgesData { task_id: "w1".into(), task: "web/x".into(), badges: Vec::new(), changed: false };
+
+        let line = serde_json::to_string(&data).unwrap();
+        let summary = serde_json::to_value(TaskSummary::default()).unwrap();
+
+        assert!(!line.contains("changed"), "{line}");
+        assert!(summary.get("badges").is_none(), "{summary}");
     }
 
     #[test]

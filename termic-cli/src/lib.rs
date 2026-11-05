@@ -176,7 +176,8 @@ another project is linked to yours instead), a block you name for the \
 batch of work with `group --name`; prompt another task's agent (`send`) and \
 read what it produced (`logs`, `result`); retitle your own task \
 (`rename`); label your own tab with what you are working on, shown on \
-the task's sidebar row (`prop ticket ABC-1`); and keep notes, plans, findings, logs and reports the user \
+the task's sidebar row (`prop ticket ABC-1`); put a coloured status badge \
+under your task's name (`badge set ci passing --color good`); and keep notes, plans, findings, logs and reports the user \
 should READ in a scratchpad (`scratchpad new`, `scratchpad write`), a tab \
 in your task that updates live and stays out of git: use one instead of \
 dropping temporary .md files into the repo, and tidy up after yourself with \
@@ -1260,6 +1261,10 @@ disabled, 6 refused, 8 connection lost."
         project: Option<String>,
     },
 
+    /// Set, remove or list the coloured status badges under a task's name.
+    #[command(subcommand, name = "badge", subcommand_required = true)]
+    Badge(BadgeCmd),
+
     /// Show, rename or recolour your task's sidebar group, or move a task
     /// into another group or out of one.
     #[command(
@@ -1593,6 +1598,69 @@ Exit codes: 0 cleared (also when there was nothing to remove), 1 error (unknown 
     Clear {
         #[command(flatten)]
         target: PadTarget,
+    },
+}
+
+const BADGE_AFTER_HELP: &str = "A badge is a short coloured status under the task's name in the sidebar, \
+for example `termic badge set ci passing --color good` or \
+`termic badge set review waiting --color warning`. Badges belong to the \
+TASK, unlike `prop`, which labels your own tab. Re-setting a key replaces \
+its text and colour in place; `termic badge rm <key>` removes it.
+
+--color is a tone (good, warning, error, neutral; default neutral) or a hex \
+like #3b82f6. Keys are lowercase letters, digits, - and _ (at most 32 \
+characters). Text is one line, at most 40 characters. A task holds at most \
+8 badges. Without --task, the task is yours ($TERMIC_TASK_ID), then the \
+current directory. Badges work on a task whether or not it is open.
+
+With --output-format json, one object: {\"task_id\", \"task\", \"badges\": \
+[{\"key\", \"text\", \"color\"}], \"changed\" (only when a set or rm changed \
+something)}. `list --json` and `status --json` carry them as `badges`.
+
+Exit codes: 0 ok, 1 error (unknown task, a key, text or colour outside the \
+limits, too many badges), 4 app not running, 5 CLI disabled, 6 refused, \
+8 connection lost, 12 peer unreachable.";
+
+/// Which task a badge verb acts on.
+#[derive(clap::Args, Debug, Clone, Default)]
+pub struct BadgeTarget {
+    /// Task name, task id, or qualified project/name. Default: your own
+    /// task ($TERMIC_TASK_ID), then the current directory.
+    #[arg(long, value_name = "TASK")]
+    pub task: Option<String>,
+    /// Project name, to disambiguate. Requires --task.
+    #[arg(long, requires = "task")]
+    pub project: Option<String>,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum BadgeCmd {
+    /// Set a badge, or replace the one with the same key.
+    #[command(after_help = BADGE_AFTER_HELP)]
+    Set {
+        /// The badge key.
+        key: String,
+        /// The text shown in the badge.
+        text: String,
+        /// good, warning, error, neutral (default) or a hex like #3b82f6.
+        #[arg(long, value_name = "COLOR")]
+        color: Option<String>,
+        #[command(flatten)]
+        target: BadgeTarget,
+    },
+    /// Remove a badge by key.
+    #[command(after_help = BADGE_AFTER_HELP)]
+    Rm {
+        /// The badge key.
+        key: String,
+        #[command(flatten)]
+        target: BadgeTarget,
+    },
+    /// List the task's badges.
+    #[command(after_help = BADGE_AFTER_HELP)]
+    List {
+        #[command(flatten)]
+        target: BadgeTarget,
     },
 }
 
@@ -2006,6 +2074,18 @@ fn pre_connect_guard(cmd: &Cmd) -> Result<(), CliError> {
             return Err(CliError::new(exit_code::ERROR, why));
         }
         if let Some(why) = value.as_deref().and_then(proto::prop_value_problem) {
+            return Err(CliError::new(exit_code::ERROR, why));
+        }
+    }
+    if let Cmd::Badge(b) = cmd {
+        let problem = match b {
+            BadgeCmd::Set { key, text, color, .. } => proto::badge_key_problem(key)
+                .or_else(|| proto::badge_text_problem(text))
+                .or_else(|| color.as_deref().and_then(proto::badge_color_problem)),
+            BadgeCmd::Rm { key, .. } => proto::badge_key_problem(key),
+            BadgeCmd::List { .. } => None,
+        };
+        if let Some(why) = problem {
             return Err(CliError::new(exit_code::ERROR, why));
         }
     }
@@ -2466,6 +2546,7 @@ outside.",
         }
         Cmd::Project(p) => execute_project(&mut conn, &token, format, p, &paths),
         Cmd::Pad(p) => execute_pad(&mut conn, &token, format, p, pad_content),
+        Cmd::Badge(b) => execute_badge(&mut conn, &token, format, b),
         Cmd::Schedule(s) => execute_schedule(&mut conn, &token, format, s, &paths, prompt),
         Cmd::Peer(p) => execute_peer(&mut conn, &token, format, p, &paths),
         // The Phase 0 read verbs: one request, one reply.
@@ -3113,6 +3194,46 @@ fn execute_pad(
             }
             d.content.clone().unwrap_or_default()
         }
+    };
+    Ok(Output::ok(final_stdout(format, &text, &d)))
+}
+
+fn execute_badge(
+    conn: &mut client::Conn,
+    token: &str,
+    format: OutputFormat,
+    cmd: &BadgeCmd,
+) -> Result<Output, CliError> {
+    let cwd = std::env::current_dir().ok().map(|p| p.to_string_lossy().into_owned());
+    let task_of = |t: &BadgeTarget| t.task.clone().or_else(|| own_env("TERMIC_TASK_ID"));
+    let wire = match cmd {
+        BadgeCmd::Set { key, text, color, target } => proto::Command::BadgeSet {
+            task: task_of(target),
+            project: target.project.clone(),
+            key: key.clone(),
+            text: text.clone(),
+            color: color.clone(),
+            cwd,
+        },
+        BadgeCmd::Rm { key, target } => proto::Command::BadgeRemove {
+            task: task_of(target),
+            project: target.project.clone(),
+            key: key.clone(),
+            cwd,
+        },
+        BadgeCmd::List { target } => {
+            proto::Command::BadgeList { task: task_of(target), project: target.project.clone(), cwd }
+        }
+    };
+    let data = client::request(conn, wire, token)?;
+    let proto::ReplyData::Badges(d) = data else {
+        return Err(CliError::new(exit_code::ERROR, "unexpected reply to badge"));
+    };
+    let text = match cmd {
+        BadgeCmd::Set { key, .. } => format!("Set badge {key} on {}.", d.task),
+        BadgeCmd::Rm { key, .. } if d.changed => format!("Removed badge {key} from {}.", d.task),
+        BadgeCmd::Rm { key, .. } => format!("No badge {key} on {}.", d.task),
+        BadgeCmd::List { .. } => output::badges_text(&d),
     };
     Ok(Output::ok(final_stdout(format, &text, &d)))
 }
@@ -4063,6 +4184,50 @@ mod tests {
     }
 
     #[test]
+    fn badge_set_rm_and_list_parse_with_and_without_color_and_task() {
+        let set = Cli::try_parse_from(["termic", "badge", "set", "ci", "passing"]).unwrap();
+        let colored = Cli::try_parse_from(["termic", "badge", "set", "ci", "x", "--color", "#abc", "--task", "fix-auth"]).unwrap();
+        let rm = Cli::try_parse_from(["termic", "badge", "rm", "ci", "--task", "a", "--project", "web"]).unwrap();
+        let list = Cli::try_parse_from(["termic", "badge", "list"]).unwrap();
+
+        let Cmd::Badge(BadgeCmd::Set { key, text, color, target }) = &set.cmd else { panic!("not badge set") };
+        assert_eq!((key.as_str(), text.as_str(), color, &target.task), ("ci", "passing", &None, &None));
+        assert!(matches!(&colored.cmd, Cmd::Badge(BadgeCmd::Set { color: Some(c), target, .. })
+            if c == "#abc" && target.task.as_deref() == Some("fix-auth")));
+        assert!(matches!(&rm.cmd, Cmd::Badge(BadgeCmd::Rm { key, target })
+            if key == "ci" && target.project.as_deref() == Some("web")));
+        assert!(matches!(&list.cmd, Cmd::Badge(BadgeCmd::List { .. })));
+    }
+
+    #[test]
+    fn badge_without_a_subcommand_or_with_project_but_no_task_fails_to_parse() {
+        let bare = Cli::try_parse_from(["termic", "badge"]);
+        let project_only = Cli::try_parse_from(["termic", "badge", "list", "--project", "web"]);
+
+        assert!(bare.is_err());
+        assert!(project_only.is_err());
+    }
+
+    #[test]
+    fn badge_pre_connect_guard_refuses_bad_key_text_and_color_with_exit_1() {
+        for (argv, why) in [
+            (vec!["termic", "badge", "set", "CI", "x"], "badge key"),
+            (vec!["termic", "badge", "set", "ci", ""], "badge rm"),
+            (vec!["termic", "badge", "set", "ci", "x", "--color", "red"], "unknown colour"),
+            (vec!["termic", "badge", "rm", "Ci"], "badge key"),
+        ] {
+            let cli = Cli::try_parse_from(argv.clone()).unwrap();
+
+            let err = pre_connect_guard(&cli.cmd).unwrap_err();
+
+            assert_eq!(err.code, exit_code::ERROR, "{argv:?}");
+            assert!(err.message.contains(why), "{argv:?}: {}", err.message);
+        }
+        let ok = Cli::try_parse_from(["termic", "badge", "set", "ci", "passing", "--color", "good"]).unwrap();
+        assert!(pre_connect_guard(&ok.cmd).is_ok());
+    }
+
+    #[test]
     fn tab_title_opens_named_or_renames_an_open_tab() {
         // Open mode: --title rides every kind.
         for open in [
@@ -4669,6 +4834,7 @@ mod tests {
             "project remove", "help", "prompts", "prompts show",
             "scratchpad list", "scratchpad new", "scratchpad write", "scratchpad read",
             "scratchpad rm", "scratchpad clear",
+            "badge set", "badge rm", "badge list",
             "schedule list", "schedule show", "schedule set", "schedule run", "schedule delete",
         ] {
             assert!(names.contains(&expected), "missing {expected} in {names:?}");

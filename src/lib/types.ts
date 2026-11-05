@@ -337,6 +337,10 @@ export interface Task {
    *  every other task. Its runs carry `spawned_by` + this task's group, and
    *  `schedule.history` holds their ids. */
   schedule?: TaskSchedule;
+  /** Status badges agents set with `termic badge`, drawn under the task's
+   *  name. Absent when empty. Written only by the Rust side; the store
+   *  mirrors it from the `task_badges` push and `loadAll`. */
+  badges?: TaskBadge[];
   /** Per-agent account override (GH #278): agent id -> account name. Absent
    *  means "follow the agent's default". Written by `taskSetAccount`. */
   accounts?: Record<string, string>;
@@ -490,6 +494,14 @@ export interface PersistedTab {
   /** Key/value properties an agent put on this tab (GH #358). Absent when
    *  there are none (Rust skips an empty list). */
   props?: TabProp[];
+}
+
+/** Mirror of `TaskBadge` in src-tauri/src/lib.rs. `color` is a tone
+ *  (good, warning, error, neutral) or a hex. */
+export interface TaskBadge {
+  key: string;
+  text: string;
+  color: string;
 }
 
 /** One tab property (GH #358). `since` is when its key was FIRST set on

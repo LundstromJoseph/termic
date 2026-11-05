@@ -307,6 +307,14 @@ another. Over MCP: `task_group` with `join` or `leave`.
   in one task never overwrite each other. `prop <key> ""` clears it,
   bare `prop` lists them. Keys are lowercase (`[a-z0-9_-]`, at most 32),
   values one line of at most 40 characters, 8 keys per tab.
+- `"$TERMIC_CLI" badge set <key> <text> --color <c>` - put a coloured
+  status under YOUR TASK's name in the sidebar (`badge set ci failing
+  --color error`). Unlike `prop`, a badge belongs to the task, not your
+  tab, and works whether or not the task is open. `--color` is good,
+  warning, error, neutral (the default) or a hex; the same key replaces
+  the badge in place, `badge rm <key>` removes it, `badge list` lists
+  them. Keys as for `prop`, text one line of at most 40 characters, 8
+  badges per task.
 - `"$TERMIC_CLI" result <task>` - the agent's last message from its
   session transcript (claude only; other agents error and you fall back
   to the file convention).

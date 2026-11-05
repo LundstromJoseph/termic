@@ -638,6 +638,15 @@ pub(crate) trait CliHost: Send + Sync {
     /// GH #138 part 2). Err covers dead agent tabs and shell/terminal
     /// tabs, which never carry a role (write-only from the CLI).
     fn find_tab_pty(&self, task_id: &str, tab_id: &str) -> Result<String, String>;
+    /// Apply one badge op to the task's file (`crate::task_badges_write`).
+    fn write_task_badges(
+        &self,
+        task_id: &str,
+        op: &crate::BadgeOp,
+    ) -> Result<(Vec<crate::TaskBadge>, bool), crate::BadgeWriteError>;
+    /// Queue a `task_badges` push for the webview. Never blocks: the CLI
+    /// reply must not wait on a best-effort push.
+    fn push_task_badges(&self, params: serde_json::Value);
     /// The retained output tail of a role-tagged PTY.
     fn pty_logs(&self, pty_id: &str, max: usize) -> Result<(Vec<u8>, bool), String>;
     /// Register a live attach tap + backlog snapshot on a PTY.
@@ -911,6 +920,18 @@ pub(crate) fn dispatch_authenticated(
             value.as_deref(),
             cwd.as_deref(),
         ),
+        Command::BadgeSet { task, project, key, text, color, cwd } => {
+            let color = color.clone().unwrap_or_else(|| proto::BADGE_DEFAULT_COLOR.into());
+            let op = crate::BadgeOp::Set { key: key.clone(), text: text.clone(), color };
+            handle_badge(&req.id, host, task.as_deref(), project.as_deref(), cwd.as_deref(), Some(op))
+        }
+        Command::BadgeRemove { task, project, key, cwd } => {
+            let op = crate::BadgeOp::Remove { key: key.clone() };
+            handle_badge(&req.id, host, task.as_deref(), project.as_deref(), cwd.as_deref(), Some(op))
+        }
+        Command::BadgeList { task, project, cwd } => {
+            handle_badge(&req.id, host, task.as_deref(), project.as_deref(), cwd.as_deref(), None)
+        }
         Command::TabClose { task, project, tab, yes, cwd } => handle_tab_close(
             &req.id,
             host,
@@ -3328,6 +3349,78 @@ fn handle_prop(
     Reply::ok(id, ReplyData::Prop(proto::PropData { task_id: t.id, tab_id: target, tabs, collected }))
 }
 
+fn badge_entries(badges: &[crate::TaskBadge]) -> Vec<proto::BadgeEntry> {
+    badges
+        .iter()
+        .map(|b| proto::BadgeEntry { key: b.key.clone(), text: b.text.clone(), color: b.color.clone() })
+        .collect()
+}
+
+/// `badge set` / `badge rm` (`op`) and `badge list` (no op). The server
+/// writes the task file itself, so badges work on a task the UI has not
+/// loaded; the webview only hears about the change, best effort.
+fn handle_badge(
+    id: &str,
+    host: &dyn CliHost,
+    task: Option<&str>,
+    project: Option<&str>,
+    cwd: Option<&str>,
+    op: Option<crate::BadgeOp>,
+) -> Reply {
+    let problem = match &op {
+        Some(crate::BadgeOp::Set { key, text, color }) => proto::badge_key_problem(key)
+            .or_else(|| proto::badge_text_problem(text))
+            .or_else(|| proto::badge_color_problem(color)),
+        Some(crate::BadgeOp::Remove { key }) => proto::badge_key_problem(key),
+        None => None,
+    };
+    if let Some(why) = problem {
+        return Reply::err(id, ErrorCode::BadRequest, why);
+    }
+    let (projects, tasks) = host.projects_tasks();
+    let t = match resolve_task_arg(&projects, &tasks, task, project, cwd) {
+        Ok(t) => t,
+        Err(e) => return Reply { id: id.into(), ok: false, data: None, error: Some(e) },
+    };
+    // Held across the write and the enqueue so pushes for one task are queued,
+    // and therefore sent, in write order.
+    static PUSH_ORDER: Mutex<()> = Mutex::new(());
+    let _order = PUSH_ORDER.lock().unwrap_or_else(|p| p.into_inner());
+    let (badges, changed) = match op {
+        None => (t.badges.clone(), false),
+        Some(op) => match host.write_task_badges(&t.id, &op) {
+            Ok(r) => r,
+            Err(crate::BadgeWriteError::NoSuchTask) => {
+                return Reply::err(id, ErrorCode::NotFound, format!("no task {}", qualified(&projects, t)))
+            }
+            Err(crate::BadgeWriteError::Invalid(why)) => return Reply::err(id, ErrorCode::BadRequest, why),
+            Err(crate::BadgeWriteError::TooMany) => {
+                return Reply::err(
+                    id,
+                    ErrorCode::BadRequest,
+                    format!(
+                        "a task holds at most {} badges; remove one first (`termic badge rm <key>`)",
+                        proto::BADGES_PER_TASK
+                    ),
+                )
+            }
+            Err(crate::BadgeWriteError::Io(e)) => {
+                return Reply::err(id, ErrorCode::Internal, format!("could not save the badge ({e})"))
+            }
+        },
+    };
+    let badges = badge_entries(&badges);
+    if changed {
+        // The file is the record; a webview that missed this push catches
+        // up on its next loadAll.
+        host.push_task_badges(serde_json::json!({ "taskId": t.id, "badges": badges }));
+    }
+    Reply::ok(
+        id,
+        ReplyData::Badges(proto::BadgesData { task_id: t.id.clone(), task: qualified(&projects, t), badges, changed }),
+    )
+}
+
 const TAB_TITLE_ERR: &str = "cli_tab_title:";
 
 fn parse_tab_title_error(e: &str) -> (ErrorCode, String) {
@@ -3961,6 +4054,7 @@ fn summarize(
         // Filled from the UI's snapshot by the callers that have one
         // (`with_cached_props`); a summary on its own knows no tab state.
         props: Vec::new(),
+        badges: badge_entries(&task.badges),
         id: task.id.clone(),
         name: task.name.clone(),
         project,
@@ -4476,6 +4570,33 @@ impl CliHost for TauriHost {
     }
     fn find_role_pty(&self, task_id: &str, kind: &str) -> Result<String, String> {
         crate::find_role_pty(&self.app.state::<crate::PtyManager>(), task_id, kind)
+    }
+    fn write_task_badges(
+        &self,
+        task_id: &str,
+        op: &crate::BadgeOp,
+    ) -> Result<(Vec<crate::TaskBadge>, bool), crate::BadgeWriteError> {
+        crate::task_badges_write(task_id, op)
+    }
+    fn push_task_badges(&self, params: serde_json::Value) {
+        static QUEUE: OnceLock<mpsc::Sender<serde_json::Value>> = OnceLock::new();
+        let tx = QUEUE.get_or_init(|| {
+            let (tx, rx) = mpsc::channel();
+            let app = self.app.clone();
+            std::thread::spawn(move || {
+                run_badge_pusher(
+                    rx,
+                    || webview_ready().wait(Duration::ZERO),
+                    |params| {
+                        if let Err(e) = webview_rpc(&app, "task_badges", params, Duration::from_secs(5)) {
+                            eprintln!("[cli] task_badges push failed: {e}");
+                        }
+                    },
+                )
+            });
+            tx
+        });
+        let _ = tx.send(params);
     }
     fn find_tab_pty(&self, task_id: &str, tab_id: &str) -> Result<String, String> {
         crate::find_tab_pty(&self.app.state::<crate::PtyManager>(), task_id, tab_id)
@@ -5209,6 +5330,21 @@ fn webview_rpc(
     timeout: Duration,
 ) -> Result<serde_json::Value, String> {
     webview_rpc_stream(app, method, params, timeout, &mut |_| {})
+}
+
+/// The one thread that sends `task_badges` pushes, in queue order. A push
+/// dequeued before the webview's RPC listener exists is dropped: the
+/// webview's first `loadAll` reads the badges from disk anyway.
+fn run_badge_pusher(
+    rx: mpsc::Receiver<serde_json::Value>,
+    ready: impl Fn() -> bool,
+    mut send: impl FnMut(serde_json::Value),
+) {
+    for params in rx {
+        if ready() {
+            send(params);
+        }
+    }
 }
 
 /// Emit a typed request into the webview and block for the final
@@ -6225,6 +6361,9 @@ pub(crate) mod test_support {
         /// reload handle_rename performs sees the persisted rename the
         /// way the real webview's task_rename write would provide it.
         pub(crate) renames: Mutex<HashMap<String, String>>,
+        /// id -> badges written through `write_task_badges`, overlaid on
+        /// `tasks` the way the real write lands on disk.
+        pub(crate) badges: Mutex<HashMap<String, Vec<crate::TaskBadge>>>,
         pub(crate) killed: Mutex<Vec<String>>,
         /// (tasks with agents, live agents) the stub reports for `quit`.
         pub(crate) live_agents: (u32, u32),
@@ -6292,6 +6431,7 @@ pub(crate) mod test_support {
                 setup_chunks: Vec::new(),
                 extra_tasks: Mutex::new(Vec::new()),
                 renames: Mutex::new(HashMap::new()),
+                badges: Mutex::new(HashMap::new()),
                 killed: Mutex::new(Vec::new()),
                 ops: Mutex::new(Vec::new()),
                 cache: AgentCache::new(),
@@ -6343,9 +6483,13 @@ pub(crate) mod test_support {
             let mut tasks = self.tasks.clone();
             tasks.extend(self.extra_tasks.lock().unwrap().iter().cloned());
             let renames = self.renames.lock().unwrap();
+            let badges = self.badges.lock().unwrap();
             for t in &mut tasks {
                 if let Some(n) = renames.get(&t.id) {
                     t.name = n.clone();
+                }
+                if let Some(b) = badges.get(&t.id) {
+                    t.badges = b.clone();
                 }
             }
             (self.projects.clone(), tasks)
@@ -6474,6 +6618,21 @@ pub(crate) mod test_support {
                     "aux" => "no aux terminal is open in this task".into(),
                     _ => "no agent is running in this task".into(),
                 })
+        }
+        fn write_task_badges(
+            &self,
+            task_id: &str,
+            op: &crate::BadgeOp,
+        ) -> Result<(Vec<crate::TaskBadge>, bool), crate::BadgeWriteError> {
+            let (_, tasks) = self.projects_tasks();
+            let t = tasks.iter().find(|t| t.id == task_id).ok_or(crate::BadgeWriteError::NoSuchTask)?;
+            let mut badges = t.badges.clone();
+            let changed = crate::apply_badge_op(&mut badges, op)?;
+            self.badges.lock().unwrap().insert(task_id.to_string(), badges.clone());
+            Ok((badges, changed))
+        }
+        fn push_task_badges(&self, params: serde_json::Value) {
+            self.rpc_calls.lock().unwrap().push(("task_badges".into(), params));
         }
         fn find_tab_pty(&self, task_id: &str, tab_id: &str) -> Result<String, String> {
             self.tab_ptys
@@ -9571,6 +9730,191 @@ mod tests {
             assert_eq!(err.code, code, "{webview}");
             assert!(!err.message.starts_with("cli_tab_prop"), "sentinel leaked: {}", err.message);
         }
+    }
+
+    // ── task badges (v25) ────────────────────────────────────────────
+
+    fn badge_set(key: &str, text: &str, color: Option<&str>) -> Request {
+        req(
+            Command::BadgeSet {
+                task: Some("w3".into()),
+                project: None,
+                key: key.into(),
+                text: text.into(),
+                color: color.map(str::to_string),
+                cwd: None,
+            },
+            Some("tok"),
+        )
+    }
+
+    fn badge_rm(key: &str) -> Request {
+        req(Command::BadgeRemove { task: Some("w3".into()), project: None, key: key.into(), cwd: None }, Some("tok"))
+    }
+
+    fn badge_list() -> Request {
+        req(Command::BadgeList { task: Some("w3".into()), project: None, cwd: None }, Some("tok"))
+    }
+
+    fn badges_of(reply: Reply) -> proto::BadgesData {
+        assert!(reply.ok, "{:?}", reply.error);
+        let Some(ReplyData::Badges(d)) = reply.data else { panic!("expected badges") };
+        d
+    }
+
+    fn badge_pushes(host: &StubHost) -> Vec<serde_json::Value> {
+        host.rpc_calls.lock().unwrap().iter().filter(|(m, _)| m == "task_badges").map(|(_, p)| p.clone()).collect()
+    }
+
+    #[test]
+    fn badge_set_writes_the_task_and_pushes_the_full_list_to_the_webview() {
+        let host = StubHost::default();
+
+        handle(&badge_set("ci", "passing", Some("good")), &host);
+        let d = badges_of(handle(&badge_set("review", " waiting ", None), &host));
+
+        assert!(d.changed);
+        assert_eq!((d.task_id.as_str(), d.task.as_str()), ("w3", "web/solo"));
+        let want = vec![
+            proto::BadgeEntry { key: "ci".into(), text: "passing".into(), color: "good".into() },
+            proto::BadgeEntry { key: "review".into(), text: "waiting".into(), color: "neutral".into() },
+        ];
+        assert_eq!(d.badges, want, "text trimmed, colour defaulted to neutral");
+        let pushes = badge_pushes(&host);
+        assert_eq!(pushes.len(), 2);
+        assert_eq!(pushes[1], serde_json::json!({ "taskId": "w3", "badges": want }));
+    }
+
+    #[test]
+    fn badge_set_with_identical_text_and_colour_reports_unchanged_and_pushes_nothing() {
+        let host = StubHost::default();
+        handle(&badge_set("ci", "passing", Some("good")), &host);
+
+        let d = badges_of(handle(&badge_set("ci", "passing", Some("good")), &host));
+
+        assert!(!d.changed);
+        assert_eq!(badge_pushes(&host).len(), 1, "only the first set pushed");
+    }
+
+    #[test]
+    fn badge_pusher_sends_every_queued_push_in_queue_order() {
+        let (tx, rx) = mpsc::channel();
+        for n in 1..=3 {
+            tx.send(serde_json::json!({ "n": n })).unwrap();
+        }
+        drop(tx);
+        let mut sent = Vec::new();
+
+        run_badge_pusher(rx, || true, |p| sent.push(p["n"].as_i64().unwrap()));
+
+        assert_eq!(sent, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn badge_pusher_drops_pushes_dequeued_before_the_webview_is_ready_and_sends_later_ones() {
+        let (tx, rx) = mpsc::channel();
+        for n in 1..=3 {
+            tx.send(serde_json::json!({ "n": n })).unwrap();
+        }
+        drop(tx);
+        let checks = std::cell::Cell::new(0);
+        let mut sent = Vec::new();
+
+        run_badge_pusher(
+            rx,
+            || {
+                checks.set(checks.get() + 1);
+                checks.get() > 2
+            },
+            |p| sent.push(p["n"].as_i64().unwrap()),
+        );
+
+        assert_eq!(sent, vec![3]);
+    }
+
+    #[test]
+    fn badge_set_refuses_a_bad_key_text_or_colour_before_any_write() {
+        for (r, why) in [
+            (badge_set("Bad Key", "x", None), "badge key"),
+            (badge_set("ci", "a\nb", None), "one line"),
+            (badge_set("ci", "  ", None), "badge rm"),
+            (badge_set("ci", "x", Some("red")), "unknown colour"),
+        ] {
+            let host = StubHost::default();
+
+            let err = handle(&r, &host).error.expect("refused");
+
+            assert_eq!(err.code, ErrorCode::BadRequest, "{why}");
+            assert!(err.message.contains(why), "{why}: {}", err.message);
+            assert!(host.badges.lock().unwrap().is_empty(), "{why}: wrote");
+            assert!(host.rpc_calls.lock().unwrap().is_empty(), "{why}: pushed");
+        }
+    }
+
+    #[test]
+    fn badge_set_of_a_ninth_key_is_bad_request_naming_badge_rm() {
+        let host = StubHost::default();
+        for i in 0..proto::BADGES_PER_TASK {
+            handle(&badge_set(&format!("k{i}"), "x", None), &host);
+        }
+
+        let err = handle(&badge_set("ninth", "x", None), &host).error.expect("refused");
+
+        assert_eq!(err.code, ErrorCode::BadRequest);
+        assert!(err.message.contains("termic badge rm <key>"), "{}", err.message);
+    }
+
+    #[test]
+    fn badge_verbs_on_an_unknown_task_are_not_found() {
+        let host = StubHost::default();
+        let r = req(
+            Command::BadgeSet { task: Some("nope".into()), project: None, key: "ci".into(), text: "x".into(), color: None, cwd: None },
+            Some("tok"),
+        );
+
+        let err = handle(&r, &host).error.expect("refused");
+
+        assert_eq!(err.code, ErrorCode::NotFound);
+    }
+
+    #[test]
+    fn badge_rm_of_a_missing_key_is_ok_with_changed_false_and_no_push() {
+        let host = StubHost::default();
+
+        let d = badges_of(handle(&badge_rm("ci"), &host));
+
+        assert!(!d.changed);
+        assert!(badge_pushes(&host).is_empty());
+    }
+
+    #[test]
+    fn badge_rm_of_a_present_key_removes_it_and_pushes() {
+        let host = StubHost::default();
+        handle(&badge_set("ci", "passing", None), &host);
+        handle(&badge_set("review", "waiting", None), &host);
+
+        let d = badges_of(handle(&badge_rm("ci"), &host));
+
+        assert!(d.changed);
+        assert_eq!(d.badges.iter().map(|b| b.key.as_str()).collect::<Vec<_>>(), vec!["review"]);
+        assert_eq!(badge_pushes(&host).last().unwrap()["badges"][0]["key"], "review");
+    }
+
+    #[test]
+    fn badge_list_reads_the_task_record_without_any_rpc_and_list_json_carries_badges() {
+        let host = StubHost::default();
+        handle(&badge_set("ci", "passing", Some("#3b82f6")), &host);
+        host.rpc_calls.lock().unwrap().clear();
+
+        let d = badges_of(handle(&badge_list(), &host));
+        let list = handle(&req(Command::List { project: None, quiet: false }, Some("tok")), &host);
+
+        assert!(!d.changed);
+        assert_eq!(d.badges[0].color, "#3b82f6");
+        assert!(host.rpc_calls.lock().unwrap().is_empty());
+        let Some(ReplyData::List(l)) = list.data else { panic!("expected list") };
+        let solo = l.tasks.iter().find(|t| t.id == "w3").unwrap();
+        assert_eq!(solo.badges, d.badges);
     }
 
     // ── tab titles (GH #331) ─────────────────────────────────────────

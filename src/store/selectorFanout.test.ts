@@ -167,6 +167,30 @@ describe("selector fan-out budget (bear trap 5)", () => {
     expect(r.invalidations).toBe(1);
   });
 
+  it("an unchanged badge write notifies nobody (bear trap 8)", () => {
+    const ids = Array.from({ length: SUBSCRIBERS }, (_, i) => `task-${i}`);
+    const badges = [{ key: "ci", text: "passing", color: "good" }];
+    useApp.setState({ tasks: ids.map(id => ({ id, badges }) as Task) });
+    const subs = ids.map(id => (s: AppState) => s.tasks.find(t => t.id === id));
+
+    const r = measureFanout(subs, WRITES, () =>
+      useApp.getState().setTaskBadges("task-7", [{ key: "ci", text: "passing", color: "good" }]));
+
+    expect(r.selectorRuns).toBe(0);
+  });
+
+  it("a badge write reaches only its own task's selector", () => {
+    const ids = Array.from({ length: SUBSCRIBERS }, (_, i) => `task-${i}`);
+    useApp.setState({ tasks: ids.map(id => ({ id }) as Task) });
+    const subs = ids.map(id => (s: AppState) => s.tasks.find(t => t.id === id));
+
+    const r = measureFanout(subs, 1, () =>
+      useApp.getState().setTaskBadges("task-7", [{ key: "ci", text: "failing", color: "error" }]));
+
+    expect(r.invalidations).toBe(1);
+    expect(r.perSub[7]).toBe(1);
+  });
+
   it("absent tasks share one frozen EMPTY_TABS reference", () => {
     // This is what keeps `invalidations` at 0 for a task with no tabs yet.
     // A `?? []` here would allocate per call and re-render every frame.

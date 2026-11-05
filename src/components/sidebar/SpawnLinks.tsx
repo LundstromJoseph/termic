@@ -105,7 +105,9 @@ export function SpawnLinksOverlay({ containerRef }: { containerRef: RefObject<HT
         const el = root.querySelector<HTMLElement>(`[data-sidebar-task-id="${CSS.escape(taskId)}"]`);
         if (!el) return null; // collapsed, filtered out, or scrolled away in a closed project
         const r = el.getBoundingClientRect();
-        return { x: r.left - box.left + root.scrollLeft, y: r.top - box.top + root.scrollTop + r.height / 2 };
+        // Centre on the title line: a row with badges is taller than its name.
+        const line = (el.querySelector("[data-task-row-line]") ?? el).getBoundingClientRect();
+        return { x: r.left - box.left + root.scrollLeft, y: line.top - box.top + root.scrollTop + line.height / 2 };
       };
       const next: Line[] = [];
       for (const [p, c] of pairs) {

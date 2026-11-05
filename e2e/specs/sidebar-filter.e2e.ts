@@ -438,11 +438,12 @@ describe("sidebar filter bar", () => {
       const state = row.querySelector('[data-testid="task-state-slot"]') as HTMLElement | null;
       const menu = row.querySelector('[data-testid="task-menu-trigger"]') as HTMLElement | null;
       const slot = state?.parentElement ?? null;
-      // The wrapper also holds expanded tab rows; the slots live in its header.
-      const header = slot?.parentElement ?? null;
+      // The slots end the header's title line; the header's padding is the edge.
+      const line = slot?.parentElement ?? null;
+      const header = row.querySelector(`[data-sidebar-task-id="${id}"]`);
       const s = state?.getBoundingClientRect(), m = menu?.getBoundingClientRect(), h = header?.getBoundingClientRect();
       return {
-        slotIsLast: !!slot && header!.lastElementChild === slot,
+        slotIsLast: !!slot && line!.lastElementChild === slot,
         sameSlot: !!slot && menu?.parentElement === slot,
         sameBox: !!s && !!m && Math.abs(s.left - m.left) < 1 && Math.abs(s.width - m.width) < 1,
         slotWidth: slot ? Math.round(slot.getBoundingClientRect().width) : null,

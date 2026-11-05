@@ -694,6 +694,14 @@ pub fn prop_text(p: &termic_proto::PropData, wrote: bool) -> String {
     out.trim_end().to_string()
 }
 
+/// `badge list`: one `key: text (color)` line per badge.
+pub fn badges_text(d: &termic_proto::BadgesData) -> String {
+    if d.badges.is_empty() {
+        return "No badges.".into();
+    }
+    d.badges.iter().map(|b| format!("{}: {} ({})", b.key, b.text, b.color)).collect::<Vec<_>>().join("\n")
+}
+
 /// `tab --tab X --title Y`: what the tab is called now. `reset` is the
 /// `--title ""` form, where the title printed is the automatic one.
 pub fn tab_rename_text(t: &TabData, reset: bool) -> String {
@@ -918,6 +926,7 @@ mod tests {
     fn summary() -> TaskSummary {
         TaskSummary {
             props: Default::default(),
+            badges: Vec::new(),
             id: "id-1".into(),
             name: "fix-auth".into(),
             project: "web".into(),
@@ -934,6 +943,21 @@ mod tests {
             group: None,
             spawned_by: None,
         }
+    }
+
+    #[test]
+    fn badges_text_says_no_badges_when_empty_and_one_line_per_badge_otherwise() {
+        let mut d = termic_proto::BadgesData { task_id: "w1".into(), task: "web/x".into(), badges: Vec::new(), changed: false };
+        let empty = badges_text(&d);
+        d.badges = vec![
+            termic_proto::BadgeEntry { key: "ci".into(), text: "passing".into(), color: "good".into() },
+            termic_proto::BadgeEntry { key: "review".into(), text: "waiting on bob".into(), color: "#3b82f6".into() },
+        ];
+
+        let two = badges_text(&d);
+
+        assert_eq!(empty, "No badges.");
+        assert_eq!(two, "ci: passing (good)\nreview: waiting on bob (#3b82f6)");
     }
 
     #[test]

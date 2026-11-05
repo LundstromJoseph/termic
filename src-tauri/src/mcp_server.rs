@@ -782,7 +782,7 @@ fn rpc_response(server: &McpServer, req: &HttpRequest) -> (u16, Vec<u8>) {
 /// (`agent_overview!` in termic-cli/src/lib.rs): keep the two in step. The
 /// point is the first sentence: an agent that does not realise it is running
 /// INSIDE a Termic task never thinks to start siblings or report back.
-const MCP_INSTRUCTIONS: &str = "Termic runs coding agents side by side, each in its own task (a git worktree, or the project's main checkout, with its own terminal), listed in the app's sidebar. If your environment has TERMIC_TASK_ID, you are one of those agents, running INSIDE a Termic task right now, and these tools drive the app around you. From there you can: launch new tasks with their own agents (task_new; in your project they join your task's group in the sidebar, in another they are linked to your task instead; you name the group for the batch of work with task_group); prompt another task's agent (task_send; it queues behind a busy agent's turn, and now=true skips that queue for a message that cannot wait) and read what it produced (task_log, task_result); open another agent tab in a task (task_tab); retitle your own task (task_rename); label your tab with what you are working on, shown on the task's sidebar row (task_prop, e.g. ticket=ABC-1; pass your TERMIC_TAB_ID as tab); and keep notes, plans, findings, logs and reports the user should READ in scratchpads (scratchpad_new, scratchpad_write): a tab in your task that updates live and stays out of git, so use one instead of dropping temporary .md files into the repo. A multi-repo project holds several repos, possibly many (project_list shows each project's type and members): task_new worktrees only the members you name in members (none without it). Coordinate by prompting each other rather than blocking: end a prompt with how the other agent should report back to you (a task_send to your task id), and ask for that report every time it finishes or gets stuck, follow-up work included, until a human tells it to stop. Sign every prompt you send another agent, first line and last: [message from agent:<your agent> task:<your task name> id:<your TERMIC_TASK_ID>] ... -- agent:<your agent> task:<your task name> id:<your TERMIC_TASK_ID>, with the values written out (there is no shell here to fill them in; TERMIC_TASK holds your task name). A prompt that arrives WITH that header came from another agent, not the user: the id is where to reply. Report back there every time you finish or get stuck, follow-up work included, and stop only when a human tells you to. When Termic set this client up, it tells the server which task you run in, so task_rename, task_group, task_tab and task_prop default to your own task, exactly like the CLI; name other tasks explicitly. If this machine is paired with others on its network (peer_list), task_new, task_send, task_wait, task_result and task_list take peer:<machine> to run THERE, and peer_call runs any other tool there: put peer:<this machine's name> in your signature and ask for the reply as a task_send with peer:<this machine> back to your task id; a prompt whose header carries peer:<machine> came from that machine, so answer it, or ask it for help when stuck, with task_send peer:<machine> to the id in that header. Without TERMIC_TASK_ID you are driving Termic from outside it.";
+const MCP_INSTRUCTIONS: &str = "Termic runs coding agents side by side, each in its own task (a git worktree, or the project's main checkout, with its own terminal), listed in the app's sidebar. If your environment has TERMIC_TASK_ID, you are one of those agents, running INSIDE a Termic task right now, and these tools drive the app around you. From there you can: launch new tasks with their own agents (task_new; in your project they join your task's group in the sidebar, in another they are linked to your task instead; you name the group for the batch of work with task_group); prompt another task's agent (task_send; it queues behind a busy agent's turn, and now=true skips that queue for a message that cannot wait) and read what it produced (task_log, task_result); open another agent tab in a task (task_tab); retitle your own task (task_rename); label your tab with what you are working on, shown on the task's sidebar row (task_prop, e.g. ticket=ABC-1; pass your TERMIC_TAB_ID as tab); put a coloured status badge under your task's name (task_badge_set, e.g. key=ci text=passing color=good); and keep notes, plans, findings, logs and reports the user should READ in scratchpads (scratchpad_new, scratchpad_write): a tab in your task that updates live and stays out of git, so use one instead of dropping temporary .md files into the repo. A multi-repo project holds several repos, possibly many (project_list shows each project's type and members): task_new worktrees only the members you name in members (none without it). Coordinate by prompting each other rather than blocking: end a prompt with how the other agent should report back to you (a task_send to your task id), and ask for that report every time it finishes or gets stuck, follow-up work included, until a human tells it to stop. Sign every prompt you send another agent, first line and last: [message from agent:<your agent> task:<your task name> id:<your TERMIC_TASK_ID>] ... -- agent:<your agent> task:<your task name> id:<your TERMIC_TASK_ID>, with the values written out (there is no shell here to fill them in; TERMIC_TASK holds your task name). A prompt that arrives WITH that header came from another agent, not the user: the id is where to reply. Report back there every time you finish or get stuck, follow-up work included, and stop only when a human tells you to. When Termic set this client up, it tells the server which task you run in, so task_rename, task_group, task_tab, task_prop, task_badge_set, task_badge_remove and task_badge_list default to your own task, exactly like the CLI; name other tasks explicitly. If this machine is paired with others on its network (peer_list), task_new, task_send, task_wait, task_result and task_list take peer:<machine> to run THERE, and peer_call runs any other tool there: put peer:<this machine's name> in your signature and ask for the reply as a task_send with peer:<this machine> back to your task id; a prompt whose header carries peer:<machine> came from that machine, so answer it, or ask it for help when stuck, with task_send peer:<machine> to the id in that header. Without TERMIC_TASK_ID you are driving Termic from outside it.";
 
 /// UnsupportedProtocolVersionError. The `supported` list has to be
 /// machine-readable in `data`: that is what a client retries from, and
@@ -1007,7 +1007,7 @@ const P_LIBRARY: ParamDef = ParamDef {
     description: "Prompt-library selector (see the prompts tool): a prompt id like builtin:review, or its exact title. Delivers that prompt's body; with prompt too, the body, a blank line, then prompt.",
     cli_flag: Some("--library"),
 };
-/// The scratchpad verbs take the task as `--task`, not a positional.
+/// The scratchpad and badge verbs take the task as `--task`, not a positional.
 const P_PAD_TASK: ParamDef = ParamDef {
     name: "task",
     json_type: "string",
@@ -1637,6 +1637,55 @@ const TOOLS: &[ToolDef] = &[
         }),
     },
     ToolDef {
+        name: "task_badge_set",
+        cli_verb: "badge set",
+        description: "Set a coloured status badge under the task's name in the sidebar (ci=passing). The same key replaces it.",
+        params: &[
+            P_PAD_TASK,
+            P_PROJECT,
+            ParamDef { name: "key", json_type: "string", required: true, description: "[a-z0-9_-], max 32.", cli_flag: Some("key") },
+            ParamDef { name: "text", json_type: "string", required: true, description: "One line, max 40.", cli_flag: Some("text") },
+            ParamDef { name: "color", json_type: "string", required: false, description: "good, warning, error, neutral (default) or a hex.", cli_flag: Some("--color") },
+        ],
+        destructive: false,
+        read_only: false,
+        build: |a| Ok(Command::BadgeSet {
+            task: arg_str(a, "task")?,
+            project: arg_str(a, "project")?,
+            key: need_str(a, "key")?,
+            text: need_str(a, "text")?,
+            color: arg_str(a, "color")?,
+            cwd: None,
+        }),
+    },
+    ToolDef {
+        name: "task_badge_remove",
+        cli_verb: "badge rm",
+        description: "Remove a task's badge by key.",
+        params: &[
+            P_PAD_TASK,
+            P_PROJECT,
+            ParamDef { name: "key", json_type: "string", required: true, description: "The badge key.", cli_flag: Some("key") },
+        ],
+        destructive: false,
+        read_only: false,
+        build: |a| Ok(Command::BadgeRemove {
+            task: arg_str(a, "task")?,
+            project: arg_str(a, "project")?,
+            key: need_str(a, "key")?,
+            cwd: None,
+        }),
+    },
+    ToolDef {
+        name: "task_badge_list",
+        cli_verb: "badge list",
+        description: "List a task's badges.",
+        params: &[P_PAD_TASK, P_PROJECT],
+        destructive: false,
+        read_only: true,
+        build: |a| Ok(Command::BadgeList { task: arg_str(a, "task")?, project: arg_str(a, "project")?, cwd: None }),
+    },
+    ToolDef {
         name: "task_agents",
         cli_verb: "agents",
         description: "List the agent CLIs this app can run: the ids task_new and task_tab accept, with whether each is installed and usable, and each agent's named accounts (what task_new's account takes) with the default. Without this a caller has to guess an agent id and read the refusal.",
@@ -2084,6 +2133,7 @@ fn peer_call_command(args: &Args) -> Result<(Command, String), String> {
 /// `group` and `tab` default to `$TERMIC_TASK_ID`.
 const SELF_DEFAULT_TOOLS: &[&str] = &[
     "task_rename", "task_group", "task_tab", "task_prop",
+    "task_badge_set", "task_badge_remove", "task_badge_list",
     "scratchpad_new", "scratchpad_write", "scratchpad_read", "scratchpad_list",
     "scratchpad_remove", "scratchpad_clear",
     "schedule_show", "schedule_set", "schedule_run", "schedule_delete",
@@ -4008,7 +4058,10 @@ mod tests {
         // 28336: task_new's `members`, parity with `termic new --member`:
         // the multi-repo members a task worktrees. One sentence; the
         // refusals live in the server's errors.
-        const RECORDED: usize = 28336;
+        // 29814: task_badge_set / task_badge_remove / task_badge_list, parity
+        // with `termic badge set|rm|list`. Three tools, not one, because each
+        // verb is its own CLI subcommand; a clause each, limits by name only.
+        const RECORDED: usize = 29814;
         assert!(
             size <= RECORDED,
             "serialized tools/list grew to {size} bytes (recorded {RECORDED}); grow it consciously"
@@ -4173,6 +4226,31 @@ mod tests {
         // It defaults to the caller's task, like the CLI.
         assert!(SELF_DEFAULT_TOOLS.contains(&"task_prop"));
         assert_eq!(tool_entry(tool)["annotations"]["destructiveHint"], false);
+    }
+
+    #[test]
+    fn task_badge_tools_build_their_wire_commands_and_default_to_the_callers_task() {
+        let tool = |n: &str| TOOLS.iter().find(|t| t.name == n).unwrap();
+        let build = |n: &str, v: serde_json::Value| (tool(n).build)(v.as_object().unwrap());
+
+        let set = build("task_badge_set", serde_json::json!({ "task": "t", "key": "ci", "text": "passing", "color": "good" })).unwrap();
+        let set_bare = build("task_badge_set", serde_json::json!({ "key": "ci", "text": "x" })).unwrap();
+        let no_text = build("task_badge_set", serde_json::json!({ "key": "ci" }));
+        let rm = build("task_badge_remove", serde_json::json!({ "task": "t", "key": "ci" })).unwrap();
+        let list = build("task_badge_list", serde_json::json!({})).unwrap();
+
+        assert!(matches!(&set, Command::BadgeSet { task: Some(t), key, text, color: Some(c), .. }
+            if t == "t" && key == "ci" && text == "passing" && c == "good"));
+        assert!(matches!(&set_bare, Command::BadgeSet { task: None, color: None, .. }));
+        assert!(no_text.unwrap_err().contains("text"));
+        assert!(matches!(&rm, Command::BadgeRemove { task: Some(t), key, .. } if t == "t" && key == "ci"));
+        assert!(matches!(list, Command::BadgeList { task: None, project: None, cwd: None }));
+        for n in ["task_badge_set", "task_badge_remove", "task_badge_list"] {
+            assert!(SELF_DEFAULT_TOOLS.contains(&n), "{n}");
+        }
+        assert_eq!(tool_entry(tool("task_badge_set"))["annotations"]["destructiveHint"], false);
+        assert_eq!(tool_entry(tool("task_badge_remove"))["annotations"]["destructiveHint"], false);
+        assert_eq!(tool_entry(tool("task_badge_list"))["annotations"]["readOnlyHint"], true);
     }
 
     #[test]

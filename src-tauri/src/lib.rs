@@ -743,6 +743,12 @@ pub struct Task {
     /// so existing task files are unchanged. See `schedules.rs`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schedule: Option<schedules::TaskSchedule>,
+    /// Badges agents put under the task's name (`termic badge`), in the order
+    /// each key was first set. Written solely by `task_badges_write`; every
+    /// other writer is a load-modify-save of the whole record and carries it
+    /// forward. Empty is not serialized, so existing task files are unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub badges: Vec<TaskBadge>,
     /// Which profile this record was loaded from. IN-MEMORY ONLY
     /// (`serde(skip)`): nothing is written into the JSON on disk, so there is
     /// no schema bump and an existing install's files stay byte-identical.
@@ -817,6 +823,15 @@ pub struct TabProp {
     pub value: String,
     #[serde(default)]
     pub since: i64,
+}
+
+/// One task badge (`termic badge`). `color` is a `termic_proto::BADGE_TONES`
+/// entry or a hex.
+#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct TaskBadge {
+    pub key: String,
+    pub text: String,
+    pub color: String,
 }
 
 /// One scheduled queue message. Sent the first time its tab is live and
@@ -4577,7 +4592,7 @@ fn pty_spawn(
             // agent to prompt them back (src/lib/agentBriefing.ts).
             cmd.env(
                 "TERMIC_CLI_HELP",
-                "You are running INSIDE a Termic task ($TERMIC_TASK_ID): Termic runs coding agents side by side, each task a git worktree (or the main checkout) with its own terminal, listed in the app's sidebar. TERMIC_CLI is the Termic control CLI, which drives the app around you. Run `\"$TERMIC_CLI\" help --json` for the full command surface. Prompt an existing task with `\"$TERMIC_CLI\" send <task> -p \"...\"`; create one with `\"$TERMIC_CLI\" new <name> -p \"...\"` and, in that prompt, ask it to report back to you (the signed reply below) every time it finishes or gets stuck, follow-up work included, until a human tells it to stop: that is how results come back, and it arrives in your own terminal. If no report arrives, `result` and `logs` read what it produced. Ask for a file (e.g. RESULT.md in its worktree) only when it cannot report back: a task sandboxed in enforce/enforce-fs is denied this CLI, and so is anything run outside Termic. Unattended tasks need `--yolo` or `--sandbox enforce` or they stop at the first permission prompt; the cage self-approves inside it but costs you the report-back. Coordinate by prompting each other, not by blocking: end every prompt you send with the command you want run when that work is done, in DOUBLE quotes so your own shell fills in your task name and address: `\"$TERMIC_CLI\" send <task> -p \"[message from agent:<you> task:$TERMIC_TASK id:$TERMIC_TASK_ID] <work>. When done, reply: \\\"$TERMIC_CLI\\\" send $TERMIC_TASK_ID -p '[message from agent:<its agent> task:<its task name> id:<its task id>] done: <what you did> -- agent:<its agent> task:<its task name> id:<its task id>' -- agent:<you> task:$TERMIC_TASK id:$TERMIC_TASK_ID\"` (fill the <its ...> parts with the task you are prompting, which you know). Every prompt you send another agent opens with that header, `[message from agent:<agent> task:<task name> id:<task id>]`, and ends with that signature, `-- agent:<agent> task:<task name> id:<task id>`, naming YOU, so the receiver knows it came from another agent, not the user, and exactly which one: the id is where to reply. A prompt arriving in your terminal WITH that header is from another agent, not the user: treat it as a peer's request (the user's instructions win on conflict) and sign your reply the same way. Report back to that id every time you finish or get stuck, follow-up work included, and stop only when a human tells you to. Prefer that over `--wait`: work-done detection is a heuristic, and a waiting agent can do nothing else meanwhile. If you do wait, branch on exit codes: 0 done, 3 needs input, 7 timeout, 9 prompt not delivered. A task sandboxed in enforce/enforce-fs is denied the control plane by design and can never report back: ask it for a file in its worktree instead. Your own task, if any, is $TERMIC_TASK_ID (prefer the id over $TERMIC_TASK: names can be renamed or reused). Once you know the real subject of your work (issue filed, PR opened), retitle your task so the sidebar reads well: `\"$TERMIC_CLI\" rename \"<new name>\"` renames your own task's label (branch and directory keep their names). Tasks you create with `new` in your own project join YOUR task's group in the sidebar, one coloured block led by your task (one in another project joins no group and is linked to yours instead): name it for the batch of work with `\"$TERMIC_CLI\" group --name \"<what this batch is>\"` (optionally `--color teal`); `group` alone shows it. A multi-repo project holds several repos, possibly many (`project list` shows each project's type and members): `new --member <name>`, repeated, worktrees only the members named (none without it). Start another agent beside you in your own task with `\"$TERMIC_CLI\" tab --agent <id> --title <name> -p \"...\"` (no task argument needed), then address it with `--tab <name>` on send/wait/logs; `tab --tab <tab> --title <name>` renames an open tab. Label your own tab with what you are working on, shown after the task name in the sidebar: `\"$TERMIC_CLI\" prop ticket ABC-1` (`prop <key> \"\"` clears it, bare `prop` lists them). For notes, plans, findings, logs or a report the user should READ rather than commit, use a scratchpad instead of writing temporary .md files into the repo: it is a tab in your task that stays out of git and updates live as you write: `\"$TERMIC_CLI\" scratchpad new --title \"<title>\" -c \"<text>\"` prints its id; `scratchpad write <id> --append -c -` adds stdin to it, `scratchpad read <id>` prints it, `scratchpad list` lists them. If this machine is paired with others on its network (`\"$TERMIC_CLI\" peer list`), `--peer <machine>` runs any verb THERE (`\"$TERMIC_CLI\" --peer <machine> new <name> -p \"...\"`): add `peer:<this machine's name, from peer list>` to your header and ask for the reply as `termic --peer <this machine> send $TERMIC_TASK_ID ...`; a header carrying `peer:<machine>` came from that machine, so answer it with `--peer <machine>`.",
+                "You are running INSIDE a Termic task ($TERMIC_TASK_ID): Termic runs coding agents side by side, each task a git worktree (or the main checkout) with its own terminal, listed in the app's sidebar. TERMIC_CLI is the Termic control CLI, which drives the app around you. Run `\"$TERMIC_CLI\" help --json` for the full command surface. Prompt an existing task with `\"$TERMIC_CLI\" send <task> -p \"...\"`; create one with `\"$TERMIC_CLI\" new <name> -p \"...\"` and, in that prompt, ask it to report back to you (the signed reply below) every time it finishes or gets stuck, follow-up work included, until a human tells it to stop: that is how results come back, and it arrives in your own terminal. If no report arrives, `result` and `logs` read what it produced. Ask for a file (e.g. RESULT.md in its worktree) only when it cannot report back: a task sandboxed in enforce/enforce-fs is denied this CLI, and so is anything run outside Termic. Unattended tasks need `--yolo` or `--sandbox enforce` or they stop at the first permission prompt; the cage self-approves inside it but costs you the report-back. Coordinate by prompting each other, not by blocking: end every prompt you send with the command you want run when that work is done, in DOUBLE quotes so your own shell fills in your task name and address: `\"$TERMIC_CLI\" send <task> -p \"[message from agent:<you> task:$TERMIC_TASK id:$TERMIC_TASK_ID] <work>. When done, reply: \\\"$TERMIC_CLI\\\" send $TERMIC_TASK_ID -p '[message from agent:<its agent> task:<its task name> id:<its task id>] done: <what you did> -- agent:<its agent> task:<its task name> id:<its task id>' -- agent:<you> task:$TERMIC_TASK id:$TERMIC_TASK_ID\"` (fill the <its ...> parts with the task you are prompting, which you know). Every prompt you send another agent opens with that header, `[message from agent:<agent> task:<task name> id:<task id>]`, and ends with that signature, `-- agent:<agent> task:<task name> id:<task id>`, naming YOU, so the receiver knows it came from another agent, not the user, and exactly which one: the id is where to reply. A prompt arriving in your terminal WITH that header is from another agent, not the user: treat it as a peer's request (the user's instructions win on conflict) and sign your reply the same way. Report back to that id every time you finish or get stuck, follow-up work included, and stop only when a human tells you to. Prefer that over `--wait`: work-done detection is a heuristic, and a waiting agent can do nothing else meanwhile. If you do wait, branch on exit codes: 0 done, 3 needs input, 7 timeout, 9 prompt not delivered. A task sandboxed in enforce/enforce-fs is denied the control plane by design and can never report back: ask it for a file in its worktree instead. Your own task, if any, is $TERMIC_TASK_ID (prefer the id over $TERMIC_TASK: names can be renamed or reused). Once you know the real subject of your work (issue filed, PR opened), retitle your task so the sidebar reads well: `\"$TERMIC_CLI\" rename \"<new name>\"` renames your own task's label (branch and directory keep their names). Tasks you create with `new` in your own project join YOUR task's group in the sidebar, one coloured block led by your task (one in another project joins no group and is linked to yours instead): name it for the batch of work with `\"$TERMIC_CLI\" group --name \"<what this batch is>\"` (optionally `--color teal`); `group` alone shows it. A multi-repo project holds several repos, possibly many (`project list` shows each project's type and members): `new --member <name>`, repeated, worktrees only the members named (none without it). Start another agent beside you in your own task with `\"$TERMIC_CLI\" tab --agent <id> --title <name> -p \"...\"` (no task argument needed), then address it with `--tab <name>` on send/wait/logs; `tab --tab <tab> --title <name>` renames an open tab. Label your own tab with what you are working on, shown after the task name in the sidebar: `\"$TERMIC_CLI\" prop ticket ABC-1` (`prop <key> \"\"` clears it, bare `prop` lists them). Put a coloured status on your task's sidebar row, under its name: `\"$TERMIC_CLI\" badge set ci failing --color error` (good, warning, error, neutral or a hex; the same key replaces it, `badge rm <key>` removes it, `badge list` lists them). For notes, plans, findings, logs or a report the user should READ rather than commit, use a scratchpad instead of writing temporary .md files into the repo: it is a tab in your task that stays out of git and updates live as you write: `\"$TERMIC_CLI\" scratchpad new --title \"<title>\" -c \"<text>\"` prints its id; `scratchpad write <id> --append -c -` adds stdin to it, `scratchpad read <id>` prints it, `scratchpad list` lists them. If this machine is paired with others on its network (`\"$TERMIC_CLI\" peer list`), `--peer <machine>` runs any verb THERE (`\"$TERMIC_CLI\" --peer <machine> new <name> -p \"...\"`): add `peer:<this machine's name, from peer list>` to your header and ask for the reply as `termic --peer <this machine> send $TERMIC_TASK_ID ...`; a header carrying `peer:<machine>` came from that machine, so answer it with `--peer <machine>`.",
             );
         }
     }
@@ -6863,6 +6878,7 @@ fn task_open_repo(
         group: None,
         spawned_by: None,
         schedule: None,
+        badges: Vec::new(),
     };
     save_task(&task).map_err(|e| e.to_string())?;
     if let Ok(pdir) = profile_dir(&proj.profile) {
@@ -7299,6 +7315,7 @@ fn task_import_worktree(
         group: None,
         spawned_by: None,
         schedule: None,
+        badges: Vec::new(),
     };
     save_task(&task).map_err(|e| e.to_string())?;
     if let Ok(pdir) = profile_dir(&proj.profile) {
@@ -7747,6 +7764,7 @@ fn task_create_sync(app: AppHandle, args: CreateTaskArgs) -> Result<Task, String
         group: None,
         spawned_by: None,
         schedule: None,
+        badges: Vec::new(),
     };
     save_task(&task).map_err(|e| e.to_string())?;
     drop(port_guard);
@@ -8152,6 +8170,7 @@ fn task_create_multi_sync(app: AppHandle, args: CreateMultiArgs) -> Result<Task,
         group: None,
         spawned_by: None,
         schedule: None,
+        badges: Vec::new(),
     };
     save_task(&task).map_err(|e| e.to_string())?;
     drop(port_guard);
@@ -9316,6 +9335,70 @@ async fn task_set_schedule(id: String, schedule: Option<schedules::TaskSchedule>
     tauri::async_runtime::spawn_blocking(move || task_set_schedule_sync(&id, schedule))
         .await
         .map_err(|e| e.to_string())?
+}
+
+pub(crate) enum BadgeOp {
+    Set { key: String, text: String, color: String },
+    Remove { key: String },
+}
+
+#[derive(Debug, PartialEq)]
+pub(crate) enum BadgeWriteError {
+    NoSuchTask,
+    Invalid(String),
+    TooMany,
+    Io(String),
+}
+
+/// Apply `op` to a task's badges; Ok(true) when anything changed.
+pub(crate) fn apply_badge_op(badges: &mut Vec<TaskBadge>, op: &BadgeOp) -> Result<bool, BadgeWriteError> {
+    match op {
+        BadgeOp::Set { key, text, color } => {
+            let problem = termic_proto::badge_key_problem(key)
+                .or_else(|| termic_proto::badge_text_problem(text))
+                .or_else(|| termic_proto::badge_color_problem(color));
+            if let Some(p) = problem {
+                return Err(BadgeWriteError::Invalid(p));
+            }
+            let next = TaskBadge { key: key.clone(), text: text.trim().to_string(), color: color.clone() };
+            if let Some(cur) = badges.iter_mut().find(|b| &b.key == key) {
+                let changed = *cur != next;
+                *cur = next;
+                return Ok(changed);
+            }
+            if badges.len() >= termic_proto::BADGES_PER_TASK {
+                return Err(BadgeWriteError::TooMany);
+            }
+            badges.push(next);
+            Ok(true)
+        }
+        BadgeOp::Remove { key } => {
+            if let Some(p) = termic_proto::badge_key_problem(key) {
+                return Err(BadgeWriteError::Invalid(p));
+            }
+            let before = badges.len();
+            badges.retain(|b| &b.key != key);
+            Ok(badges.len() != before)
+        }
+    }
+}
+
+/// Serialises badge writes only; see docs/data-model.md "Task badges" for the
+/// race with other whole-record writers.
+static BADGE_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
+/// Load, apply and save (only when changed) one badge op. Keep the window
+/// between load and save free of other IO: no lock covers the task file
+/// against the other writers.
+pub(crate) fn task_badges_write(id: &str, op: &BadgeOp) -> Result<(Vec<TaskBadge>, bool), BadgeWriteError> {
+    let _guard = BADGE_LOCK.lock();
+    let mut list = load_tasks_all();
+    let task = list.iter_mut().find(|t| t.id == id).ok_or(BadgeWriteError::NoSuchTask)?;
+    let changed = apply_badge_op(&mut task.badges, op)?;
+    if changed {
+        save_task(task).map_err(|e| BadgeWriteError::Io(e.to_string()))?;
+    }
+    Ok((task.badges.clone(), changed))
 }
 
 fn task_set_schedule_sync(id: &str, schedule: Option<schedules::TaskSchedule>) -> Result<(), String> {
@@ -37575,7 +37658,7 @@ mod schedule_record_tests {
         }
     }
 
-    fn task(id: &str, root: &Path) -> Task {
+    pub(super) fn task(id: &str, root: &Path) -> Task {
         Task {
             id: id.into(),
             project_id: "p1".into(),
@@ -37590,7 +37673,7 @@ mod schedule_record_tests {
 
     /// A registered plain-folder project rooted in its own tempdir, plus a
     /// task in it. Plain folder so these tests need no git.
-    fn setup(root: &Path, ids: &[&str]) {
+    pub(super) fn setup(root: &Path, ids: &[&str]) {
         save_projects(&[Project {
             id: "p1".into(),
             name: "p1".into(),
@@ -37800,5 +37883,162 @@ mod schedule_record_tests {
                 }
             }
         }
+    }
+}
+
+// ── task badges on the task record (`termic badge`) ────────────────────────
+#[cfg(test)]
+mod badge_record_tests {
+    use super::schedule_record_tests::{setup, task};
+    use super::*;
+    use crate::test_support::with_scratch_data_dir;
+
+    fn set(key: &str, text: &str, color: &str) -> BadgeOp {
+        BadgeOp::Set { key: key.into(), text: text.into(), color: color.into() }
+    }
+
+    fn badge(key: &str, text: &str, color: &str) -> TaskBadge {
+        TaskBadge { key: key.into(), text: text.into(), color: color.into() }
+    }
+
+    fn stored(id: &str) -> Vec<TaskBadge> {
+        load_tasks_all().into_iter().find(|t| t.id == id).unwrap().badges
+    }
+
+    #[test]
+    fn apply_badge_op_appends_a_new_key_with_trimmed_text() {
+        let mut badges = vec![badge("a", "1", "good")];
+
+        let changed = apply_badge_op(&mut badges, &set("b", "  two ", "#abc")).unwrap();
+
+        assert!(changed);
+        assert_eq!(badges, vec![badge("a", "1", "good"), badge("b", "two", "#abc")]);
+    }
+
+    #[test]
+    fn apply_badge_op_replaces_an_existing_key_in_place() {
+        let mut badges = vec![badge("a", "1", "good"), badge("b", "2", "neutral")];
+
+        let changed = apply_badge_op(&mut badges, &set("a", "one", "error")).unwrap();
+
+        assert!(changed);
+        assert_eq!(badges, vec![badge("a", "one", "error"), badge("b", "2", "neutral")]);
+    }
+
+    #[test]
+    fn apply_badge_op_set_identical_to_the_stored_badge_reports_unchanged() {
+        let mut badges = vec![badge("a", "1", "good")];
+
+        let changed = apply_badge_op(&mut badges, &set("a", " 1 ", "good")).unwrap();
+
+        assert!(!changed);
+    }
+
+    #[test]
+    fn apply_badge_op_remove_reports_whether_the_key_was_present() {
+        let mut badges = vec![badge("a", "1", "good")];
+
+        let absent = apply_badge_op(&mut badges, &BadgeOp::Remove { key: "z".into() }).unwrap();
+        let present = apply_badge_op(&mut badges, &BadgeOp::Remove { key: "a".into() }).unwrap();
+
+        assert!(!absent);
+        assert!(present);
+        assert!(badges.is_empty());
+    }
+
+    #[test]
+    fn apply_badge_op_refuses_a_ninth_key_but_still_replaces_one_of_eight() {
+        let mut badges: Vec<TaskBadge> =
+            (0..termic_proto::BADGES_PER_TASK).map(|i| badge(&format!("k{i}"), "x", "neutral")).collect();
+
+        let ninth = apply_badge_op(&mut badges, &set("ninth", "x", "neutral"));
+        let replace = apply_badge_op(&mut badges, &set("k0", "y", "neutral"));
+
+        assert_eq!(ninth, Err(BadgeWriteError::TooMany));
+        assert_eq!(replace, Ok(true));
+        assert_eq!(badges.len(), termic_proto::BADGES_PER_TASK);
+    }
+
+    #[test]
+    fn apply_badge_op_refuses_invalid_key_text_and_colour() {
+        for op in [set("Bad", "x", "good"), set("a", "", "good"), set("a", "x", "red"), BadgeOp::Remove { key: "-x".into() }] {
+            let mut badges = Vec::new();
+
+            let r = apply_badge_op(&mut badges, &op);
+
+            assert!(matches!(r, Err(BadgeWriteError::Invalid(_))), "{r:?}");
+            assert!(badges.is_empty());
+        }
+    }
+
+    #[test]
+    fn task_badges_write_persists_and_reports_no_such_task() {
+        let project = tempfile::tempdir().unwrap();
+        with_scratch_data_dir(|_| {
+            setup(project.path(), &["t"]);
+
+            let (badges, changed) = task_badges_write("t", &set("ci", "passing", "good")).unwrap();
+            let missing = task_badges_write("nope", &set("ci", "passing", "good"));
+
+            assert!(changed);
+            assert_eq!(badges, vec![badge("ci", "passing", "good")]);
+            assert_eq!(stored("t"), badges);
+            assert_eq!(missing.unwrap_err(), BadgeWriteError::NoSuchTask);
+        });
+    }
+
+    // The tasks dir is made read-only, so a write would fail: the unchanged
+    // call succeeding proves it never tried.
+    #[cfg(unix)]
+    #[test]
+    fn task_badges_write_of_an_unchanged_badge_writes_nothing() {
+        use std::os::unix::fs::PermissionsExt;
+        let project = tempfile::tempdir().unwrap();
+        with_scratch_data_dir(|data| {
+            setup(project.path(), &["t"]);
+            task_badges_write("t", &set("ci", "passing", "good")).unwrap();
+            let dir = data.join("tasks");
+            fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).unwrap();
+
+            let same = task_badges_write("t", &set("ci", "passing", "good"));
+            let gone = task_badges_write("t", &BadgeOp::Remove { key: "absent".into() });
+            let changed = task_badges_write("t", &set("ci", "failing", "error"));
+
+            fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+            assert_eq!(same.unwrap().1, false);
+            assert_eq!(gone.unwrap().1, false);
+            assert!(matches!(changed, Err(BadgeWriteError::Io(_))), "the read-only guard is not doing anything");
+        });
+    }
+
+    #[test]
+    fn a_task_without_badges_writes_no_badges_key() {
+        let json = serde_json::to_value(task("t", Path::new("/tmp/x"))).unwrap();
+
+        assert!(json.get("badges").is_none(), "existing task files would change");
+    }
+
+    #[test]
+    fn every_other_writer_carries_the_badges_forward() {
+        let project = tempfile::tempdir().unwrap();
+        with_scratch_data_dir(|_| {
+            setup(project.path(), &["t", "other"]);
+            let (b, _) = task_badges_write("t", &set("ci", "passing", "good")).unwrap();
+
+            task_set_yolo("t".into(), true).unwrap();
+            assert_eq!(stored("t"), b, "task_set_yolo");
+            task_rename("t".into(), "renamed".into()).unwrap();
+            assert_eq!(stored("t"), b, "task_rename");
+            let tab: PersistedTabInput = serde_json::from_value(serde_json::json!({
+                "id": "tab1", "cli": "claude", "is_default": true,
+            }))
+            .unwrap();
+            task_set_tabs("t".into(), vec![tab]).unwrap();
+            assert_eq!(stored("t"), b, "task_set_tabs");
+            let mut list = load_tasks_all();
+            let changed = apply_group_new(&mut list, "t", None).unwrap();
+            save_changed(&list, changed).unwrap();
+            assert_eq!(stored("t"), b, "group writers");
+        });
     }
 }

@@ -300,11 +300,22 @@ it keeps now (the "Lens" concept of the sidebar rethink):
   checkout only, worktree only, or none, since whichever one you mostly use
   is noise. Other surfaces (board cards, the dashboard, History, the
   breadcrumb) always show both.
+- **Badges** (`termic badge`, `TaskBadges.tsx`) are a second line under
+  the title line, inside the same header, and wrap. The header is a
+  column; the title line (`data-task-row-line`) keeps the fixed height, so
+  the chevron, the PR mark and the trailing slot stay centred on the name
+  and `SpawnLinks` anchors on that line, not the taller header. Each badge
+  is a soft tint (`.termic-badge`: the colour as text over a 16%
+  `color-mix` of it): `good` is `--color-ok`, `warning` `--color-warn`,
+  `error` `--color-err`, `neutral` `--color-fg-dim`, and a hex is drawn as
+  given, with no contrast correction. Compact rows, the board and the
+  status section do not show them.
 - **The branch name is a separate choice.** The `taskBranchName` pref
   (same two places, its own row, never folded into the glyph setting)
   prints the row's branch after the name, right-aligned inside the name
-  column (so PR numbers keep their edge), or on a second line, which is the
-  one row that is taller than `--task-row-h`. Off by default: a worktree's
+  column (so PR numbers keep their edge), or on a second line, which makes
+  the title line taller than `--task-row-h` (badges, above, are the other way
+  a row grows). Off by default: a worktree's
   branch is usually `<prefix>/<task name>`, and printing it doubled the row
   width (GH #73 shipped it always-on and it was walked back the same day).
   A branch-labelled row (GH #260) never repeats it. Main-checkout branches

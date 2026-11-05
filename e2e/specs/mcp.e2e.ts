@@ -315,7 +315,8 @@ describe("MCP endpoint: files, discovery, and the Phase A boundary", () => {
       "task_result", "task_log", "task_diff", "task_open", "task_rename", "task_group",
       "scratchpad_new", "scratchpad_write", "scratchpad_read", "scratchpad_list",
       "scratchpad_remove", "scratchpad_clear",
-      "task_apply", "task_archive", "task_tab", "task_tab_close", "task_prop", "task_agents",
+      "task_apply", "task_archive", "task_tab", "task_tab_close", "task_prop",
+      "task_badge_set", "task_badge_remove", "task_badge_list", "task_agents",
       "prompts", "project_list", "project_add", "project_remove",
       // #380: recurring schedules, the `termic schedule` verbs.
       "schedule_list", "schedule_show", "schedule_set", "schedule_run", "schedule_delete",
