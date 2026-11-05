@@ -1441,6 +1441,7 @@ export default {
     rootHint: "The git repo on disk. Do not move or delete this directory; remove the project in Termic instead.",
     tasksPathLabel: "Tasks path",
     tasksPathHint: "Where this repo's new worktrees live. Leave it empty to follow the default tasks path. A value here overrides that for this repo only: a full path (starting with / or ~) becomes the worktree root as-is, a relative one resolves inside the repo. Don't move or delete subdirectories; archive tasks in Termic instead.",
+    tasksPathBare: "Bare repository: each task's worktree lives in the repo folder, named after its branch (feature/foo goes in feature/foo).",
     tasksPathConflict: "This lands inside the repo itself, so new tasks would be created on top of your working tree. Changes here are not being saved until you pick a directory outside the repo, or a subdirectory of it.",
     removeLabel: "Remove project",
     removeHint: "Drops the project from the sidebar + archives every task under it. The actual repo at <1>{{path}}</1> stays on disk.",

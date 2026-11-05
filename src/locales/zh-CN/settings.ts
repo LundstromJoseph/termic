@@ -1417,6 +1417,7 @@ export default {
     rootHint: "磁盘上的 git 仓库。不要移动或删除这个目录；请在 Termic 中移除项目。",
     tasksPathLabel: "任务路径",
     tasksPathHint: "此仓库新工作树的位置。留空则跟随默认任务路径。在这里填的值只对此仓库生效：完整路径（以 / 或 ~ 开头）原样作为工作树根目录，相对路径则在仓库内解析。不要移动或删除其子目录；请在 Termic 中归档任务。",
+    tasksPathBare: "裸仓库：每个任务的工作树都放在仓库文件夹中，以其分支命名（feature/foo 放在 feature/foo）。",
     tasksPathConflict: "这个路径落在仓库内部，新任务会盖在你的工作树上。在你选择仓库之外的目录或它的子目录之前，这里的改动不会被保存。",
     removeLabel: "移除项目",
     removeHint: "从侧边栏移除项目并归档其下的所有任务。<1>{{path}}</1> 处的真实仓库仍保留在磁盘上。",

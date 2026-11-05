@@ -278,6 +278,16 @@ pub struct Project {
     #[serde(default)]
     pub non_git: bool,
 
+    /// Whether `root_path` is a bare repo with its git dir at `<root>/.git`
+    /// (`git clone --bare <url> <root>/.git`). Such a project has no main
+    /// checkout, and its worktrees live directly in `root_path`, named after
+    /// their branch (`feature/foo` lands at `<root>/feature/foo`).
+    /// `None` = not detected yet (rows written before this existed), filled
+    /// once on load by `detect_missing_bare_flags`. Detected, never taken
+    /// from the wire.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bare: Option<bool>,
+
     /// UI-only sidebar group label. Projects sharing the same non-empty
     /// value render under one collapsible folder header in the project
     /// list. Purely presentational — no effect on paths, git, or
@@ -330,6 +340,16 @@ pub struct Project {
     /// See docs/profiles.md, "the profile rides the DATA, not the call".
     #[serde(skip)]
     pub profile: ProfileId,
+}
+
+impl Project {
+    pub(crate) fn is_bare(&self) -> bool {
+        self.bare == Some(true)
+    }
+}
+
+fn bare_no_main_checkout(p: &Project) -> String {
+    format!("{} is a bare repository, so it has no main checkout. Create a worktree task instead.", p.name)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
@@ -1582,6 +1602,9 @@ fn tasks_root_from_default(default_path: &str, p: &Project) -> PathBuf {
 /// absolute path already names a single project's worktree root, so the
 /// project dir name is NOT appended to it. Pure, for the same reason as above.
 fn project_tasks_root_with(default_path: &str, p: &Project) -> PathBuf {
+    if p.is_bare() {
+        return lexically_normalize(Path::new(&p.root_path));
+    }
     let over = p.tasks_path.trim();
     if over.is_empty() {
         return tasks_root_from_default(default_path, p);
@@ -1598,6 +1621,9 @@ fn project_tasks_root_with(default_path: &str, p: &Project) -> PathBuf {
 /// the stored global setting. This is the value Settings → Repository shows as
 /// the "Tasks path" placeholder.
 fn project_tasks_root_default(p: &Project) -> PathBuf {
+    if p.is_bare() {
+        return lexically_normalize(Path::new(&p.root_path));
+    }
     tasks_root_from_default(&load_settings_in(&p.profile).default_tasks_path, p)
 }
 
@@ -1609,7 +1635,11 @@ fn project_tasks_root_default(p: &Project) -> PathBuf {
 /// create doesn't re-read settings.json just for this.
 fn project_tasks_root(default_path: &str, p: &Project) -> Result<PathBuf, String> {
     let root = project_tasks_root_with(default_path, p);
-    check_tasks_root(&root, Path::new(&p.root_path))?;
+    // A bare root has no working tree to land on; slot safety there comes
+    // from `clear_bare_slot_or_refuse`, which never deletes.
+    if !p.is_bare() {
+        check_tasks_root(&root, Path::new(&p.root_path))?;
+    }
     Ok(root)
 }
 
@@ -1752,6 +1782,7 @@ fn load_projects_in(id: &ProfileId) -> Vec<Project> {
     // something actually changed (load_projects runs on nearly every IPC).
     let mut dirty = migrate_legacy_members(&mut list);
     dirty |= repoint_task_bases(&mut list);
+    dirty |= detect_missing_bare_flags(&mut list);
     // Normalization, not a migration: never dirties the list on its own, but
     // runs BEFORE the save so a write triggered above carries it for free.
     normalize_default_task_paths(&mut list);
@@ -1768,6 +1799,48 @@ fn load_projects_in(id: &ProfileId) -> Vec<Project> {
         let _ = save_projects_at(&f, &list);
     }
     list
+}
+
+/// A bare repo whose git dir sits at `<root>/.git` (a `.git` dir from
+/// `git clone --bare <url> <root>/.git`, or a `.git` file pointing at
+/// `<root>/.bare`). A root that IS the git dir (`repo.git/`) is not: its
+/// worktrees would sit beside `hooks/` and `refs/`. `None` when git itself
+/// fails (not on PATH yet, dubious ownership), so no answer gets persisted.
+fn detect_bare_layout(root: &Path) -> Option<bool> {
+    if root.join(".git").symlink_metadata().is_err() {
+        return Some(false);
+    }
+    git(&["rev-parse", "--is-bare-repository"], root).ok().map(|s| s.trim() == "true")
+}
+
+/// Fill `Project.bare` for rows written before it existed. Persisted so the
+/// git spawn happens once per project, not on every load. A missing root or a
+/// failed git call stays `None` and is retried on the next app launch: a root
+/// that failed is not tried again this process, since loads run on nearly
+/// every IPC.
+fn detect_missing_bare_flags(list: &mut [Project]) -> bool {
+    static TRIED: parking_lot::Mutex<Option<HashSet<String>>> = parking_lot::Mutex::new(None);
+    detect_missing_bare_flags_in(list, TRIED.lock().get_or_insert_with(HashSet::new))
+}
+
+fn detect_missing_bare_flags_in(list: &mut [Project], tried: &mut HashSet<String>) -> bool {
+    let mut changed = false;
+    for p in list.iter_mut() {
+        if p.bare.is_none()
+            && p.project_type == ProjectType::Single
+            && !p.non_git
+            && Path::new(&p.root_path).is_dir()
+            && !tried.contains(&p.root_path)
+        {
+            p.bare = detect_bare_layout(Path::new(&p.root_path));
+            if p.bare.is_some() {
+                changed = true;
+            } else {
+                tried.insert(p.root_path.clone());
+            }
+        }
+    }
+    changed
 }
 
 /// Repoint each project's worktree base from the pre-rename `~/APP_DIR/workspaces/`
@@ -1911,6 +1984,19 @@ fn expand_tilde_env(value: &str) -> String {
     }
 }
 
+/// Out of scope for multi projects: members would need bare-aware modes,
+/// links and copies (docs/gotchas.md). Checked where members are saved, and
+/// again where they are linked, for a member saved before this check existed.
+fn refuse_bare_member(root: &Path) -> Result<(), String> {
+    if detect_bare_layout(root) == Some(true) {
+        return Err(format!(
+            "{} is a bare repository, which can't be a multi-repo member. Add it as its own project.",
+            root.display(),
+        ));
+    }
+    Ok(())
+}
+
 /// Normalize an inbound inline member: expand + canonicalize its path,
 /// detect git, fill name / base_branch defaults. The frontend may send a
 /// bare path; Rust is the source of truth for the stored fields.
@@ -1922,6 +2008,7 @@ fn normalize_member(mut m: ProjectMember) -> Result<ProjectMember, String> {
     if !pb.is_dir() { return Err(format!("{} is not a directory", expanded)); }
     let canon = dunce::canonicalize(&pb).map_err(|e| e.to_string())?;
     let is_git = git(&["rev-parse", "--git-dir"], &canon).is_ok();
+    if is_git { refuse_bare_member(&canon)?; }
     m.non_git = !is_git;
     m.root_path = canon.to_string_lossy().into_owned();
     if m.name.trim().is_empty() {
@@ -2508,10 +2595,18 @@ fn link_config_dir(repo: &Path, wt: &Path, name: &str) {
     }
 }
 
-/// Append `name` to the repo's `.git/info/exclude` (shared across the repo's
+/// Append `name` to the repo's `info/exclude` (shared across the repo's
 /// worktrees, local + never committed) if not already present. Best-effort.
+/// Resolved through git because `.git` can be a file (a bare root pointing at
+/// `<root>/.bare`).
 fn ensure_git_excluded(repo: &Path, name: &str) {
-    append_exclude_line(&repo.join(".git").join("info").join("exclude"), name);
+    let common = git(&["rev-parse", "--git-common-dir"], repo)
+        .map(|s| {
+            let p = PathBuf::from(s.trim());
+            if p.is_absolute() { p } else { repo.join(p) }
+        })
+        .unwrap_or_else(|_| repo.join(".git"));
+    append_exclude_line(&common.join("info").join("exclude"), name);
 }
 
 /// Append `line` to an exclude file if no line already equals it. Best-effort.
@@ -3949,7 +4044,7 @@ fn member_effective_files_to_copy(repo: &str, override_val: &[String]) -> Vec<St
 /// in src/lib/namedPorts.ts for the Settings editor.
 const RESERVED_PORT_NAMES: &[&str] = &[
     "TERMIC_PORT", "TERMIC_TASK", "TERMIC_TASK_ID", "TERMIC_TAB_ID", "TERMIC_WORKSPACE_NAME",
-    "TERMIC_CLI", "TERMIC_CLI_HELP", "CONDUCTOR_PORT", "CONDUCTOR_WORKSPACE_NAME",
+    "TERMIC_CLI", "TERMIC_CLI_HELP", "TERMIC_PROJECT_ROOT", "CONDUCTOR_PORT", "CONDUCTOR_WORKSPACE_NAME",
     "PORT", "PATH", "HOME", "SHELL", "USER", "TMPDIR", "PWD", "TERM", "LANG",
     "COLORFGBG", "COLORTERM", "TERM_PROGRAM", "TERM_PROGRAM_VERSION",
     "TMUX", "STY", "ZELLIJ", "KITTY_WINDOW_ID", "GHOSTTY_RESOURCES_DIR",
@@ -6001,17 +6096,19 @@ fn delete_profile_data(
             // delete leaves a dangling registration in the parent repo's
             // .git/worktrees/ until someone runs `git worktree prune`, and the
             // parent repo is the user's own, not ours to leave dirty.
-            let repo = load_projects_all()
+            let proj = load_projects_all()
                 .into_iter()
-                .find(|p| p.id == t.project_id)
-                .map(|p| PathBuf::from(p.root_path));
-            if let Some(repo) = repo {
-                let _ = git(&["worktree", "remove", "--force", &t.path], &repo);
+                .find(|p| p.id == t.project_id);
+            if let Some(p) = &proj {
+                let _ = git(&["worktree", "remove", "--force", &t.path], Path::new(&p.root_path));
             }
             if wt.exists() {
                 dlog(&format!("[profiles] worktree survived removal, leaving it: {}", t.path));
             }
-            prune_empty_worktree_ancestors(&wt);
+            prune_after_worktree_removal(
+                &wt,
+                proj.as_ref().filter(|p| p.is_bare()).map(|p| Path::new(&p.root_path)),
+            );
         }
     }
 
@@ -6157,6 +6254,7 @@ fn project_add(window: tauri::Window, root_path: String, non_git: Option<bool>) 
         code_intel_commands: None,
         code_intel_settings: None,
         non_git,
+        bare: if non_git { None } else { detect_bare_layout(&canon) },
         // New projects start ungrouped; grouping is a sidebar action.
         group: None,
         run_scripts: Vec::new(),
@@ -6353,6 +6451,7 @@ fn project_add_multi(window: tauri::Window, root_path: String, name: String, mem
         code_intel_servers: None,
         code_intel_commands: None,
         non_git,
+        bare: None,
         group: None,
         run_scripts: Vec::new(),
         on_pr_merge: None,
@@ -6466,6 +6565,7 @@ fn project_update(mut p: Project) -> Result<(), String> {
         }
         let mode_changed = p.customization_mode != slot.customization_mode;
         p.profile = slot.profile.clone();
+        p.bare = slot.bare;
         let current_p = p.clone();
         *slot = p;
         save_projects(&list).map_err(|e| e.to_string())?;
@@ -6557,7 +6657,8 @@ fn normalized_resume_override(raw: Option<String>) -> Option<String> {
 /// common "parent folder holding its repos" layout) needs no link at all, and
 /// must not be mistaken for foreign content: skipping it left the task with an
 /// empty composition, so the Git panel showed neither repo.
-fn link_repo_mode_members(host_dir: &Path, members: &[ProjectMember], first_port: u16) -> Vec<TaskMember> {
+fn link_repo_mode_members(host_dir: &Path, members: &[ProjectMember], first_port: u16) -> Result<Vec<TaskMember>, String> {
+    for pm in members { refuse_bare_member(Path::new(&pm.root_path))?; }
     let mut composition: Vec<TaskMember> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
     let mut next_member_port = first_port;
@@ -6608,7 +6709,7 @@ fn link_repo_mode_members(host_dir: &Path, members: &[ProjectMember], first_port
             files_to_copy:  pm.files_to_copy.clone(),
         });
     }
-    composition
+    Ok(composition)
 }
 
 /// Open the project's main repo checkout as a task (no git worktree).
@@ -6653,6 +6754,9 @@ fn task_open_repo(
 ) -> Result<Task, String> {
     let proj = load_projects_all().into_iter().find(|p| p.id == project_id)
         .ok_or("project not found")?;
+    if proj.is_bare() {
+        return Err(bare_no_main_checkout(&proj));
+    }
     // CLI is now explicit — frontend's "+ Open repo with <agent>" passes the
     // chosen agent id. Falls back to project default for older call sites.
     let cli = cli.unwrap_or_else(|| proj.default_cli.clone());
@@ -6713,7 +6817,7 @@ fn task_open_repo(
         // Per-member port counter — same scheme as worktree-mode
         // multi-repo: task.port + i + 1 so members can run
         // PORT=$TERMIC_PORT npm run dev without colliding.
-        composition = link_repo_mode_members(host_dir, &link_members, port + 1);
+        composition = link_repo_mode_members(host_dir, &link_members, port + 1)?;
         // Repo-root tasks SHARE the host checkout and its managed
         // gitignore block: it must cover every live sibling's member
         // dirs too, or a subset open would un-ignore links another
@@ -6968,6 +7072,68 @@ fn clear_orphan_or_refuse(repo: &Path, wt_path: &Path, advice: &str) -> Result<(
     // exactly the dir that can still be held on Windows.
     fs_link::remove_dir_all_settled(wt_path).map_err(|e|
         format!("orphan directory at {} couldn't be removed: {}.{advice}", wt_path.display(), e))
+}
+
+/// The bare-project arm of `clear_orphan_or_refuse`. The tasks root IS the
+/// user's repo folder, holding their own files beside the worktrees, so a
+/// name match is no evidence a dir is a leftover: this never deletes. An
+/// empty dir is left for `worktree add`, which accepts one.
+fn clear_bare_slot_or_refuse(root: &Path, wt_path: &Path, advice: &str) -> Result<(), String> {
+    let mut ancestors: Vec<&Path> = wt_path.ancestors().skip(1)
+        .take_while(|a| *a != root && a.starts_with(root))
+        .collect();
+    ancestors.reverse();
+    for a in ancestors {
+        let Some(ftype) = slot_occupant(a) else { continue };
+        if ftype.is_symlink() || !ftype.is_dir() {
+            return Err(format!("{} is not a plain directory, so the worktree can't go under it.{advice}", a.display()));
+        }
+        if a.join(".git").symlink_metadata().is_ok() {
+            return Err(format!("{} is a checkout, and a worktree can't nest inside it.{advice}", a.display()));
+        }
+    }
+    let ftype = match slot_occupant(wt_path) {
+        Some(f) => f,
+        None => return Ok(()),
+    };
+    if ftype.is_symlink() || !ftype.is_dir() {
+        return Err(format!("something that isn't a directory sits at {}.{advice}", wt_path.display()));
+    }
+    let listed = git(&["worktree", "list", "--porcelain"], root).map_err(|e| e.to_string())?;
+    if worktree_listed(&listed, wt_path) {
+        return Err(format!("a worktree already lives at {}.{advice}", wt_path.display()));
+    }
+    if fs::read_dir(wt_path).map(|mut d| d.next().is_some()).unwrap_or(true) {
+        return Err(format!("{} already exists and is not empty.{advice}", wt_path.display()));
+    }
+    Ok(())
+}
+
+/// Where a bare project's worktree for `branch` goes: `<root>/<branch>`,
+/// nested on '/'. Each segment becomes a folder, so it must be one the
+/// filesystem accepts and must not hide (or collide with `.git`).
+fn bare_worktree_path(root: &Path, branch: &str) -> Result<PathBuf, String> {
+    const RESERVED: &[&str] = &[
+        "con", "prn", "aux", "nul",
+        "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8", "com9",
+        "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
+    ];
+    let mut out = root.to_path_buf();
+    for seg in branch.split('/') {
+        let bad = !is_plain_name(seg)
+            || seg.starts_with('.')
+            || (cfg!(windows) && (
+                seg.contains(['<', '>', ':', '"', '|', '?', '*', '\\'])
+                || seg.ends_with('.')
+                || seg.ends_with(' ')
+                || RESERVED.contains(&seg.split('.').next().unwrap_or("").to_ascii_lowercase().as_str())
+            ));
+        if bad {
+            return Err(format!("branch '{branch}' can't be used as a folder name ('{seg}'). Pick a different branch name."));
+        }
+        out.push(seg);
+    }
+    Ok(out)
 }
 
 /// The multi-repo arm of `clear_orphan_or_refuse`. The wrapper holds
@@ -7380,7 +7546,6 @@ fn task_create_sync(app: AppHandle, args: CreateTaskArgs) -> Result<Task, String
     // would be written to settings and then never used.
     let wt_root = project_tasks_root(&globals.default_tasks_path, &proj)?;
     fs::create_dir_all(&wt_root).map_err(|e| e.to_string())?;
-    let wt_path = wt_root.join(&slug);
 
     // Clean stale worktree metadata (refs to dirs the user removed manually,
     // or leftovers from a previous failed create) so `git worktree add` has
@@ -7388,11 +7553,15 @@ fn task_create_sync(app: AppHandle, args: CreateTaskArgs) -> Result<Task, String
     let _ = git(&["worktree", "prune"], &repo);
 
     // Already-claimed target: a live worktree or git-tracked dir refuses,
-    // a failed-create orphan is removed (fail-closed on git errors).
-    clear_orphan_or_refuse(
-        &repo, &wt_path,
-        " Pick a different task name, or move the tasks path outside the repo.",
-    )?;
+    // a failed-create orphan is removed (fail-closed on git errors). A bare
+    // project's slot is named after the branch, so it is checked once the
+    // branch resolves below.
+    if !proj.is_bare() {
+        clear_orphan_or_refuse(
+            &repo, &wt_root.join(&slug),
+            " Pick a different task name, or move the tasks path outside the repo.",
+        )?;
+    }
 
     // Reuse existing branch if present, else create new from base. If the
     // branch is already checked out in another worktree (often the main
@@ -7460,6 +7629,14 @@ fn task_create_sync(app: AppHandle, args: CreateTaskArgs) -> Result<Task, String
         })?
     } else {
         branch
+    };
+
+    let wt_path = if proj.is_bare() {
+        let p = bare_worktree_path(&wt_root, &branch)?;
+        clear_bare_slot_or_refuse(&repo, &p, " Pick a different branch, or import the existing worktree.")?;
+        p
+    } else {
+        wt_root.join(&slug)
     };
 
     let branch_exists = git(&["rev-parse", "--verify", &branch], &repo).is_ok();
@@ -7537,6 +7714,9 @@ fn task_create_sync(app: AppHandle, args: CreateTaskArgs) -> Result<Task, String
                     "branch '{branch}' is already checked out in another worktree, \
                      and git allows a branch in only one at a time."
                 )
+            } else if proj.is_bare() {
+                // The worktree folder is named after the branch, not the task.
+                format!("branch '{branch}' is already checked out elsewhere. Pick a different branch.")
             } else {
                 format!("branch '{branch}' is already checked out elsewhere. Pick a different task name.")
             });
@@ -7590,7 +7770,11 @@ fn task_create_sync(app: AppHandle, args: CreateTaskArgs) -> Result<Task, String
         emit_create_progress(&app, &task_id, format!("Copying {} file pattern(s): {}", copy_patterns.len(), copy_patterns.join(", ")));
     }
     for pat in &copy_patterns {
-        copy_matching(&repo, &wt_path, pat);
+        if proj.is_bare() {
+            copy_matching_from_bare_root(&repo, &wt_path, pat, common_gitdir.as_deref());
+        } else {
+            copy_matching(&repo, &wt_path, pat);
+        }
     }
 
     // Link the project's agent config dirs (`.claude/` and friends) into the
@@ -8308,6 +8492,7 @@ fn materialize_member(
     mp: &ProjectMember, spec: &CreateMultiMember, dir_name: &str,
     member_port: u16, task_branch: &str, do_fetch: bool,
 ) -> Result<TaskMember, String> {
+    refuse_bare_member(Path::new(&mp.root_path))?;
     let target = parent.join(dir_name);
     match spec.mode {
         MemberMode::RepoRoot => {
@@ -11655,14 +11840,40 @@ fn remove_dir_if_empty_ignoring_hidden(dir: &Path) -> bool {
 /// (never the home itself, which also holds `projects/`, nor anything outside
 /// it such as an imported worktree), and each step is the empty-only rmdir
 /// above, so it stops the moment a directory still has content.
-fn prune_empty_worktree_ancestors(worktree_path: &Path) {
-    let Some(home) = dirs::home_dir() else { return };
-    let app_home = home.join(APP_DIR);
+fn prune_empty_worktree_ancestors(worktree_path: &Path, app_home: &Path) {
     let mut cur = worktree_path.parent();
     while let Some(d) = cur {
-        if d == app_home || !d.starts_with(&app_home) { break; }
+        if d == app_home || !d.starts_with(app_home) { break; }
         if !remove_dir_if_empty_ignoring_hidden(d) { break; }
         cur = d.parent();
+    }
+}
+
+/// A bare project's worktree for `feature/foo` leaves `<root>/feature/`
+/// behind on archive. Prune empty dirs from the worktree's parent up to,
+/// never including, `root`. Strictly empty only: under a bare root these dirs
+/// may be the user's own, so a lone `.env.local` is content, not cruft.
+fn prune_empty_dirs_below(path: &Path, root: &Path) {
+    let mut cur = path.parent();
+    while let Some(d) = cur {
+        if d == root || !d.starts_with(root) { break; }
+        if fs::remove_dir(d).is_err() { break; }
+        cur = d.parent();
+    }
+}
+
+/// Prune what a removed worktree left empty. A bare project gets ONLY the
+/// strict prune: its root may sit under `~/APP_DIR`, where the ancestor prune
+/// would delete the user's dotfiles in a bare-root dir.
+fn prune_after_worktree_removal(worktree_path: &Path, bare_root: Option<&Path>) {
+    let Some(home) = dirs::home_dir() else { return };
+    prune_after_worktree_removal_in(worktree_path, bare_root, &home.join(APP_DIR));
+}
+
+fn prune_after_worktree_removal_in(worktree_path: &Path, bare_root: Option<&Path>, app_home: &Path) {
+    match bare_root {
+        Some(root) => prune_empty_dirs_below(worktree_path, root),
+        None => prune_empty_worktree_ancestors(worktree_path, app_home),
     }
 }
 
@@ -11743,7 +11954,8 @@ fn task_archive_sync(id: String, delete_branch: bool, skip_scripts: bool) -> Res
     }
 
     for (script, dir) in archive_script_plan(w, proj.as_ref(), skip_scripts) {
-        let _ = run_script(&script, &dir, w.port, &w.name, &w.extra_named_ports);
+        let root = proj.as_ref().map(|p| p.root_path.as_str()).unwrap_or("");
+        let _ = run_script(&script, &dir, w.port, &w.name, &w.extra_named_ports, root);
     }
 
     let mut errs = Vec::new();
@@ -11906,7 +12118,10 @@ fn task_archive_sync(id: String, delete_branch: bool, skip_scripts: bool) -> Res
     errs.extend(git_remove_err);
     // Tidy up now-empty ancestors (the project folder, then the legacy
     // `workspaces/` root once its last task is gone). Best-effort, empty-only.
-    prune_empty_worktree_ancestors(Path::new(&w.path));
+    prune_after_worktree_removal(
+        Path::new(&w.path),
+        proj.as_ref().filter(|p| p.is_bare()).map(|p| Path::new(&p.root_path)),
+    );
 
     w.archived = true;
     w.archived_at = Some(chrono::Utc::now().to_rfc3339());
@@ -12010,8 +12225,13 @@ fn task_restore_sync(app: AppHandle, id: String) -> Result<Task, String> {
             // stored record and an imported task's can point anywhere:
             // outside managed space "orphan" is a guess, not a fact.
             if under_tasks_root(&proj, &wt_path) {
-                clear_orphan_or_refuse(&repo, &wt_path,
-                    " Move or rename it, then restore again.")?;
+                if proj.is_bare() {
+                    clear_bare_slot_or_refuse(&repo, &wt_path,
+                        " Move or rename it, then restore again.")?;
+                } else {
+                    clear_orphan_or_refuse(&repo, &wt_path,
+                        " Move or rename it, then restore again.")?;
+                }
             } else if wt_path.exists() {
                 return Err(format!(
                     "task directory already exists at {}. Move or rename it, then restore again.",
@@ -12064,7 +12284,11 @@ fn task_restore_sync(app: AppHandle, id: String) -> Result<Task, String> {
 
             // Copy files_to_copy globs (same as creation).
             for pat in &effective_files_to_copy(&proj) {
-                copy_matching(&repo, &wt_path, pat);
+                if proj.is_bare() {
+                    copy_matching_from_bare_root(&repo, &wt_path, pat, common_gitdir.as_deref());
+                } else {
+                    copy_matching(&repo, &wt_path, pat);
+                }
             }
         } else {
             // Non-git project: just recreate the folder.
@@ -12201,7 +12425,7 @@ fn task_restore_sync(app: AppHandle, id: String) -> Result<Task, String> {
     if !is_multi && task.composition.is_empty() {
         let (setup, _, _) = effective_scripts(&proj);
         if !setup.trim().is_empty() {
-            run_script_streaming(setup, wt_path, task.port, task.name.clone(), task.extra_named_ports.clone(), app, task.id.clone());
+            run_script_streaming(setup, wt_path, task.port, task.name.clone(), task.extra_named_ports.clone(), proj.root_path.clone(), app, task.id.clone());
         }
     } else {
         // Same runner as create/update: resolves the .termic.yaml fallback
@@ -12227,7 +12451,7 @@ fn task_run_script(id: String, which: String) -> Result<String, String> {
     if script.trim().is_empty() {
         return Err("script empty".into());
     }
-    run_script(&script, Path::new(&w.path), w.port, &w.name, &w.extra_named_ports).map_err(|e| e.to_string())
+    run_script(&script, Path::new(&w.path), w.port, &w.name, &w.extra_named_ports, &p.root_path).map_err(|e| e.to_string())
 }
 
 /// The complete delta a task (worktree) produced vs its base, for the Agent
@@ -13218,6 +13442,9 @@ async fn project_git_checkout(project_id: String, branch: String) -> Result<Chec
             .into_iter()
             .find(|p| p.id == project_id)
             .ok_or("no project")?;
+        if p.is_bare() {
+            return Err(bare_no_main_checkout(&p));
+        }
         let cwd = PathBuf::from(&p.root_path);
         let dirty = !git(&["status", "--porcelain"], &cwd).map_err(|e| e.to_string())?.trim().is_empty();
         let mut stashed = false;
@@ -17536,6 +17763,47 @@ fn copy_file_or_dir_walk(src: &Path, dst: &Path, try_clone: bool) -> std::io::Re
 }
 
 fn copy_matching(repo: &Path, dst: &Path, pat: &str) {
+    copy_matching_inner(repo, dst, pat, false, None);
+}
+
+/// `copy_matching` from a bare project's root, which holds its worktrees
+/// beside the user's own files: a sibling task's checkout is never a source,
+/// and neither is a git dir inside the root (`.bare` in the `.git`-file layout).
+fn copy_matching_from_bare_root(repo: &Path, dst: &Path, pat: &str, common_gitdir: Option<&Path>) {
+    let git_rel = common_gitdir.and_then(|g| {
+        let g = fs::canonicalize(g).ok()?;
+        let r = fs::canonicalize(repo).ok()?;
+        g.strip_prefix(&r).ok().map(Path::to_path_buf)
+    });
+    // A true bare root IS the git dir: nothing inside it to leave out.
+    let git_rel = git_rel.filter(|r| !r.as_os_str().is_empty());
+    copy_matching_inner(repo, dst, pat, true, git_rel.as_deref());
+}
+
+/// Copy a matched file or dir, leaving out any checkout nested in it: a plain
+/// dir under a bare root (`config/`) can hold a task worktree (`config/x`).
+fn copy_skipping_checkouts(src: &Path, dst: &Path) -> std::io::Result<()> {
+    let meta = fs::symlink_metadata(src)?;
+    if !meta.is_dir() {
+        return copy_file_or_dir(src, dst);
+    }
+    if src.join(".git").symlink_metadata().is_ok() {
+        return Ok(());
+    }
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)?.flatten() {
+        let child = entry.path();
+        if let Err(e) = copy_skipping_checkouts(&child, &dst.join(entry.file_name())) {
+            eprintln!("copy {}: {e}", child.display());
+        }
+    }
+    Ok(())
+}
+
+fn copy_matching_inner(repo: &Path, dst: &Path, pat: &str, skip_checkouts: bool, skip_rel: Option<&Path>) {
+    let skipped = |rel: &Path| skip_rel.is_some_and(|s| rel.starts_with(s));
+    let is_checkout = |p: &Path| skip_checkouts && p.is_dir() && p.join(".git").symlink_metadata().is_ok();
+    let copy = |src: &Path, to: &Path| if skip_checkouts { copy_skipping_checkouts(src, to) } else { copy_file_or_dir(src, to) };
     // A blank pattern is NOT "the repo root". The textareas that feed these
     // lists split on newlines, so a trailing blank line arrives as `""` —
     // and `repo.join("")` is the repo itself, which exists, which would
@@ -17551,14 +17819,15 @@ fn copy_matching(repo: &Path, dst: &Path, pat: &str) {
         eprintln!("copy glob must stay inside the repo: {pat}");
         return;
     }
+    if skipped(rel_pattern) { return; }
     // Keep literal paths fast, especially large directories such as node_modules.
     let pat_path = repo.join(pat);
-    if pat_path.exists() {
+    if pat_path.exists() && !is_checkout(&pat_path) {
         let rel_dst = dst.join(pat);
         // Handles both files AND directories now — previously `fs::copy`
         // here silently no-op'd on dirs, which made `.venv` / `node_modules`
         // defaults a lie.
-        let _ = copy_file_or_dir(&pat_path, &rel_dst);
+        let _ = copy(&pat_path, &rel_dst);
         return;
     }
     let pattern = match glob::Pattern::new(pat) {
@@ -17594,13 +17863,14 @@ fn copy_matching(repo: &Path, dst: &Path, pat: &str) {
             let src = entry.path();
             let Ok(rel) = src.strip_prefix(repo) else { continue };
             if src.starts_with(dst) { continue; }
-            if entry.file_name() == ".git" { continue; }
+            if entry.file_name() == ".git" || skipped(rel) { continue; }
             let meta = match fs::symlink_metadata(&src) {
                 Ok(meta) => meta,
                 Err(e) => { eprintln!("copy glob {}: {e}", src.display()); continue; }
             };
+            if meta.file_type().is_dir() && is_checkout(&src) { continue; }
             if pattern.matches_path_with(rel, options) {
-                let _ = copy_file_or_dir(&src, &dst.join(rel));
+                let _ = copy(&src, &dst.join(rel));
             } else if meta.file_type().is_dir()
                 && max_depth.is_none_or(|depth| rel.components().count() < depth)
             {
@@ -17618,7 +17888,7 @@ fn copy_matching(repo: &Path, dst: &Path, pat: &str) {
 /// dev-loop moves (npm install, docker build, kubectl apply, etc.). The
 /// aux/scratch terminal is in the same bucket; sandbox specifically
 /// targets the agent PTY.
-fn run_script(script: &str, cwd: &Path, port: u16, name: &str, extra: &[NamedPort]) -> Result<String> {
+fn run_script(script: &str, cwd: &Path, port: u16, name: &str, extra: &[NamedPort], project_root: &str) -> Result<String> {
     // Same login-shell environment the PTY gets (see pty_spawn). `bash -l`
     // only sources bash's OWN profile, so a PATH/EDITOR/etc. the user set
     // in their real shell (fish/zsh rc) or a tool dir like ~/.bun/bin is
@@ -17632,6 +17902,9 @@ fn run_script(script: &str, cwd: &Path, port: u16, name: &str, extra: &[NamedPor
         .env("TERMIC_PORT", port.to_string())
         .env("TERMIC_WORKSPACE_NAME", name)
         .env("TERMIC_TASK", name);
+    if !project_root.is_empty() {
+        cmd.env("TERMIC_PROJECT_ROOT", project_root);
+    }
     for (k, v) in inject {
         cmd.env(k, v);
     }
@@ -17666,6 +17939,7 @@ fn run_script_streaming(
     port: u16,
     name: String,
     extra: Vec<NamedPort>,
+    project_root: String,
     app: AppHandle,
     ws_id: String,
 ) {
@@ -17692,6 +17966,9 @@ fn run_script_streaming(
             .env("PYTHONIOENCODING", "UTF-8")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        if !project_root.is_empty() {
+            cmd.env("TERMIC_PROJECT_ROOT", &project_root);
+        }
         for (k, v) in setup_inject {
             cmd.env(k, v);
         }
@@ -20282,6 +20559,9 @@ fn spotlight_start_sync(ws_id: String, app: AppHandle) -> Result<(), String> {
     let p = load_projects_all().into_iter().find(|p| p.id == w.project_id)
         .ok_or("project missing")?;
 
+    if p.is_bare() {
+        return Err(bare_no_main_checkout(&p));
+    }
     if !p.spotlight_enabled {
         return Err("Spotlight is not enabled for this project. Enable it in Repository Settings.".into());
     }
@@ -20641,6 +20921,7 @@ fn task_run_script_stream(
 
     let port = target_port;
     let name = w.name.clone();
+    let project_root = p.root_path.clone();
     let map_key_o = map_key.clone();
     let emit_out_o = emit_out.clone();
     let emit_done_o = emit_done.clone();
@@ -20693,6 +20974,7 @@ fn task_run_script_stream(
             .env("TERMIC_PORT", port.to_string())
             .env("TERMIC_WORKSPACE_NAME", &name)
             .env("TERMIC_TASK", &name)
+            .env("TERMIC_PROJECT_ROOT", &project_root)
             // Legacy aliases — keep scripts saved under the old name working
             // until users migrate their preview_url / scripts.
             .env("CONDUCTOR_PORT", port.to_string())
@@ -21293,6 +21575,8 @@ fn tasks_path_conflicts(window: tauri::Window, path: String, project_id: Option<
             // reporting it would block a save over an irrelevant project.
             None => p.tasks_path.trim().is_empty(),
         })
+        // A bare project's tasks root is its repo root, whatever the path says.
+        .filter(|p| !p.is_bare())
         .filter(|p| {
             // Both arms resolve the CANDIDATE `path`, never the stored value —
             // the point is to judge what the user just typed.
@@ -33170,7 +33454,7 @@ mod tests {
         let api = host.path().join("api");
         fs::create_dir(&ui).unwrap();
         fs::create_dir(&api).unwrap();
-        let comp = link_repo_mode_members(host.path(), &[repo_member("ui", &ui), repo_member("api", &api)], 20001);
+        let comp = link_repo_mode_members(host.path(), &[repo_member("ui", &ui), repo_member("api", &api)], 20001).unwrap();
         let names: Vec<&str> = comp.iter().map(|m| m.dir_name.as_str()).collect();
         assert_eq!(names, ["ui", "api"]);
         assert_eq!(comp[0].path, ui.to_string_lossy());
@@ -33184,13 +33468,13 @@ mod tests {
     fn repo_mode_links_members_living_outside_the_host() {
         let host = tempdir().unwrap();
         let elsewhere = tempdir().unwrap();
-        let comp = link_repo_mode_members(host.path(), &[repo_member("ui", elsewhere.path())], 20001);
+        let comp = link_repo_mode_members(host.path(), &[repo_member("ui", elsewhere.path())], 20001).unwrap();
         assert_eq!(comp.len(), 1);
         let link = host.path().join("ui");
         assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
         assert_eq!(fs::read_link(&link).unwrap(), elsewhere.path());
         // A second open reuses the link instead of skipping the member.
-        assert_eq!(link_repo_mode_members(host.path(), &[repo_member("ui", elsewhere.path())], 20001).len(), 1);
+        assert_eq!(link_repo_mode_members(host.path(), &[repo_member("ui", elsewhere.path())], 20001).unwrap().len(), 1);
     }
 
     #[test]
@@ -33200,7 +33484,7 @@ mod tests {
         let elsewhere = tempdir().unwrap();
         fs::create_dir(host.path().join("ui")).unwrap();
         fs::write(host.path().join("ui/keep.txt"), "x").unwrap();
-        let comp = link_repo_mode_members(host.path(), &[repo_member("ui", elsewhere.path())], 20001);
+        let comp = link_repo_mode_members(host.path(), &[repo_member("ui", elsewhere.path())], 20001).unwrap();
         assert!(comp.is_empty());
         assert!(host.path().join("ui/keep.txt").exists());
     }
@@ -37362,6 +37646,420 @@ filename f.rs
         };
         let back: ProjectMember = serde_json::from_str(&serde_json::to_string(&fresh).unwrap()).unwrap();
         assert_eq!(back.files_to_copy, vec!["app/google-services.json".to_string()]);
+    }
+
+    // ── bare repo projects ───────────────────────────────────────────
+
+    /// `<dir>/root/.git` as a bare clone of a one-commit repo, the layout
+    /// `git clone --bare <url> <root>/.git` produces. Returns the root.
+    fn bare_fixture(dir: &Path) -> PathBuf {
+        let src = dir.join("src");
+        fs::create_dir(&src).unwrap();
+        git_init_with_commit(&src);
+        let root = dir.join("root");
+        let out = std::process::Command::new("git")
+            .args(["clone", "--bare", &src.to_string_lossy(), &root.join(".git").to_string_lossy()])
+            .output().unwrap();
+        assert!(out.status.success(), "clone --bare failed: {}", String::from_utf8_lossy(&out.stderr));
+        root
+    }
+
+    /// The `.bare` variant: the bare clone at `<root>/.bare`, and `<root>/.git`
+    /// a FILE pointing at it. Returns the root.
+    fn dotbare_fixture(dir: &Path) -> PathBuf {
+        let src = dir.join("src");
+        fs::create_dir(&src).unwrap();
+        git_init_with_commit(&src);
+        let root = dir.join("root");
+        let out = std::process::Command::new("git")
+            .args(["clone", "--bare", &src.to_string_lossy(), &root.join(".bare").to_string_lossy()])
+            .output().unwrap();
+        assert!(out.status.success(), "clone --bare failed: {}", String::from_utf8_lossy(&out.stderr));
+        fs::write(root.join(".git"), "gitdir: ./.bare\n").unwrap();
+        root
+    }
+
+    fn bare_project(root: &Path) -> Project {
+        Project { root_path: root.to_string_lossy().into_owned(), bare: Some(true), ..Default::default() }
+    }
+
+    #[test]
+    fn detect_bare_layout_is_true_for_a_git_file_pointing_at_a_dotbare_dir() {
+        let dir = tempdir().unwrap();
+        let root = dotbare_fixture(dir.path());
+
+        assert_eq!(detect_bare_layout(&root), Some(true));
+    }
+
+    #[test]
+    fn detect_bare_layout_is_none_and_the_flag_stays_unset_when_git_fails() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("root");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join(".git"), "gitdir: ./missing\n").unwrap();
+        let mut list = vec![Project { root_path: root.to_string_lossy().into_owned(), ..Default::default() }];
+
+        let detected = detect_bare_layout(&root);
+        let changed = detect_missing_bare_flags(&mut list);
+
+        assert_eq!(detected, None);
+        assert!(!changed, "an unanswered detection must not be persisted");
+        assert_eq!(list[0].bare, None);
+    }
+
+    #[test]
+    fn detect_missing_bare_flags_skips_a_root_that_failed_until_the_tried_set_resets() {
+        let dir = tempdir().unwrap();
+        let root = dotbare_fixture(dir.path());
+        fs::write(root.join(".git"), "gitdir: ./missing\n").unwrap();
+        let mut list = vec![Project { root_path: root.to_string_lossy().into_owned(), ..Default::default() }];
+        let mut tried = HashSet::new();
+        detect_missing_bare_flags_in(&mut list, &mut tried);
+        fs::write(root.join(".git"), "gitdir: ./.bare\n").unwrap();
+
+        let same_session = detect_missing_bare_flags_in(&mut list, &mut tried);
+        let next_launch = detect_missing_bare_flags_in(&mut list, &mut HashSet::new());
+
+        assert!(!same_session);
+        assert!(next_launch);
+        assert_eq!(list[0].bare, Some(true));
+    }
+
+    #[test]
+    fn normalize_member_refuses_a_bare_repo_root() {
+        let dir = tempdir().unwrap();
+        let root = bare_fixture(dir.path());
+        let m = ProjectMember { root_path: root.to_string_lossy().into_owned(), ..Default::default() };
+
+        let e = normalize_member(m).unwrap_err();
+
+        assert!(e.contains("can't be a multi-repo member"), "{e}");
+    }
+
+    #[test]
+    fn link_repo_mode_members_refuses_a_saved_bare_member_before_linking_any() {
+        let dir = tempdir().unwrap();
+        let root = bare_fixture(dir.path());
+        let plain = dir.path().join("plain");
+        fs::create_dir(&plain).unwrap();
+        let host = tempdir().unwrap();
+        let members = [
+            ProjectMember { name: "plain".into(), root_path: plain.to_string_lossy().into_owned(), ..Default::default() },
+            ProjectMember { name: "app".into(), root_path: root.to_string_lossy().into_owned(), ..Default::default() },
+        ];
+
+        let e = link_repo_mode_members(host.path(), &members, 20001).unwrap_err();
+
+        assert!(e.contains("can't be a multi-repo member"), "{e}");
+        assert!(host.path().join("plain").symlink_metadata().is_err(), "linked a member before refusing");
+    }
+
+    #[test]
+    fn detect_bare_layout_is_true_for_a_root_holding_a_bare_git_dir() {
+        let dir = tempdir().unwrap();
+        let root = bare_fixture(dir.path());
+
+        assert_eq!(detect_bare_layout(&root), Some(true));
+    }
+
+    #[test]
+    fn detect_bare_layout_is_false_for_a_root_that_is_itself_the_git_dir() {
+        let dir = tempdir().unwrap();
+        let root = bare_fixture(dir.path());
+        let dotgit = dir.path().join("r.git");
+        let out = std::process::Command::new("git")
+            .args(["clone", "--bare", &root.join(".git").to_string_lossy(), &dotgit.to_string_lossy()])
+            .output().unwrap();
+        assert!(out.status.success());
+
+        assert_eq!(detect_bare_layout(&dotgit), Some(false));
+    }
+
+    #[test]
+    fn detect_bare_layout_is_false_for_a_normal_repo_and_for_a_bare_repos_worktree() {
+        let dir = tempdir().unwrap();
+        let root = bare_fixture(dir.path());
+        let wt = root.join("feature").join("foo");
+        git_worktree_add(&root, &wt, "feature/foo");
+
+        assert_eq!(detect_bare_layout(&dir.path().join("src")), Some(false));
+        assert_eq!(detect_bare_layout(&wt), Some(false));
+    }
+
+    #[test]
+    fn detect_missing_bare_flags_fills_unset_single_git_projects_once() {
+        let dir = tempdir().unwrap();
+        let root = bare_fixture(dir.path());
+        let r = root.to_string_lossy().into_owned();
+        let mut list = vec![
+            Project { id: "unset".into(), root_path: r.clone(), ..Default::default() },
+            Project { id: "set".into(), root_path: r.clone(), bare: Some(false), ..Default::default() },
+            Project { id: "multi".into(), root_path: r.clone(), project_type: ProjectType::Multi, ..Default::default() },
+            Project { id: "plain".into(), root_path: r.clone(), non_git: true, ..Default::default() },
+            Project { id: "gone".into(), root_path: dir.path().join("missing").to_string_lossy().into_owned(), ..Default::default() },
+        ];
+
+        let first = detect_missing_bare_flags(&mut list);
+        let second = detect_missing_bare_flags(&mut list);
+
+        assert!(first);
+        assert!(!second, "a filled flag must not dirty the list again");
+        let bare: Vec<Option<bool>> = list.iter().map(|p| p.bare).collect();
+        assert_eq!(bare, vec![Some(true), Some(false), None, None, None]);
+    }
+
+    #[test]
+    fn project_tasks_root_of_a_bare_project_is_its_root_whatever_tasks_path_says() {
+        let p = Project { tasks_path: "/elsewhere/tasks".into(), ..bare_project(Path::new("/Users/u/src/app")) };
+
+        assert_eq!(project_tasks_root("/vol/work", &p).unwrap(), PathBuf::from("/Users/u/src/app"));
+        assert_eq!(project_tasks_root_default(&p), PathBuf::from("/Users/u/src/app"));
+    }
+
+    #[test]
+    fn bare_worktree_path_nests_a_slashed_branch_under_the_root() {
+        assert_eq!(
+            bare_worktree_path(Path::new("/r"), "feature/foo").unwrap(),
+            Path::new("/r").join("feature").join("foo"),
+        );
+    }
+
+    #[test]
+    fn bare_worktree_path_refuses_dot_dot_hidden_empty_and_leading_slash_segments() {
+        for branch in ["..", "a/../b", ".x", "feature/.git", "a//b", "/abs", "trailing/"] {
+            let e = bare_worktree_path(Path::new("/r"), branch).unwrap_err();
+            assert!(e.contains("can't be used as a folder name"), "{branch}: {e}");
+        }
+    }
+
+    #[test]
+    fn clear_bare_slot_accepts_an_absent_slot_and_keeps_an_empty_dir() {
+        let dir = tempdir().unwrap();
+        let root = bare_fixture(dir.path());
+        let empty = root.join("empty");
+        fs::create_dir(&empty).unwrap();
+
+        clear_bare_slot_or_refuse(&root, &root.join("feature").join("new"), "").unwrap();
+        clear_bare_slot_or_refuse(&root, &empty, "").unwrap();
+
+        assert!(empty.is_dir(), "an empty dir is left for worktree add, never removed");
+    }
+
+    #[test]
+    fn clear_bare_slot_refuses_a_non_empty_dir_and_leaves_it_intact() {
+        let dir = tempdir().unwrap();
+        let root = bare_fixture(dir.path());
+        let slot = root.join("notes");
+        fs::create_dir(&slot).unwrap();
+        fs::write(slot.join("mine.txt"), "user content").unwrap();
+
+        let e = clear_bare_slot_or_refuse(&root, &slot, "").unwrap_err();
+
+        assert!(e.contains("already exists and is not empty"), "{e}");
+        assert!(slot.join("mine.txt").exists());
+    }
+
+    #[test]
+    fn clear_bare_slot_refuses_a_registered_worktree() {
+        let dir = tempdir().unwrap();
+        let root = bare_fixture(dir.path());
+        let wt = root.join("feature").join("foo");
+        git_worktree_add(&root, &wt, "feature/foo");
+
+        let e = clear_bare_slot_or_refuse(&root, &wt, "").unwrap_err();
+
+        assert!(e.contains("a worktree already lives at"), "{e}");
+        assert!(wt.join("base.txt").exists());
+    }
+
+    #[test]
+    fn clear_bare_slot_refuses_a_plain_file() {
+        let dir = tempdir().unwrap();
+        let root = bare_fixture(dir.path());
+        let f = root.join("README");
+        fs::write(&f, "user file").unwrap();
+
+        let e = clear_bare_slot_or_refuse(&root, &f, "").unwrap_err();
+
+        assert!(e.contains("isn't a directory"), "{e}");
+        assert!(f.exists());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn clear_bare_slot_refuses_a_symlink_and_never_unlinks_it() {
+        let dir = tempdir().unwrap();
+        let root = bare_fixture(dir.path());
+        let target = dir.path().join("elsewhere");
+        fs::create_dir(&target).unwrap();
+        let link = root.join("linked");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let e = clear_bare_slot_or_refuse(&root, &link, "").unwrap_err();
+
+        assert!(e.contains("isn't a directory"), "{e}");
+        assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
+    }
+
+    #[test]
+    fn clear_bare_slot_refuses_a_slot_nested_inside_another_worktree() {
+        let dir = tempdir().unwrap();
+        let root = bare_fixture(dir.path());
+        git_worktree_add(&root, &root.join("temp"), "temp");
+
+        let e = clear_bare_slot_or_refuse(&root, &root.join("temp").join("x"), "").unwrap_err();
+
+        assert!(e.contains("is a checkout, and a worktree can't nest inside it"), "{e}");
+    }
+
+    #[test]
+    fn prune_empty_dirs_below_removes_empty_parents_and_never_the_root() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("root");
+        let wt = root.join("feature").join("foo");
+        fs::create_dir_all(root.join("feature")).unwrap();
+
+        prune_empty_dirs_below(&wt, &root);
+
+        assert!(!root.join("feature").exists());
+        assert!(root.is_dir());
+    }
+
+    #[test]
+    fn prune_empty_dirs_below_keeps_a_parent_holding_only_a_dotfile() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("root");
+        let wt = root.join("config").join("x");
+        fs::create_dir_all(root.join("config")).unwrap();
+        fs::write(root.join("config").join(".env.local"), "USER=1").unwrap();
+
+        prune_empty_dirs_below(&wt, &root);
+
+        assert_eq!(fs::read_to_string(root.join("config").join(".env.local")).unwrap(), "USER=1");
+    }
+
+    #[test]
+    fn prune_after_worktree_removal_keeps_a_dotfile_in_a_bare_root_under_the_app_home() {
+        let app_home = tempdir().unwrap();
+        let root = app_home.path().join("root");
+        let wt = root.join("config").join("x");
+        fs::create_dir_all(root.join("config")).unwrap();
+        fs::write(root.join("config").join(".env.local"), "USER=1").unwrap();
+
+        prune_after_worktree_removal_in(&wt, Some(&root), app_home.path());
+
+        assert_eq!(fs::read_to_string(root.join("config").join(".env.local")).unwrap(), "USER=1");
+    }
+
+    #[test]
+    fn prune_after_worktree_removal_without_a_bare_root_prunes_dotfile_only_ancestors_up_to_the_app_home() {
+        let app_home = tempdir().unwrap();
+        let project_dir = app_home.path().join("tasks").join("proj");
+        let wt = project_dir.join("task-1");
+        fs::create_dir_all(&project_dir).unwrap();
+        fs::write(project_dir.join(".DS_Store"), "").unwrap();
+
+        prune_after_worktree_removal_in(&wt, None, app_home.path());
+
+        assert!(!app_home.path().join("tasks").exists());
+        assert!(app_home.path().is_dir());
+    }
+
+    #[test]
+    fn copy_matching_from_bare_root_copies_a_literal_dir_without_the_worktree_nested_in_it() {
+        let dir = tempdir().unwrap();
+        let root = bare_fixture(dir.path());
+        fs::create_dir(root.join("config")).unwrap();
+        fs::write(root.join("config").join("app.yml"), "a: 1").unwrap();
+        git_worktree_add(&root, &root.join("config").join("x"), "config/x");
+        let dst = tempdir().unwrap();
+
+        copy_matching_from_bare_root(&root, dst.path(), "config", None);
+
+        assert_eq!(fs::read_to_string(dst.path().join("config").join("app.yml")).unwrap(), "a: 1");
+        assert!(!dst.path().join("config").join("x").exists(), "copied a nested worktree");
+    }
+
+    #[test]
+    fn copy_matching_from_bare_root_copies_a_glob_matched_dir_without_the_worktree_nested_in_it() {
+        let dir = tempdir().unwrap();
+        let root = bare_fixture(dir.path());
+        fs::create_dir(root.join("config")).unwrap();
+        fs::write(root.join("config").join("app.yml"), "a: 1").unwrap();
+        git_worktree_add(&root, &root.join("config").join("x"), "config/x");
+        let dst = tempdir().unwrap();
+
+        copy_matching_from_bare_root(&root, dst.path(), "conf*", None);
+
+        assert_eq!(fs::read_to_string(dst.path().join("config").join("app.yml")).unwrap(), "a: 1");
+        assert!(!dst.path().join("config").join("x").exists(), "copied a nested worktree");
+    }
+
+    #[test]
+    fn copy_matching_from_bare_root_copies_root_files_and_skips_sibling_worktrees() {
+        let dir = tempdir().unwrap();
+        let root = bare_fixture(dir.path());
+        fs::write(root.join(".env"), "ROOT=1").unwrap();
+        let sibling = root.join("feature").join("old");
+        git_worktree_add(&root, &sibling, "feature/old");
+        fs::write(sibling.join(".env.local"), "SIBLING=1").unwrap();
+        let dst = tempdir().unwrap();
+
+        copy_matching_from_bare_root(&root, dst.path(), "**/.env*", Some(&root));
+
+        assert_eq!(fs::read_to_string(dst.path().join(".env")).unwrap(), "ROOT=1");
+        assert!(!dst.path().join("feature").exists(), "copied out of a sibling worktree");
+    }
+
+    #[test]
+    fn copy_matching_from_bare_root_never_copies_the_dotbare_git_dir_by_glob_or_literal() {
+        let dir = tempdir().unwrap();
+        let root = dotbare_fixture(dir.path());
+        fs::write(root.join(".env"), "ROOT=1").unwrap();
+        let common = git(&["rev-parse", "--git-common-dir"], &root).unwrap();
+        let common = root.join(common.trim());
+        let dst = tempdir().unwrap();
+
+        copy_matching_from_bare_root(&root, dst.path(), ".*", Some(&common));
+        copy_matching_from_bare_root(&root, dst.path(), ".bare", Some(&common));
+        copy_matching_from_bare_root(&root, dst.path(), "**/HEAD", Some(&common));
+
+        assert_eq!(fs::read_to_string(dst.path().join(".env")).unwrap(), "ROOT=1");
+        assert!(!dst.path().join(".bare").exists(), "copied the git dir");
+    }
+
+    #[test]
+    fn link_config_dir_from_a_bare_root_links_and_excludes_in_the_root_git_dir() {
+        let dir = tempdir().unwrap();
+        let root = bare_fixture(dir.path());
+        fs::create_dir(root.join(".claude")).unwrap();
+        let wt = root.join("feature").join("foo");
+        git_worktree_add(&root, &wt, "feature/foo");
+
+        link_config_dir(&root, &wt, ".claude");
+
+        assert!(wt.join(".claude").symlink_metadata().unwrap().file_type().is_symlink());
+        let exclude = fs::read_to_string(root.join(".git").join("info").join("exclude")).unwrap();
+        assert!(exclude.lines().any(|l| l.trim() == ".claude"), "{exclude}");
+    }
+
+    #[test]
+    fn link_config_dir_from_a_dotbare_root_excludes_in_the_dotbare_dir() {
+        let dir = tempdir().unwrap();
+        let root = dotbare_fixture(dir.path());
+        fs::create_dir(root.join(".claude")).unwrap();
+        let wt = root.join("feature").join("foo");
+        git_worktree_add(&root, &wt, "feature/foo");
+
+        link_config_dir(&root, &wt, ".claude");
+
+        let exclude = fs::read_to_string(root.join(".bare").join("info").join("exclude")).unwrap();
+        assert!(exclude.lines().any(|l| l.trim() == ".claude"), "{exclude}");
+    }
+
+    #[test]
+    fn termic_project_root_is_a_reserved_port_name() {
+        assert!(RESERVED_PORT_NAMES.contains(&"TERMIC_PROJECT_ROOT"));
     }
 }
 #[cfg(test)]

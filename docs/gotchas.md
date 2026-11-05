@@ -680,6 +680,42 @@ what you are looking at while you write the code.
 must be mounted, so adding one without Docker honouring it fails there rather
 than in a container weeks later.
 
+`TERMIC_PROJECT_ROOT` is host-only by construction: only uncaged spawns (setup,
+run, shell and terminal tabs, the Rust script runners) set it, and none of
+those reach the Docker branch of `pty_spawn`.
+
+## A bare project's tasks root IS the repo root
+
+A bare project (`git clone --bare <url> <root>/.git`) keeps its worktrees in
+`<root>/<branch>`, beside whatever else the user keeps there. So slot clearing
+there (`clear_bare_slot_or_refuse`) never deletes: a dir whose name matches a
+branch is no evidence it is a leftover of ours. A non-empty dir, a symlink, a
+file, a registered worktree, or a slot nested inside another checkout is
+refused; an empty dir is left for `git worktree add`, which accepts one.
+
+`repo.git/` (a root that IS the git dir) is deliberately not bare: worktrees
+there would sit beside `hooks/` and `refs/`, and a branch named `hooks` would
+collide with git's own dir.
+
+A vanilla `git clone --bare` writes no fetch refspec. The create's
+`git fetch origin main` then updates only `FETCH_HEAD`, `origin/main` never
+resolves, and the base falls back to local `main`, frozen at clone time:
+every task is cut from that commit while progress says "Fetching" (the
+GH #79 class). The fix is on the user's side:
+`git config remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*'`.
+
+`.termic.yaml` is read from the project root, which in a bare project has
+no working tree, so a committed one never applies. Only a file the user
+keeps in the root itself does.
+
+Bare repos are not supported as multi-repo members, and `normalize_member`
+refuses one (so `project_add_multi` and `project_set_members` do).
+`link_repo_mode_members` and `materialize_member` refuse it again at task
+create, for a member saved before the check existed. A member
+would need everything the single-repo path has: no Main checkout mode,
+`<root>/<branch>` worktrees, the checkout-skipping copy, since linking or
+copying from the root as-is hands the agent every other task's worktree.
+
 ## `null` is an ANSWER; `undefined` is the absence of one
 
 `??` collapses the two, and in the account switcher that was wrong three times

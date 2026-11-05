@@ -3725,6 +3725,33 @@ print(sec.SecItemCopyMatching(d, C.byref(C.c_void_p())))
         assert_eq!(keychain_open_count(&id), 0);
         assert!(!keychain_open().lock().unwrap().contains_key(&id), "entry removed at zero");
     }
+    /// `<dir>/root/.git` as a bare clone with one commit, plus a worktree of
+    /// it at `<root>/feature/foo`. Returns (root, worktree).
+    fn bare_root_with_worktree(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
+        let run = |args: &[&str], cwd: &std::path::Path| {
+            let out = std::process::Command::new("git").args(args).current_dir(cwd).output().unwrap();
+            assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        };
+        let src = dir.join("src");
+        std::fs::create_dir(&src).unwrap();
+        run(&["init", "-b", "main"], &src);
+        run(&["-c", "user.name=T", "-c", "user.email=t@t", "commit", "--allow-empty", "-m", "init"], &src);
+        let root = dir.join("root");
+        run(&["clone", "--bare", &src.to_string_lossy(), &root.join(".git").to_string_lossy()], dir);
+        let wt = root.join("feature").join("foo");
+        run(&["worktree", "add", &wt.to_string_lossy(), "-b", "feature/foo"], &root);
+        (root, wt)
+    }
+
+    #[test]
+    fn a_bare_repos_worktree_resolves_its_parent_git_dir_to_the_roots_dot_git() {
+        let dir = tempfile::tempdir().unwrap();
+        let (root, wt) = bare_root_with_worktree(dir.path());
+
+        let parent = parent_git_dir_for_worktree(&wt.to_string_lossy());
+
+        assert_eq!(parent, Some(canonicalize_or_keep(&root.join(".git").to_string_lossy())));
+    }
 }
 
 #[cfg(test)]

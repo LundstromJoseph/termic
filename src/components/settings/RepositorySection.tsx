@@ -217,7 +217,7 @@ export function RepositorySection({ projectId }: { projectId: string }) {
   // re-fire on every unrelated keystroke in the section.
   const draftTasksPath = draft?.tasks_path.trim() ?? "";
   const tasksPathInvalid = useTasksPathConflicts(
-    onMoreTab ? draftTasksPath : "", projectId,
+    onMoreTab && !draft?.bare ? draftTasksPath : "", projectId,
   ).names.length > 0;
   // The debounced save closes over the render that scheduled it, so it needs a
   // ref to read the CURRENT verdict rather than the one from 500ms ago.
@@ -1168,7 +1168,9 @@ export function RepositorySection({ projectId }: { projectId: string }) {
           />
 
           {/* Spotlight mirrors a task's git changes onto the main checkout,
-              so it lives here rather than on Scripts & run. */}
+              so it lives here rather than on Scripts & run. A bare repo has
+              no main checkout to mirror onto. */}
+          {!draft.bare && (
           <div className="border-t border-[var(--color-border-soft)] pt-6">
             <div className="mb-3 flex items-center gap-2 text-[14px] font-medium text-[var(--color-fg)]">
               <AudioWaveform className="h-4 w-4 text-[var(--color-accent)]" />
@@ -1229,6 +1231,7 @@ export function RepositorySection({ projectId }: { projectId: string }) {
               </div>
             )}
           </div>
+          )}
         </div>
       )}
 
@@ -1310,11 +1313,12 @@ export function RepositorySection({ projectId }: { projectId: string }) {
           />
           <Field
             label={t("repo.tasksPathLabel")}
-            hint={t("repo.tasksPathHint")}
+            hint={draft.bare ? t("repo.tasksPathBare") : t("repo.tasksPathHint")}
             control={
               <>
                 <Input
-                  value={draft.tasks_path}
+                  value={draft.bare ? "" : draft.tasks_path}
+                  disabled={!!draft.bare}
                   onChange={(e) => patch("tasks_path", e.target.value)}
                   placeholder={tasksPathDefault}
                   className={cn(

@@ -70,7 +70,10 @@ export async function startPrReview(opts: {
   /** The sidebar group to put it in; empty or absent = none. */
   group?: string;
 }): Promise<{ task: Task; reused: boolean }> {
-  const { projectId, number, where, cli, prompt } = opts;
+  const { projectId, number, cli, prompt } = opts;
+  // A bare repo has no main checkout to move.
+  const bare = !!useApp.getState().projects.find(p => p.id === projectId)?.bare;
+  const where: ReviewWhere = bare ? "worktree" : opts.where;
   const { pr, branch } = await fetchPrForReview(projectId, number);
   const body = prReviewPrompt(pr, prompt.body);
 

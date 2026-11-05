@@ -22,7 +22,7 @@ pickers show only Off and Docker there. Windows specifics of Docker mode:
 
 ## Scope
 
-ONLY the agent CLI's PTY is sandboxed. AuxTerminal, setup script, run script, and archive script run unsandboxed by design — they're user-authored shell needing full reach. The carve-out is enforced by not passing `task_id` in `pty_spawn` / routing scripts through `run_script` which never calls `sandbox::provision`.
+ONLY the agent CLI's PTY is sandboxed. AuxTerminal, setup script, run script, and archive script run unsandboxed by design — they're user-authored shell needing full reach. The carve-out is enforced by not passing `task_id` in `pty_spawn` / routing scripts through `run_script` which never calls `sandbox::provision`. `TERMIC_PROJECT_ROOT` reaches only these uncaged spawns, never an agent tab, so it never reaches a container, where the project root is not mounted.
 
 ## Modes (`SandboxMode`)
 

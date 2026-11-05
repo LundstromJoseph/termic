@@ -371,7 +371,8 @@ export function RightPanel() {
   const spotlightAvailable = !!task && !task.is_main_checkout
     && !!project?.spotlight_enabled
     && project?.type !== "multi"
-    && !project?.non_git;
+    && !project?.non_git
+    && !project?.bare;
 
   // Sync log: array of timestamped entries shown in the Spotlight tab.
   const [spotlightLog, setSpotlightLog] = useState<Array<{ time: Date; msg: string; error?: boolean }>>([]);

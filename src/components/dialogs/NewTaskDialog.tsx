@@ -372,6 +372,7 @@ export function NewTaskDialog() {
   // whole per-member list away from them.
   const hostNonGit = !!project?.non_git;
   const canWorktree = isMulti || !hostNonGit;
+  const isBare = project?.bare === true;
   // Sandbox is offered in every shape: the seatbelt + proxy cage the main
   // checkout identically to a worktree (task_open_repo takes sandbox args,
   // for single AND multi hosts), and the multi wrapper carries its own.
@@ -771,7 +772,7 @@ export function NewTaskDialog() {
     // this only ever catches a project that lost its git dir since.
     // Same rule as `canWorktree` above, computed off the effect's own project.
     const clamped = !!p?.non_git && (p?.type ?? "single") !== "multi";
-    setMode(clamped ? "repo_root" : (seed?.mode ?? readLastMode() ?? "repo_root"));
+    setMode(clamped ? "repo_root" : p?.bare ? "worktree" : (seed?.mode ?? readLastMode() ?? "repo_root"));
     if (canImp) loadImportable(projectId);
     setBusy(false);
     submittingRef.current = false;
@@ -1654,14 +1655,16 @@ export function NewTaskDialog() {
               const worktreeOnlySource = source === "branch" || source === "import";
               const disabled = m === "worktree"
                 ? !canWorktree
-                : worktreeOnlySource;
+                : worktreeOnlySource || isBare;
               return (
                 <button
                   key={m}
                   type="button"
                   data-testid={testid}
                   disabled={disabled}
-                  title={disabled && m === "repo_root" ? t("newTask.mainCheckoutNotForSource") : undefined}
+                  title={disabled && m === "repo_root"
+                    ? (isBare ? t("newTask.mainCheckoutBare") : t("newTask.mainCheckoutNotForSource"))
+                    : undefined}
                   onClick={() => chooseMode(m)}
                   className={cn(
                     "flex flex-1 items-center justify-center gap-1.5 rounded-md px-3 py-2 text-[13px] font-medium transition-colors",

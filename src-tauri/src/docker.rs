@@ -3535,4 +3535,38 @@ mod tests {
         // Anything that is not a real autocrlf value is dropped, not written.
         assert!(!windows_container_git_config(Some("yes\n[x]")).contains("autocrlf"));
     }
+    /// `<dir>/root/.git` as a bare clone with one commit, plus a worktree of
+    /// it at `<root>/feature/foo`. Returns (root, worktree).
+    fn bare_root_with_worktree(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
+        let run = |args: &[&str], cwd: &std::path::Path| {
+            let out = std::process::Command::new("git").args(args).current_dir(cwd).output().unwrap();
+            assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        };
+        let src = dir.join("src");
+        std::fs::create_dir(&src).unwrap();
+        run(&["init", "-b", "main"], &src);
+        run(&["-c", "user.name=T", "-c", "user.email=t@t", "commit", "--allow-empty", "-m", "init"], &src);
+        let root = dir.join("root");
+        run(&["clone", "--bare", &src.to_string_lossy(), &root.join(".git").to_string_lossy()], dir);
+        let wt = root.join("feature").join("foo");
+        run(&["worktree", "add", &wt.to_string_lossy(), "-b", "feature/foo"], &root);
+        (root, wt)
+    }
+
+    #[test]
+    fn a_bare_repos_worktree_mounts_the_roots_git_dir_but_not_the_root_or_its_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let (root, wt) = bare_root_with_worktree(dir.path());
+        let task = stub_task("t-bare", &wt.to_string_lossy());
+        let env = std::collections::HashMap::new();
+
+        let spec = build_spec(&task, "claude", "img", &task.path, vec![], &env, &[], false,
+                              &[], &[], "pty-bare0001", "claude", &[], None);
+
+        let git_dir = canonicalize_or_keep(&root.join(".git").to_string_lossy());
+        let root_canon = canonicalize_or_keep(&root.to_string_lossy());
+        assert!(spec.mounts.iter().any(|m| m.host == git_dir), "no mount for {git_dir}");
+        assert!(!spec.mounts.iter().any(|m| m.host == root_canon), "the bare root itself was mounted");
+        assert!(!spec.env.iter().any(|(k, _)| k == "TERMIC_PROJECT_ROOT"));
+    }
 }

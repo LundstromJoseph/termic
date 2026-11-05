@@ -415,6 +415,220 @@ describe("project add/remove", () => {
   });
 });
 
+// A bare repo cloned into `<root>/.git` (`git clone --bare <url> <root>/.git`):
+// no main checkout, and each worktree lives in the root under its branch name.
+describe("bare repo project", () => {
+  let tmp = "";
+  let root = "";
+  let projectId: string | null = null;
+  let firstId = "";
+  const BRANCH = "feature/bare-e2e";
+
+  const createTask = (name: string, branch = BRANCH) =>
+    browser.execute(
+      async (pid, n, b) => {
+        try {
+          const t = await window.__termic!.ipc.taskCreate({ project_id: pid, name: n, cli: "fakeagent", branch: b });
+          await window.__termic!.useApp.getState().loadAll();
+          return { ok: true as const, id: (t as any).id as string, path: (t as any).path as string };
+        } catch (e) {
+          return { ok: false as const, err: String(e) };
+        }
+      },
+      projectId!, name, branch,
+    );
+
+  before(async () => {
+    await waitForAppShell();
+    await requireTermicApi();
+    tmp = realpathSync.native(mkdtempSync(path.join(os.tmpdir(), "e2e-bare-")));
+    const src = path.join(tmp, "src");
+    mkdirSync(src);
+    execSync(`git -C "${src}" init -q -b main && git -C "${src}" -c user.email=e2e@termic.dev -c user.name=e2e commit -q --allow-empty -m init`);
+    root = path.join(tmp, "root");
+    execSync(`git clone -q --bare "${src}" "${path.join(root, ".git")}"`);
+    writeFileSync(path.join(root, ".env"), "FROM_ROOT=1");
+    const proj = await browser.execute(async (d) => {
+      const t = window.__termic!;
+      const p = await t.ipc.projectAdd(d);
+      await t.ipc.projectUpdate({
+        ...p,
+        setup_script: 'printf %s "$TERMIC_PROJECT_ROOT" > "$PWD/.root-probe"',
+        files_to_copy: [".env"],
+      });
+      await t.useApp.getState().loadAll();
+      return p;
+    }, root);
+    projectId = (proj as any).id;
+  });
+
+  after(async () => {
+    await browser.execute(() => window.__termic!.useUI.getState().closeNewTask());
+    if (projectId) {
+      await browser.execute(async (id) => {
+        const t = window.__termic!;
+        for (const task of t.useApp.getState().tasks.filter((x: any) => x.project_id === id && !x.archived)) {
+          await t.ipc.taskArchive(task.id).catch(() => {});
+        }
+        await t.ipc.projectRemove(id);
+        await t.useApp.getState().loadAll();
+      }, projectId);
+    }
+    rmTree(tmp, { bestEffort: true });
+  });
+
+  it("is detected as bare when added", async () => {
+    const bare = await browser.execute(
+      (id) => window.__termic!.useApp.getState().projects.find((p: any) => p.id === id)?.bare,
+      projectId!,
+    );
+    expect(bare).toBe(true);
+  });
+
+  it("disables Main checkout in the New Task dialog", async () => {
+    await browser.execute((id) => window.__termic!.useUI.getState().openNewTask(id), projectId!);
+    await waitVisible('[data-testid="task-type-main"]');
+    const state = await browser.execute(() => {
+      const main = document.querySelector('[data-testid="task-type-main"]') as HTMLButtonElement;
+      const wt = document.querySelector('[data-testid="task-type-worktree"]') as HTMLButtonElement;
+      return { mainDisabled: main.disabled, worktreeOn: wt.className.includes("text-white") };
+    });
+    await snap("bare-repo-new-task.png");
+    await browser.execute(() => window.__termic!.useUI.getState().closeNewTask());
+    await waitGone('[data-testid="task-type-main"]');
+    expect(state).toEqual({ mainDisabled: true, worktreeOn: true });
+  });
+
+  it("puts a worktree task at <root>/<branch> and its setup script sees TERMIC_PROJECT_ROOT", async () => {
+    const res = await createTask("bare-first");
+    expect(res).toMatchObject({ ok: true, path: path.join(root, "feature", "bare-e2e") });
+    firstId = (res as any).id;
+    const wt = path.join(root, "feature", "bare-e2e");
+    expect(existsSync(path.join(wt, ".git"))).toBe(true);
+
+    await browser.execute(async (id) => { await window.__termic!.ipc.taskRunScript(id, "setup"); }, (res as any).id);
+
+    expect(readFileSync(path.join(wt, ".root-probe"), "utf8")).toBe(root);
+  });
+
+  it("refuses a second task on the same branch", async () => {
+    const res = await createTask("bare-second");
+    expect(res.ok).toBe(false);
+    expect((res as any).err).toContain("a worktree already lives at");
+  });
+
+  it("refuses the main checkout from Open repo, Checkout and Spotlight", async () => {
+    const errs = await browser.execute(
+      async (pid, tid) => {
+        const t = window.__termic!;
+        const err = (p: Promise<unknown>) => p.then(() => "resolved", (e) => String(e));
+        return [
+          await err(t.ipc.taskOpenRepo(pid, "fakeagent", "bare-main")),
+          await err(t.ipc.projectGitCheckout(pid, "main")),
+          await err(t.ipc.taskSpotlightStart(tid)),
+        ];
+      },
+      projectId!, firstId,
+    );
+
+    for (const e of errs) expect(e).toContain("is a bare repository, so it has no main checkout");
+  });
+
+  it("archive removes the nested branch folder and leaves the git dir", async () => {
+    await browser.execute(async (id) => {
+      await window.__termic!.ipc.taskArchive(id);
+      await window.__termic!.useApp.getState().loadAll();
+    }, firstId);
+
+    expect(existsSync(path.join(root, "feature"))).toBe(false);
+    expect(existsSync(path.join(root, ".git"))).toBe(true);
+  });
+
+  it("restore puts the worktree back at <root>/<branch> with the root's files copied in", async () => {
+    const restored = await browser.execute(async (id) => {
+      const task = await window.__termic!.ipc.taskRestore(id);
+      await window.__termic!.useApp.getState().loadAll();
+      return (task as any).path as string;
+    }, firstId);
+
+    const wt = path.join(root, "feature", "bare-e2e");
+    expect(restored).toBe(wt);
+    expect(existsSync(path.join(wt, ".git"))).toBe(true);
+    expect(readFileSync(path.join(wt, ".env"), "utf8")).toBe("FROM_ROOT=1");
+  });
+
+  it("points at a different branch when the branch is checked out elsewhere", async () => {
+    execSync(`git -C "${root}" worktree add -q -b feature/taken "${path.join(tmp, "elsewhere")}"`);
+
+    const res = await createTask("bare-taken", "feature/taken");
+
+    expect(res.ok).toBe(false);
+    expect((res as any).err).toContain("is already checked out elsewhere. Pick a different branch.");
+  });
+});
+
+// A non-bare project refuses a taken task slot BEFORE an existing-branch
+// checkout resolves its branch, so the refusal leaves no local tracking branch
+// behind for a branch that only existed on the remote.
+describe("existing-branch checkout into a taken slot", () => {
+  let tmp = "";
+  let dir = "";
+  let projectId = "";
+
+  before(async () => {
+    await waitForAppShell();
+    await requireTermicApi();
+    tmp = realpathSync.native(mkdtempSync(path.join(os.tmpdir(), "e2e-slot-")));
+    const origin = path.join(tmp, "origin");
+    mkdirSync(origin);
+    execSync(`git -C "${origin}" init -q -b main && git -C "${origin}" -c user.email=e2e@termic.dev -c user.name=e2e commit -q --allow-empty -m init && git -C "${origin}" branch colleague`);
+    dir = path.join(tmp, "clone");
+    execSync(`git clone -q "${origin}" "${dir}"`);
+    const proj = await browser.execute(async (d) => {
+      const t = window.__termic!;
+      const p = await t.ipc.projectAdd(d);
+      await t.useApp.getState().loadAll();
+      return p;
+    }, dir);
+    projectId = (proj as any).id;
+  });
+
+  after(async () => {
+    if (projectId) {
+      await browser.execute(async (id) => {
+        const t = window.__termic!;
+        for (const task of t.useApp.getState().tasks.filter((x: any) => x.project_id === id && !x.archived)) {
+          await t.ipc.taskArchive(task.id).catch(() => {});
+        }
+        await t.ipc.projectRemove(id);
+        await t.useApp.getState().loadAll();
+      }, projectId);
+    }
+    rmTree(tmp, { bestEffort: true });
+  });
+
+  it("refuses before the remote-only branch becomes a local one", async () => {
+    await browser.execute(async (pid) => {
+      await window.__termic!.ipc.taskCreate({ project_id: pid, name: "slot", cli: "fakeagent", branch: "slot" });
+      await window.__termic!.useApp.getState().loadAll();
+    }, projectId);
+
+    const err = await browser.execute(async (pid) => {
+      try {
+        await window.__termic!.ipc.taskCreate({
+          project_id: pid, name: "slot", cli: "fakeagent", branch: "colleague", checkout_existing: true,
+        });
+        return null;
+      } catch (e) {
+        return String(e);
+      }
+    }, projectId);
+
+    expect(err).toContain("a worktree already lives at");
+    expect(execSync(`git -C "${dir}" branch --list colleague`).toString().trim()).toBe("");
+  });
+});
+
 // P2: repo discovery (Add Project → Discover). Scans a folder and returns the
 // git repos in it.
 describe("discover repos", () => {

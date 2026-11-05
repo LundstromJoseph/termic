@@ -70,6 +70,7 @@ export function ProjectActionsMenuItems({ projectId, onPick }: {
   const { t } = useTranslation("sidebar");
   // Sandbox mode names live in the chrome namespace (SandboxIcon's table).
   const { t: tChrome } = useTranslation("chrome");
+  const { t: tDialogs } = useTranslation("dialogs");
   const agents = useApp(s => s.agents);
   const detectedClis = useApp(s => s.detectedClis);
   const openSettings = useApp(s => s.openSettings);
@@ -118,6 +119,8 @@ export function ProjectActionsMenuItems({ projectId, onPick }: {
   // .claude in). What a non-git host really loses is the host-level "Branch
   // from" pin below, which needs host branches; that one stays on `isNonGit`.
   const canWorktree = !isNonGit || isMulti;
+  // A bare repo has no main checkout: worktree is the only mode.
+  const isBare = project?.bare === true;
   const visibleClis = visibleCliIds(agents.map(a => a.id), agents, detectedClis);
   // The launcher rows: every offered agent plus Terminal, with THIS project's
   // default CLI hoisted to the top. It is the pick behind most opens of this
@@ -228,8 +231,9 @@ export function ProjectActionsMenuItems({ projectId, onPick }: {
 
   // App-wide remembered mode (same key the New Task dialog uses). A project
   // that can't worktree is pinned to the main checkout.
-  const [mode, setModeState] = useState<NewTaskMode>(() => (canWorktree ? readNewTaskMode() : "repo_root"));
-  const setMode = (m: NewTaskMode) => { setModeState(m); writeNewTaskMode(m); };
+  const [chosenMode, setModeState] = useState<NewTaskMode>(() => (canWorktree ? readNewTaskMode() : "repo_root"));
+  const mode: NewTaskMode = isBare ? "worktree" : chosenMode;
+  const setMode = (m: NewTaskMode) => { setModeState(m); if (!isBare) writeNewTaskMode(m); };
 
   // Open the full New Task modal in the current mode. Fallback when there's
   // no inline host (dashboard) and the path for multi-repo worktrees, which
@@ -238,7 +242,7 @@ export function ProjectActionsMenuItems({ projectId, onPick }: {
   // repo_root, so writing it would clobber the user's real app-wide
   // preference.
   const openAdvanced = () => {
-    if (canWorktree) writeNewTaskMode(mode);
+    if (canWorktree && !isBare) writeNewTaskMode(mode);
     requestAnimationFrame(() => openNewTask(projectId));
   };
 
@@ -385,12 +389,15 @@ export function ProjectActionsMenuItems({ projectId, onPick }: {
           <div data-guide="task-mode" className="flex w-full items-stretch rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] p-[3px]">
             <button
               type="button"
+              disabled={isBare}
+              title={isBare ? tDialogs("newTask.mainCheckoutBare") : undefined}
               onClick={() => setMode("repo_root")}
               className={cn(
                 "flex h-7 flex-1 items-center justify-center gap-1.5 rounded-[5px] px-2 text-[12.5px] whitespace-nowrap transition-colors",
                 mode === "repo_root"
                   ? "bg-[var(--color-accent-deep)] text-white"
                   : "text-[var(--color-fg-dim)] hover:text-[var(--color-fg)]",
+                isBare && "cursor-not-allowed opacity-40 hover:text-[var(--color-fg-dim)]",
               )}
             >
               <Link2 className="h-3.5 w-3.5 shrink-0" /> {t("projectActions.mainCheckout")}
