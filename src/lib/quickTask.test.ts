@@ -10,9 +10,11 @@ vi.mock("@/lib/ipc", () => ({
   settingsLoad: vi.fn().mockResolvedValue(null),
 }));
 vi.mock("@/lib/runTabs", () => ({ launchSetupTab: vi.fn().mockResolvedValue(true) }));
+vi.mock("@/lib/seedPrompt", () => ({ seedPromptWhenReady: vi.fn(), SPAWN_DEADLINE_MS: 1, SETUP_SPAWN_DEADLINE_MS: 2 }));
 
 import { createQuickTask } from "@/lib/quickTask";
 import { taskCreate, taskOpenRepo } from "@/lib/ipc";
+import { seedPromptWhenReady } from "@/lib/seedPrompt";
 import { useApp } from "@/store/app";
 import type { Project, Task } from "@/lib/types";
 
@@ -49,5 +51,47 @@ describe("createQuickTask mode", () => {
 
     expect(taskOpenRepo).toHaveBeenCalledOnce();
     expect(taskCreate).not.toHaveBeenCalled();
+  });
+});
+
+describe("createQuickTask project default prompt", () => {
+  it("seeds the trimmed default with the spawn deadline for a main-checkout agent task when asked", async () => {
+    withProject({ default_initial_prompt: "  Read AGENTS.md.  " });
+
+    await createQuickTask({ projectId: "p", mode: "repo_root", cli: "claude", name: "fix", seedProjectPrompt: true });
+
+    expect(seedPromptWhenReady).toHaveBeenCalledWith("new", "Read AGENTS.md.", 1);
+  });
+
+  it("seeds the default with the setup deadline for a worktree agent task when asked", async () => {
+    withProject({ default_initial_prompt: "Read AGENTS.md." });
+
+    await createQuickTask({ projectId: "p", mode: "worktree", cli: "claude", name: "fix", seedProjectPrompt: true });
+
+    expect(seedPromptWhenReady).toHaveBeenCalledWith("new", "Read AGENTS.md.", 2);
+  });
+
+  it("does not seed the default when the caller does not opt in (PR review seeds its own)", async () => {
+    withProject({ default_initial_prompt: "Read AGENTS.md." });
+
+    await createQuickTask({ projectId: "p", mode: "repo_root", cli: "claude", name: "fix" });
+
+    expect(seedPromptWhenReady).not.toHaveBeenCalled();
+  });
+
+  it("does not seed the default into a shell task", async () => {
+    withProject({ default_initial_prompt: "Read AGENTS.md." });
+
+    await createQuickTask({ projectId: "p", mode: "repo_root", cli: "shell", name: "fix", seedProjectPrompt: true });
+
+    expect(seedPromptWhenReady).not.toHaveBeenCalled();
+  });
+
+  it("does not seed anything when the project has no default", async () => {
+    withProject({});
+
+    await createQuickTask({ projectId: "p", mode: "repo_root", cli: "claude", name: "fix", seedProjectPrompt: true });
+
+    expect(seedPromptWhenReady).not.toHaveBeenCalled();
   });
 });

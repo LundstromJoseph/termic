@@ -24,6 +24,7 @@ import { cn, cleanLines } from "@/lib/utils";
 import { i18n } from "@/lib/i18n";
 import { isValidPortName } from "@/lib/namedPorts";
 import { isTerminalEntry } from "@/lib/agents";
+import { MAX_DEFAULT_PROMPT_CHARS } from "@/lib/projectPrompt";
 import { CodeIntelSettings } from "./CodeIntelSettings";
 import { ProjectStatusLine } from "@/components/task/StatusLinePrompt";
 import { CodeIntelServers } from "./CodeIntelServers";
@@ -1280,6 +1281,25 @@ export function RepositorySection({ projectId }: { projectId: string }) {
                 ))}
                 <option value="shell">{t("repo.cliTerminal")}</option>
               </select>
+            }
+          />
+          <Field
+            label={t("repo.defaultPromptLabel")}
+            hint={t("repo.defaultPromptHint")}
+            control={
+              <textarea
+                value={draft.default_initial_prompt ?? ""}
+                onChange={(e) => patch("default_initial_prompt", e.target.value)}
+                rows={3}
+                maxLength={MAX_DEFAULT_PROMPT_CHARS}
+                placeholder={t("repo.defaultPromptPlaceholder")}
+                data-testid="project-default-prompt-input"
+                autoComplete="off" autoCorrect="off" autoCapitalize="off" spellCheck={false}
+                className={cn(
+                  "w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] p-2.5 text-[12.5px] text-[var(--color-fg)] outline-none focus:border-[var(--color-accent)]",
+                  flashRing("default_initial_prompt"),
+                )}
+              />
             }
           />
           <Field

@@ -21,6 +21,7 @@ import { taskCreate, taskCreateMulti, settingsLoad, taskImportableWorktrees, tas
 import { launchSetupTab } from "@/lib/runTabs";
 import { seedPromptWhenReady, SETUP_SPAWN_DEADLINE_MS } from "@/lib/seedPrompt";
 import { MAX_PROMPT_CHARS } from "@/lib/deepLink";
+import { projectDefaultPrompt, promptRoom, withProjectPrompt } from "@/lib/projectPrompt";
 import { withCreateLock } from "@/lib/createLock";
 import { usePendingTasks } from "@/store/pendingTasks";
 import { uniqueBranch, derivedBranch } from "@/lib/quickTask";
@@ -168,6 +169,9 @@ export function NewTaskDialog() {
   // The resolved default at open, for "blank task instead": once the issue's
   // text is cleared out of the box, nothing foreign is left and it applies.
   const yoloDefaultRef = useRef(false);
+  // The project's default initial prompt at open: the box's baseline, which
+  // clearing issue picks returns to.
+  const defaultPromptRef = useRef("");
   // Sandbox is macOS-only. On unsupported platforms, disable every
   // Seatbelt card except Off so we never save a mode that would only fail
   // later at spawn.
@@ -662,6 +666,8 @@ export function NewTaskDialog() {
     setBlockKc(false);
     const yoloDefault = projectYoloDefault(p, usePrefs.getState().defaultYolo);
     yoloDefaultRef.current = yoloDefault;
+    const defaultPrompt = projectDefaultPrompt(p);
+    defaultPromptRef.current = defaultPrompt;
     const promptFromLink = !!seed?.prompt;
     setYolo(yoloDefault && !promptFromLink);
     setYoloHeld(yoloDefault && promptFromLink ? "link" : null);
@@ -706,12 +712,12 @@ export function NewTaskDialog() {
     setImportSelected(null); setImportList([]); setImportLoading(false);
     setResumeOverride(""); setResumeOpen(false);
     if (seed?.issue) {
-      setPrompt(buildIssuesPrompt([seed.issue], MAX_PROMPT_CHARS, ""));
+      setPrompt(withProjectPrompt(defaultPrompt, buildIssuesPrompt([seed.issue], promptRoom(defaultPrompt, MAX_PROMPT_CHARS), ""), MAX_PROMPT_CHARS));
       setYolo(false);
       setYoloHeld("issue");
       setIssuePicks([seed.issue]);
     } else {
-      setPrompt(seed?.prompt ?? "");
+      setPrompt(withProjectPrompt(defaultPrompt, seed?.prompt ?? "", MAX_PROMPT_CHARS));
       setIssuePicks([]);
     }
     setImportMode(wantImport);
@@ -1274,9 +1280,9 @@ export function NewTaskDialog() {
     // opens "GitHub issue #266:" is actively wrong on a task that is no longer
     // about that issue, and "blank task instead" says what it clears.
     if (issuePicks.length > 0) {
-      setPrompt("");
+      setPrompt(defaultPromptRef.current);
       if (yoloHeld === "issue") { setYolo(yoloDefaultRef.current); setYoloHeld(null); }
-    } else if (yoloHeld === "issue" && !prompt.trim()) {
+    } else if (yoloHeld === "issue" && prompt.trim() === defaultPromptRef.current) {
       setYolo(yoloDefaultRef.current);
       setYoloHeld(null);
     }
@@ -1296,7 +1302,8 @@ export function NewTaskDialog() {
     // overwrite `issue-NNN-…` with `feature/<name>` on the name change.
     setBranchEdited(true);
     // Budgeted so the composed prompt fits what the box will actually send.
-    setPrompt(buildIssuesPrompt(picks, MAX_PROMPT_CHARS, issueLookup?.remote_url ?? ""));
+    const def = defaultPromptRef.current;
+    setPrompt(withProjectPrompt(def, buildIssuesPrompt(picks, promptRoom(def, MAX_PROMPT_CHARS), issueLookup?.remote_url ?? ""), MAX_PROMPT_CHARS));
     // The issues' authors wrote that prompt, so a YOLO default steps back
     // (see `yoloHeld`). A box the user ticked themselves steps back too: the
     // text it was ticked for has just been replaced. One already held for a
@@ -1307,8 +1314,8 @@ export function NewTaskDialog() {
   /** Rows are a multi-select: every ticked issue goes into the ONE task's
    *  prompt. Toggling rebuilds name/branch (from the lead pick) and the
    *  prompt (all picks), so the box always previews exactly what the agent
-   *  will get; un-picking the last clears the prompt - name and branch stay,
-   *  same as leaving issue mode.
+   *  will get; un-picking the last resets the prompt to the project's
+   *  default - name and branch stay, same as leaving issue mode.
    *
    *  It does NOT force worktree mode: an issue task in the main checkout is a
    *  legitimate thing to want, and silently switching the mode under the user
@@ -1319,7 +1326,7 @@ export function NewTaskDialog() {
     setIssuePicks(next);
     if (next.length > 0) fillFromPicks(next);
     else {
-      setPrompt("");
+      setPrompt(defaultPromptRef.current);
       // Release the branch-edited latch fillFromPicks set: with no picks
       // left, the derived branch should follow the name again.
       setBranchEdited(false);
@@ -1963,6 +1970,7 @@ export function NewTaskDialog() {
             <div className="flex flex-col gap-1">
               <textarea
                 ref={attachPrompt}
+                data-testid="new-task-prompt"
                 value={prompt}
                 onChange={e => setPrompt(e.target.value.slice(0, MAX_PROMPT_CHARS))}
                 rows={1}

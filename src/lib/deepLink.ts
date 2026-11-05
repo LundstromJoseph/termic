@@ -36,6 +36,7 @@ import { listen } from "@tauri-apps/api/event";
 import { useApp } from "@/store/app";
 import { useUI } from "@/store/ui";
 import type { Project, Task } from "@/lib/types";
+import { projectDefaultPrompt, promptRoom } from "@/lib/projectPrompt";
 
 /** Prompt cap. Long enough for the intended use (a summarized ticket, per
  *  the issue thread), short enough that a hostile link cannot wedge the
@@ -200,6 +201,16 @@ export function parseDeepLink(url: string, projects: Project[], tasks: Task[] = 
     return {
       ok: false,
       error: `Prompt is too long (${prompt.length} chars, max ${MAX_PROMPT_CHARS}). Shorten it or paste it in directly.`,
+    };
+  }
+  // The dialog puts the project's default prompt ahead of the link's text, so
+  // the link gets only the room the default leaves.
+  const def = projectDefaultPrompt(project);
+  const room = promptRoom(def, MAX_PROMPT_CHARS);
+  if (prompt && def && prompt.length > room) {
+    return {
+      ok: false,
+      error: `Prompt is too long (${prompt.length} chars, max ${room} because ${project.name}'s default initial prompt comes first). Shorten it or paste it in directly.`,
     };
   }
 

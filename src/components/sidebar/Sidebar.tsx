@@ -2135,7 +2135,7 @@ export function Sidebar({ compact: compactProp }: { compact?: boolean } = {}) {
                         try {
                           await createQuickTask({
                             id, projectId: pr.projectId, mode: "worktree", cli: pr.cli,
-                            name, branch: pr.branch.trim(),
+                            name, branch: pr.branch.trim(), seedProjectPrompt: true,
                           });
                           usePendingTasks.getState().remove(id);
                         } catch (err) {
@@ -2148,7 +2148,7 @@ export function Sidebar({ compact: compactProp }: { compact?: boolean } = {}) {
                         // Main checkout is instant. On failure, toast and KEEP the
                         // row open so the user can fix the name and retry.
                         try {
-                          await createQuickTask({ projectId: pr.projectId, mode: "repo_root", cli: pr.cli, name });
+                          await createQuickTask({ projectId: pr.projectId, mode: "repo_root", cli: pr.cli, name, seedProjectPrompt: true });
                           setPendingRepoRoot(null);
                         } catch (err) {
                           ui.pushToast(String(err), "error");

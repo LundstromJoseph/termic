@@ -1527,6 +1527,20 @@ The prompt's instruction half is `builtin:work-issue` from the prompt library,
 read live, so editing it there changes every future issue task
 (`src/lib/issuePrompt.ts`).
 
+### The project's default prompt leads the box
+
+A project's `default_initial_prompt` (Settings > Repository > More) is the
+box's baseline. The dialog opens with it, and a link's or issue's prompt goes
+after it as `<default>\n\n<text>` (`withProjectPrompt` in
+`src/lib/projectPrompt.ts`). The result must fit `MAX_PROMPT_CHARS`, and the
+default never gives: it is the user's standing instruction, capped at
+`MAX_DEFAULT_PROMPT_CHARS` (2000) in Settings. A link whose prompt does not fit
+after the default is rejected by `parseDeepLink`, like any over-cap link, since
+its text exists only in the URL. The issue prompt's budget shrinks by the
+default's length so its instruction tail survives. Un-picking the last issue or leaving issue mode resets the box to
+the default, not to empty. The default never holds YOLO back: the user wrote
+it, so only a link's or issue's text does.
+
 A plain shell or registry terminal has no prompt box, so the composed prompt has
 nowhere to go: the column says so at the point the issue was chosen rather than
 letting Create drop it silently.

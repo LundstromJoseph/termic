@@ -15,6 +15,8 @@ import { isTerminalCli } from "@/lib/agents";
 import { useApp } from "@/store/app";
 import { launchSetupTab } from "@/lib/runTabs";
 import { withCreateLock } from "@/lib/createLock";
+import { projectDefaultPrompt } from "@/lib/projectPrompt";
+import { seedPromptWhenReady, SPAWN_DEADLINE_MS, SETUP_SPAWN_DEADLINE_MS } from "@/lib/seedPrompt";
 import { slugify, branchify } from "@/lib/utils";
 import { scoped } from "@/lib/profileScope";
 import type { SandboxMode, Task } from "@/lib/types";
@@ -164,10 +166,15 @@ export async function createQuickTask(opts: {
   checkoutExisting?: boolean;
   command?: string;
   id?: string;
+  /** Send the project's default initial prompt as the first message. Only
+   *  the sidebar + menu sets it: PR review seeds its own prompt, and a second
+   *  seeder would interleave in the PTY. Custom command is a terminal CLI. */
+  seedProjectPrompt?: boolean;
 }): Promise<Task> {
   const { projectId, cli, name } = opts;
+  const project = useApp.getState().projects.find(p => p.id === projectId);
   // A bare repo has no main checkout, whatever the caller remembered.
-  const bare = !!useApp.getState().projects.find(p => p.id === projectId)?.bare;
+  const bare = !!project?.bare;
   const mode: NewTaskMode = bare ? "worktree" : opts.mode;
   const trimmedName = name.trim();
   const command = opts.command?.trim() || undefined;
@@ -226,6 +233,8 @@ export async function createQuickTask(opts: {
   // Worktrees run their setup script in the background (unfocused) so the
   // main agent keeps focus. Main-checkout tasks have no per-task setup.
   if (mode === "worktree") launchSetupTab(task.id, { focus: false }).catch(() => {});
+  const first = opts.seedProjectPrompt && !isTerminalCli(cli) ? projectDefaultPrompt(project) : "";
+  if (first) seedPromptWhenReady(task.id, first, mode === "worktree" ? SETUP_SPAWN_DEADLINE_MS : SPAWN_DEADLINE_MS);
   return task;
 }
 
