@@ -165,7 +165,10 @@ export async function createQuickTask(opts: {
   command?: string;
   id?: string;
 }): Promise<Task> {
-  const { projectId, mode, cli, name } = opts;
+  const { projectId, cli, name } = opts;
+  // A bare repo has no main checkout, whatever the caller remembered.
+  const bare = !!useApp.getState().projects.find(p => p.id === projectId)?.bare;
+  const mode: NewTaskMode = bare ? "worktree" : opts.mode;
   const trimmedName = name.trim();
   const command = opts.command?.trim() || undefined;
 

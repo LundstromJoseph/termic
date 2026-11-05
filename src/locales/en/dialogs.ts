@@ -403,6 +403,7 @@ export default {
     titleRoot: "New task in the main checkout",
     titleWorktree: "New task in a worktree",
     mainCheckoutNotForSource: "This source always makes a worktree.",
+    mainCheckoutBare: "A bare repository has no main checkout. Tasks here run in worktrees.",
     prCheckedOut: "The main checkout is on {{branch}} now.",
     prCheckedOutStashed: "The main checkout is on {{branch}} now. Your uncommitted work was stashed and put back.",
     prCheckedOutConflict: "The main checkout is on {{branch}}, but restoring your stashed work hit a conflict. Resolve it in the repo.",

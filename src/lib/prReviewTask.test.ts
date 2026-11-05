@@ -18,11 +18,11 @@ vi.mock("@/lib/prReview", () => ({
   reviewTaskName: (n: number) => `review-pr-${n}`,
 }));
 
-import { startPrReview, existingReviewTask, DEFAULT_REVIEW_GROUP } from "@/lib/prReviewTask";
+import { startPrReview, existingReviewTask, DEFAULT_REVIEW_GROUP, type ReviewWhere } from "@/lib/prReviewTask";
 import { taskGroupJoin, taskGroupNew, taskGroupUpdate } from "@/lib/ipc";
 import { createQuickTask } from "@/lib/quickTask";
 import { runPrompt } from "@/lib/runPrompt";
-import { fetchPrForReview } from "@/lib/prReview";
+import { fetchPrForReview, checkoutPrInMain } from "@/lib/prReview";
 import { useApp } from "@/store/app";
 import type { Task } from "@/lib/types";
 import type { Prompt } from "@/store/prompts";
@@ -33,13 +33,13 @@ function task(over: Partial<Task>): Task {
   return { id: "t", project_id: "p", name: "x", branch: "x", base_branch: "main", path: "/x", cli: "claude", port: 0, created: "", archived: false, ...over } as Task;
 }
 
-function review(over: { name?: string; group?: string } = {}) {
+function review(over: { name?: string; group?: string; where?: ReviewWhere } = {}) {
   return startPrReview({ projectId: "p", number: 7, where: "worktree", cli: "claude", prompt: PROMPT, ...over });
 }
 
 beforeEach(() => {
   vi.clearAllMocks();
-  useApp.setState({ tasks: [], loadAll: vi.fn().mockResolvedValue(undefined) } as never);
+  useApp.setState({ tasks: [], projects: [], loadAll: vi.fn().mockResolvedValue(undefined) } as never);
   vi.mocked(fetchPrForReview).mockResolvedValue({ pr: { number: 7 } as never, branch: "alice/fix-login" });
   vi.mocked(createQuickTask).mockImplementation(async o => task({ id: "new", name: o.name, branch: o.branch ?? "" }));
 });
@@ -113,5 +113,18 @@ describe("a PR that already has a task", () => {
     expect(existingReviewTask("p", 9)?.id).toBe("b");
     expect(existingReviewTask("p", 11)?.id).toBe("c");
     expect(existingReviewTask("p", 12, "nobody")).toBeUndefined();
+  });
+});
+
+describe("reviewing in a bare repository", () => {
+  it("makes a worktree on the PR's branch and never moves a main checkout, even when asked for main", async () => {
+    useApp.setState({ projects: [{ id: "p", bare: true }] } as never);
+
+    await review({ where: "main" });
+
+    expect(checkoutPrInMain).not.toHaveBeenCalled();
+    expect(vi.mocked(createQuickTask).mock.calls[0][0]).toMatchObject({
+      mode: "worktree", branch: "alice/fix-login", checkoutExisting: true,
+    });
   });
 });

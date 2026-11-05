@@ -405,7 +405,7 @@ async function injectPromptTracked(
 /** The CLI's `termic new`: the GUI's create recipe end to end, plus
  *  setup-output streaming and tracked prompt injection. Returns at
  *  spawn; the server owns all waiting. */
-async function newTaskHandler(raw: unknown, progress: Progress): Promise<{ taskId: string; spawned: boolean }> {
+export async function newTaskHandler(raw: unknown, progress: Progress): Promise<{ taskId: string; spawned: boolean }> {
   let p = raw as NewTaskParams;
   if (typeof p?.projectId !== "string" || !p.projectId) throw new Error("new_task requires a projectId");
   // A review: the same task the Review a PR dialog makes (lib/prReviewTask),
@@ -440,7 +440,11 @@ async function newTaskHandler(raw: unknown, progress: Progress): Promise<{ taskI
   // Non-git projects cannot host worktrees; the GUI forces the main
   // checkout for them and so do we (the server already rejected an
   // EXPLICIT --worktree with a clear error).
-  const nonGit = useApp.getState().projects.find(pr => pr.id === p.projectId)?.non_git === true;
+  const project = useApp.getState().projects.find(pr => pr.id === p.projectId);
+  const nonGit = project?.non_git === true;
+  // A bare repo has no main checkout. An explicit --main still reaches Rust,
+  // which refuses it with the reason.
+  const bare = project?.bare === true;
   // The server refuses this first; the store is re-checked because a
   // checkout on a plain folder would otherwise quietly open the main
   // checkout instead.
@@ -453,6 +457,8 @@ async function newTaskHandler(raw: unknown, progress: Progress): Promise<{ taskI
     ? p.mode === "main" ? "repo_root" : "worktree"
     : nonGit
       ? "repo_root"
+      : bare
+        ? p.mode === "main" ? "repo_root" : "worktree"
       : checkout || p.mode === "worktree" ? "worktree" : p.mode === "main" ? "repo_root" : readNewTaskMode();
 
   const task = importing ? await importTask(p) : await createTask(p, mode);

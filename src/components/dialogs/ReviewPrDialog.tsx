@@ -100,6 +100,9 @@ export function ReviewPrDialog() {
   }, [open, openFor]);
 
   const project = gitProjects.find(p => p.id === projectId) ?? null;
+  const isBare = project?.bare === true;
+  // A bare repo has no main checkout; the remembered choice is kept for others.
+  const effectiveWhere: ReviewWhere = isBare ? "worktree" : where;
   // A remembered prompt or agent that is gone falls back to the first one.
   const prompt = prompts.find(p => p.id === promptId) ?? prompts[0] ?? null;
   const agent = choices.find(a => a.id === cli)
@@ -156,7 +159,7 @@ export function ReviewPrDialog() {
       const used = prompt
         ? { ...prompt, body: promptText }
         : { id: "review-pr:custom", title: t("reviewPr.title"), body: promptText, builtin: false, enabled: true, modified: false, labels: [CODE_REVIEW_LABEL], forReview: true };
-      await startPrReview({ projectId: project.id, number: n, where, cli: agent.id, prompt: used, name, group });
+      await startPrReview({ projectId: project.id, number: n, where: effectiveWhere, cli: agent.id, prompt: used, name, group });
       close();
     } catch (e) {
       setErr(String(e).replace(/^Error:\s*/, ""));
@@ -271,14 +274,17 @@ export function ReviewPrDialog() {
                 key={v}
                 type="button"
                 role="radio"
-                aria-checked={where === v}
+                aria-checked={effectiveWhere === v}
                 data-testid={`review-pr-where-${v}`}
+                disabled={isBare && v === "main"}
+                title={isBare && v === "main" ? t("newTask.mainCheckoutBare") : undefined}
                 onClick={() => setWhere(v)}
                 className={cn(
                   "flex items-start gap-2 rounded-md border px-2.5 py-2 text-left",
-                  where === v
+                  effectiveWhere === v
                     ? "border-[var(--color-accent)] bg-[var(--color-accent)]/10"
                     : "border-[var(--color-border-soft)] hover:bg-[var(--color-hover)]",
+                  isBare && v === "main" && "cursor-not-allowed opacity-40 hover:bg-transparent",
                 )}
               >
                 <Icon className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[var(--color-accent)]" />

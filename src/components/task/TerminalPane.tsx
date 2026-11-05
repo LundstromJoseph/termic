@@ -2959,6 +2959,12 @@ const captureArmedRef = useRef(false);
         if (cancelled) return;
         const taskDotEnv = !isAgent ? await loadTaskDotEnv(task?.path) : {};
         if (cancelled) return;
+        const uncaged = isShell || isRegistryTerminal || !!(tab as TerminalTab).runTab;
+        // Uncaged spawns only: an agent may run in Docker, where the root is
+        // not mounted and the var would name a missing path.
+        const projectRoot = uncaged
+          ? useApp.getState().projects.find(p => p.id === task.project_id)?.root_path
+          : undefined;
         const spawn = await ipc.ptySpawn({
           cwd: task.path,
           cmd: spawnCmd,
@@ -2972,6 +2978,7 @@ const captureArmedRef = useRef(false);
           // here always trumps a system env.
           env: {
             TERMIC_PORT: String(task.port),
+            ...(projectRoot ? { TERMIC_PROJECT_ROOT: projectRoot } : {}),
             // Extra named ports (GH #196): frozen name→port pairs under
             // the exact names the user configured (topped up just above).
             // Before the per-agent block below, so a power user's env
@@ -3003,7 +3010,7 @@ const captureArmedRef = useRef(false);
           // "custom"`, no runTab) pass the id, since both run something
           // automated against the repo. Rust then gates on
           // task.sandbox_enabled (a no-op when sandbox off).
-          task_id: (isShell || isRegistryTerminal || !!(tab as TerminalTab).runTab) ? undefined : task.id,
+          task_id: uncaged ? undefined : task.id,
           // The tab's CLI may differ from the task's primary CLI
           // (claude task with a gemini tab open, etc.). Send the
           // tab's agent id so the rendered SBPL profile uses THIS

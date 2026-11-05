@@ -190,6 +190,9 @@ export interface Project {
    *  branch, or diff). For `type === "multi"` it means the HOST is a
    *  plain folder. Missing/false = normal git-backed project. */
   non_git?: boolean;
+  /** Bare repo with its git dir at `<root>/.git`: no main checkout, and each
+   *  worktree lives in the root, named after its branch. Detected by Rust. */
+  bare?: boolean;
   /** Multi-repo members with their per-project script overrides.
    *  Each entry pins a member-project id + the scripts to run for
    *  that member when used INSIDE this multi-repo project. Empty

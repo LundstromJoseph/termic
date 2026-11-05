@@ -2985,7 +2985,7 @@ function TaskRow({ w, compact, dragging = false, dragTy = 0, onDragPointerDown, 
   const spotlightTaskId = useApp(s => s.spotlightTaskId[w.project_id] ?? null);
   const isSpotlighted = spotlightTaskId === w.id;
   // Spotlight is worktree-only: non-repo-root, single-repo, git, spotlight_enabled.
-  const spotlightAvailable = !w.is_main_checkout && !!project?.spotlight_enabled && project?.type !== "multi" && !project?.non_git;
+  const spotlightAvailable = !w.is_main_checkout && !!project?.spotlight_enabled && project?.type !== "multi" && !project?.non_git && !project?.bare;
 
   const isActive = activeTaskId === w.id;
   // Live this session = mounted (its TaskView is rendered and owns PTYs).

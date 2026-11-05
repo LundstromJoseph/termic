@@ -402,6 +402,7 @@ export default {
     titleRoot: "在主检出中新建任务",
     titleWorktree: "在工作树中新建任务",
     mainCheckoutNotForSource: "该来源始终创建工作树。",
+    mainCheckoutBare: "裸仓库没有主检出。此处的任务都在工作树中运行。",
     prCheckedOut: "主检出已切换到 {{branch}}。",
     prCheckedOutStashed: "主检出已切换到 {{branch}}。你未提交的修改已暂存并恢复。",
     prCheckedOutConflict: "主检出已切换到 {{branch}}，但恢复暂存的修改时发生冲突。请在仓库中解决。",

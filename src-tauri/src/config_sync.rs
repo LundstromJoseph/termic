@@ -75,6 +75,8 @@ pub(crate) const PROJECT_LOCAL: &[&str] = &[
     "code_intel_servers", "code_intel_commands",
     // When THIS machine registered the project.
     "created",
+    // Detected from this clone's layout, never synced.
+    "bare",
 ];
 
 pub(crate) const MEMBER_SYNC: &[&str] = &[
@@ -3641,6 +3643,7 @@ mod tests {
             code_intel_servers: Some(hm("python", "ty")),
             code_intel_commands: Some(hm("python", "pylsp")),
             non_git: false,
+            bare: Some(false),
             group: Some("work".into()),
             run_scripts: vec![crate::repo_config::RunCommand { label: "t".into(), command: "make".into() }],
             on_pr_merge: Some("ask".into()),
