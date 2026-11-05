@@ -129,6 +129,9 @@ export interface Project {
    *  `false` keeps this project asking even when the app says YOLO.
    *  Resolved by `projectYoloDefault`, never by Rust. */
   default_yolo?: boolean | null;
+  /** Text that leads a new agent task's first message. Personal, read by
+   *  the frontend only (`projectDefaultPrompt`); absent = none. */
+  default_initial_prompt?: string;
   /** Project-level default Docker extra mounts, seeded into new tasks ahead
    *  of the global `Settings.docker_default_extra_mounts`. */
   docker_extra_mounts?: string[];

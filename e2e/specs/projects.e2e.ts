@@ -1238,6 +1238,47 @@ describe("branch new tasks from", () => {
     }
   });
 
+  // seedPromptWhenReady stamps lastInputAt only after it has typed the
+  // prompt, so a stamp on the default tab is the delivery.
+  it("sends the project default as a quick-created agent task's first message", async () => {
+    const nameInput = 'input[placeholder="Task name"]';
+    const setDefault = (v: string) => browser.execute(async (id, text) => {
+      const t = window.__termic!;
+      const p = t.useApp.getState().projects.find((p: any) => p.id === id);
+      await t.ipc.projectUpdate({ ...p, default_initial_prompt: text });
+      await t.useApp.getState().loadAll();
+    }, projectId, v);
+    const prev = await browser.execute((id) => (window.__termic!.useApp.getState().projects
+      .find((p: any) => p.id === id)?.default_initial_prompt ?? "") as string, projectId);
+    await setDefault("Read AGENTS.md before you start.");
+    try {
+      await pickFromNewTaskMenu(projectId, "main", "FakeAgent", nameInput);
+      await waitVisible(nameInput);
+      const name = `e2e-quick-prompt-${Date.now()}`;
+      await setInputValue(nameInput, name);
+      await keysIn(nameInput, "Enter");
+      await browser.waitUntil(
+        () => browser.execute((pid, n) => window.__termic!.useApp.getState().tasks
+          .some((t: any) => t.project_id === pid && t.name === n), projectId, name),
+        { timeout: 10_000, timeoutMsg: "quick-created agent task never appeared" },
+      );
+      const created = await browser.execute((pid, n) => window.__termic!.useApp.getState().tasks
+        .find((t: any) => t.project_id === pid && t.name === n), projectId, name) as any;
+      createdTaskIds.push(created.id);
+
+      await browser.waitUntil(
+        () => browser.execute((id: string) => {
+          const tab = (window.__termic!.useApp.getState().tabs[id] ?? [])
+            .find((t: any) => t.type === "terminal" && t.is_default) as any;
+          return tab?.lastInputAt != null;
+        }, created.id as string),
+        { timeout: 30_000, timeoutMsg: "the project default was never typed into the quick-created agent" },
+      );
+    } finally {
+      await setDefault(prev);
+    }
+  });
+
   // GH #242: the sidebar's quick-create row is a SECOND worktree-creation
   // implementation, separate from NewTaskDialog, and used to block behind
   // its own overlay (QuickCreateProgressDialog) the same way the modal did.
@@ -3419,6 +3460,109 @@ describe("quick-create YOLO note", () => {
     await setProject(cage);
     expect(await noteShown()).toBe(false);
     await setProject({ default_sandbox: false, default_sandbox_mode: null, default_docker: false });
+  });
+});
+
+// The project's default initial prompt (Settings > Repository > More)
+// fills the New Task dialog's box and leads a link's prompt. Cases: the box
+// is pre-filled; a link's text goes after it; no default leaves the box
+// empty; the field saves from Settings. The quick-create delivery case
+// lives in "branch new tasks from", beside the YOLO quick-create case.
+describe("project default initial prompt", () => {
+  const DEFAULT = "Read AGENTS.md before you start.";
+  let projectId = "";
+  let saved = "";
+
+  const setProject = (fields: Record<string, unknown>) => browser.execute(async (id, f) => {
+    const t = window.__termic!;
+    const p = t.useApp.getState().projects.find((p: any) => p.id === id);
+    await t.ipc.projectUpdate({ ...p, ...(f as object) });
+    await t.useApp.getState().loadAll();
+  }, projectId, fields);
+
+  const closeNewTask = async () => {
+    await browser.execute(() => window.__termic!.useUI.getState().closeNewTask());
+    await waitGone('[data-testid="new-task-name"]');
+  };
+
+  /** The prompt box of the dialog that holds the name input, so a stacked
+   *  or lingering dialog cannot answer for it. */
+  const dialogPrompt = () => browser.execute(() => {
+    const dlg = document.querySelector('[data-testid="new-task-name"]')?.closest('[role="dialog"]');
+    return (dlg?.querySelector('[data-testid="new-task-prompt"]') as HTMLTextAreaElement | null)?.value ?? null;
+  });
+
+  const openDialog = async () => {
+    await browser.execute((id) => window.__termic!.useUI.getState().openNewTask(id, { agent: "fakeagent" }), projectId);
+    await waitVisible('[data-testid="new-task-prompt"]');
+  };
+
+  before(async () => {
+    await waitForAppShell();
+    await requireTermicApi();
+    const info = await browser.execute(() => {
+      const p = window.__termic!.useApp.getState().projects.find((p: any) => p.name === "fixture-repo")!;
+      return { id: p.id as string, prompt: (p.default_initial_prompt ?? "") as string };
+    });
+    projectId = info.id;
+    saved = info.prompt;
+  });
+
+  after(async () => {
+    await closeNewTask();
+    await browser.execute(() => window.__termic!.useApp.getState().closeSettings());
+    await setProject({ default_initial_prompt: saved });
+  });
+
+  it("pre-fills the New Task dialog's prompt with the project default", async () => {
+    await setProject({ default_initial_prompt: DEFAULT });
+
+    await openDialog();
+
+    await browser.waitUntil(async () => (await dialogPrompt()) === DEFAULT,
+      { timeout: 5_000, timeoutMsg: "the dialog's prompt box never showed the project default" });
+    await snap("project-prompt-dialog.png");
+    await closeNewTask();
+  });
+
+  it("puts the default in front of a link's prompt", async () => {
+    await setProject({ default_initial_prompt: DEFAULT });
+
+    await browser.execute((u) => window.__termic!.deepLink.handleDeepLink(u),
+      "termic://new?project=fixture-repo&agent=fakeagent&name=pp-link&p=ticket%20body");
+    await waitVisible('[data-testid="new-task-prompt"]');
+
+    await browser.waitUntil(async () => (await dialogPrompt()) === `${DEFAULT}\n\nticket body`,
+      { timeout: 5_000, timeoutMsg: "the link's prompt did not follow the project default" });
+    await snap("project-prompt-dialog-link.png");
+    await closeNewTask();
+  });
+
+  it("keeps the box empty when the project has no default", async () => {
+    await setProject({ default_initial_prompt: "" });
+
+    await openDialog();
+
+    expect(await dialogPrompt()).toBe("");
+    await closeNewTask();
+  });
+
+  it("saves the default from Settings > Repository > More", async () => {
+    const INPUT = '[data-testid="project-default-prompt-input"]';
+    await setProject({ default_initial_prompt: "" });
+    await browser.execute((id) => window.__termic!.useApp.getState().openSettings("repositories", id), projectId);
+    await clickWhenVisible('[data-repo-tab="advanced"]');
+    await waitVisible(INPUT);
+
+    await setInputValue(INPUT, "Run make test first.");
+
+    await browser.waitUntil(
+      () => browser.execute(async (id) => (await window.__termic!.ipc.projectsList())
+        .find((p: any) => p.id === id)?.default_initial_prompt === "Run make test first.", projectId),
+      { timeout: 5_000, timeoutMsg: "the default initial prompt never saved" },
+    );
+    await browser.execute((sel) => document.querySelector(sel)?.scrollIntoView({ block: "center" }), INPUT);
+    await snap("project-prompt-settings.png");
   });
 });
 

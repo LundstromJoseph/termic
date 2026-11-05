@@ -198,6 +198,25 @@ describe("parseDeepLink — length caps", () => {
     expect(err(`termic://new?project=web&prompt=${body}`)).toMatch(/Prompt is too long/);
   });
 
+  it("accepts a prompt that exactly fills the room the project's default prompt leaves", () => {
+    const projects = [project({ id: "p-web", name: "web", default_initial_prompt: "Read AGENTS.md" })];
+    const body = "x".repeat(MAX_PROMPT_CHARS - "Read AGENTS.md".length - 2);
+
+    const v = okNew(`termic://new?project=web&prompt=${body}`, projects);
+
+    expect(v.prompt).toBe(body);
+  });
+
+  it("rejects a prompt that fits the cap but not alongside the project's default prompt, naming the default", () => {
+    const projects = [project({ id: "p-web", name: "web", default_initial_prompt: "Read AGENTS.md" })];
+    const body = "x".repeat(MAX_PROMPT_CHARS - "Read AGENTS.md".length - 1);
+
+    const e = err(`termic://new?project=web&prompt=${body}`, projects);
+
+    expect(e).toMatch(/Prompt is too long/);
+    expect(e).toMatch(/web's default initial prompt/);
+  });
+
   it("rejects a name over the cap", () => {
     expect(err(`termic://new?project=web&name=${"n".repeat(MAX_NAME_CHARS + 1)}`))
       .toMatch(/Task name is too long/);

@@ -50,6 +50,7 @@ use std::time::Duration;
 pub(crate) const PROJECT_SYNC: &[&str] = &[
     "id", "name", "group", "base_branch", "preview_url", "files_to_copy",
     "setup_script", "run_script", "archive_script", "run_scripts", "default_cli",
+    "default_initial_prompt",
     // Safety defaults: they sync, and any change to one is shown before or as
     // it applies (`SAFETY_PROJECT`).
     "default_sandbox", "default_sandbox_mode", "default_docker", "default_yolo",
@@ -3631,6 +3632,7 @@ mod tests {
             default_sandbox_mode: Some(SandboxMode::Monitor),
             default_docker: true,
             default_yolo: Some(true),
+            default_initial_prompt: "Read AGENTS.md first.".into(),
             docker_extra_mounts: vec!["/Users/u/x:/x".into()],
             sandbox_rw_paths: vec!["/Users/u/rw".into()],
             sandbox_allowed_hosts: vec!["acme.com".into()],

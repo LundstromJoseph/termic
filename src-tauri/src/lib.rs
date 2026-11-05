@@ -174,6 +174,12 @@ pub struct Project {
     /// never be able to switch approvals off for whoever clones it.
     #[serde(default)]
     pub default_yolo: Option<bool>,
+    /// Text that leads the first message of a new agent task. Empty = none.
+    /// Personal (projects.json), never `.termic.yaml`. Read by the FRONTEND
+    /// only (New Task dialog, sidebar quick create): Rust never types it, so
+    /// CLI/MCP `termic new`, Agent Race, PR review and schedules never send it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub default_initial_prompt: String,
     /// Project-level default Docker extra mounts (`host_path:container_path`),
     /// seeded into new tasks ahead of `Settings.docker_default_extra_mounts`.
     /// The global list is the fallback, so a project only states what is
@@ -6254,6 +6260,7 @@ fn project_add(window: tauri::Window, root_path: String, non_git: Option<bool>) 
         default_sandbox_mode: None,
         default_docker: false,
         default_yolo: None,
+        default_initial_prompt: String::new(),
         docker_extra_mounts: Vec::new(),
         sandbox_rw_paths: Vec::new(),
         sandbox_allowed_hosts: Vec::new(),
@@ -6453,6 +6460,7 @@ fn project_add_multi(window: tauri::Window, root_path: String, name: String, mem
         default_sandbox_mode: None,
         default_docker: false,
         default_yolo: None,
+        default_initial_prompt: String::new(),
         docker_extra_mounts: Vec::new(),
         sandbox_rw_paths: Vec::new(),
         sandbox_allowed_hosts: Vec::new(),
@@ -37371,6 +37379,22 @@ filename f.rs
             let back: Project = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
             assert_eq!(back.default_yolo, v);
         }
+    }
+
+    #[test]
+    fn project_default_prompt_loads_empty_and_round_trips() {
+        let legacy: Project = serde_json::from_str(
+            r#"{"id":"p1","name":"proj","root_path":"/r"}"#,
+        ).unwrap();
+        assert_eq!(legacy.default_initial_prompt, "");
+        // Not written when empty, so projects.json and sync exports stay
+        // byte-identical for anyone who never sets it.
+        let json = serde_json::to_string(&legacy).unwrap();
+        assert!(!json.contains("default_initial_prompt"));
+
+        let p = Project { id: "p2".into(), default_initial_prompt: "Read AGENTS.md first.".into(), ..Default::default() };
+        let back: Project = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+        assert_eq!(back.default_initial_prompt, "Read AGENTS.md first.");
     }
 
     #[test]
