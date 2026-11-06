@@ -85,6 +85,7 @@ mod procmon;
 mod docker;
 mod agent_dirs;
 mod profiles;
+mod reviews;
 mod schedules;
 mod sudo_touchid;
 mod caffeinate;
@@ -4693,7 +4694,7 @@ fn pty_spawn(
             // agent to prompt them back (src/lib/agentBriefing.ts).
             cmd.env(
                 "TERMIC_CLI_HELP",
-                "You are running INSIDE a Termic task ($TERMIC_TASK_ID): Termic runs coding agents side by side, each task a git worktree (or the main checkout) with its own terminal, listed in the app's sidebar. TERMIC_CLI is the Termic control CLI, which drives the app around you. Run `\"$TERMIC_CLI\" help --json` for the full command surface. Prompt an existing task with `\"$TERMIC_CLI\" send <task> -p \"...\"`; create one with `\"$TERMIC_CLI\" new <name> -p \"...\"` and, in that prompt, ask it to report back to you (the signed reply below) every time it finishes or gets stuck, follow-up work included, until a human tells it to stop: that is how results come back, and it arrives in your own terminal. If no report arrives, `result` and `logs` read what it produced. Ask for a file (e.g. RESULT.md in its worktree) only when it cannot report back: a task sandboxed in enforce/enforce-fs is denied this CLI, and so is anything run outside Termic. Unattended tasks need `--yolo` or `--sandbox enforce` or they stop at the first permission prompt; the cage self-approves inside it but costs you the report-back. Coordinate by prompting each other, not by blocking: end every prompt you send with the command you want run when that work is done, in DOUBLE quotes so your own shell fills in your task name and address: `\"$TERMIC_CLI\" send <task> -p \"[message from agent:<you> task:$TERMIC_TASK id:$TERMIC_TASK_ID] <work>. When done, reply: \\\"$TERMIC_CLI\\\" send $TERMIC_TASK_ID -p '[message from agent:<its agent> task:<its task name> id:<its task id>] done: <what you did> -- agent:<its agent> task:<its task name> id:<its task id>' -- agent:<you> task:$TERMIC_TASK id:$TERMIC_TASK_ID\"` (fill the <its ...> parts with the task you are prompting, which you know). Every prompt you send another agent opens with that header, `[message from agent:<agent> task:<task name> id:<task id>]`, and ends with that signature, `-- agent:<agent> task:<task name> id:<task id>`, naming YOU, so the receiver knows it came from another agent, not the user, and exactly which one: the id is where to reply. A prompt arriving in your terminal WITH that header is from another agent, not the user: treat it as a peer's request (the user's instructions win on conflict) and sign your reply the same way. Report back to that id every time you finish or get stuck, follow-up work included, and stop only when a human tells you to. Prefer that over `--wait`: work-done detection is a heuristic, and a waiting agent can do nothing else meanwhile. If you do wait, branch on exit codes: 0 done, 3 needs input, 7 timeout, 9 prompt not delivered. A task sandboxed in enforce/enforce-fs is denied the control plane by design and can never report back: ask it for a file in its worktree instead. Your own task, if any, is $TERMIC_TASK_ID (prefer the id over $TERMIC_TASK: names can be renamed or reused). Once you know the real subject of your work (issue filed, PR opened), retitle your task so the sidebar reads well: `\"$TERMIC_CLI\" rename \"<new name>\"` renames your own task's label (branch and directory keep their names). Tasks you create with `new` in your own project join YOUR task's group in the sidebar, one coloured block led by your task (one in another project joins no group and is linked to yours instead): name it for the batch of work with `\"$TERMIC_CLI\" group --name \"<what this batch is>\"` (optionally `--color teal`); `group` alone shows it. A multi-repo project holds several repos, possibly many (`project list` shows each project's type and members): `new --member <name>`, repeated, worktrees only the members named (none without it). Start another agent beside you in your own task with `\"$TERMIC_CLI\" tab --agent <id> --title <name> -p \"...\"` (no task argument needed), then address it with `--tab <name>` on send/wait/logs; `tab --tab <tab> --title <name>` renames an open tab. Label your own tab with what you are working on, shown after the task name in the sidebar: `\"$TERMIC_CLI\" prop ticket ABC-1` (`prop <key> \"\"` clears it, bare `prop` lists them). Put a coloured status on your task's sidebar row, under its name: `\"$TERMIC_CLI\" badge set ci failing --color error` (good, warning, error, neutral or a hex; the same key replaces it, `badge rm <key>` removes it, `badge list` lists them). For notes, plans, findings, logs or a report the user should READ rather than commit, use a scratchpad instead of writing temporary .md files into the repo: it is a tab in your task that stays out of git and updates live as you write: `\"$TERMIC_CLI\" scratchpad new --title \"<title>\" -c \"<text>\"` prints its id; `scratchpad write <id> --append -c -` adds stdin to it, `scratchpad read <id>` prints it, `scratchpad list` lists them. If this machine is paired with others on its network (`\"$TERMIC_CLI\" peer list`), `--peer <machine>` runs any verb THERE (`\"$TERMIC_CLI\" --peer <machine> new <name> -p \"...\"`): add `peer:<this machine's name, from peer list>` to your header and ask for the reply as `termic --peer <this machine> send $TERMIC_TASK_ID ...`; a header carrying `peer:<machine>` came from that machine, so answer it with `--peer <machine>`.",
+                "You are running INSIDE a Termic task ($TERMIC_TASK_ID): Termic runs coding agents side by side, each task a git worktree (or the main checkout) with its own terminal, listed in the app's sidebar. TERMIC_CLI is the Termic control CLI, which drives the app around you. Run `\"$TERMIC_CLI\" help --json` for the full command surface. Prompt an existing task with `\"$TERMIC_CLI\" send <task> -p \"...\"`; create one with `\"$TERMIC_CLI\" new <name> -p \"...\"` and, in that prompt, ask it to report back to you (the signed reply below) every time it finishes or gets stuck, follow-up work included, until a human tells it to stop: that is how results come back, and it arrives in your own terminal. If no report arrives, `result` and `logs` read what it produced. Ask for a file (e.g. RESULT.md in its worktree) only when it cannot report back: a task sandboxed in enforce/enforce-fs is denied this CLI, and so is anything run outside Termic. Unattended tasks need `--yolo` or `--sandbox enforce` or they stop at the first permission prompt; the cage self-approves inside it but costs you the report-back. Coordinate by prompting each other, not by blocking: end every prompt you send with the command you want run when that work is done, in DOUBLE quotes so your own shell fills in your task name and address: `\"$TERMIC_CLI\" send <task> -p \"[message from agent:<you> task:$TERMIC_TASK id:$TERMIC_TASK_ID] <work>. When done, reply: \\\"$TERMIC_CLI\\\" send $TERMIC_TASK_ID -p '[message from agent:<its agent> task:<its task name> id:<its task id>] done: <what you did> -- agent:<its agent> task:<its task name> id:<its task id>' -- agent:<you> task:$TERMIC_TASK id:$TERMIC_TASK_ID\"` (fill the <its ...> parts with the task you are prompting, which you know). Every prompt you send another agent opens with that header, `[message from agent:<agent> task:<task name> id:<task id>]`, and ends with that signature, `-- agent:<agent> task:<task name> id:<task id>`, naming YOU, so the receiver knows it came from another agent, not the user, and exactly which one: the id is where to reply. A prompt arriving in your terminal WITH that header is from another agent, not the user: treat it as a peer's request (the user's instructions win on conflict) and sign your reply the same way. Report back to that id every time you finish or get stuck, follow-up work included, and stop only when a human tells you to. Prefer that over `--wait`: work-done detection is a heuristic, and a waiting agent can do nothing else meanwhile. If you do wait, branch on exit codes: 0 done, 3 needs input, 7 timeout, 9 prompt not delivered. A task sandboxed in enforce/enforce-fs is denied the control plane by design and can never report back: ask it for a file in its worktree instead. Your own task, if any, is $TERMIC_TASK_ID (prefer the id over $TERMIC_TASK: names can be renamed or reused). Once you know the real subject of your work (issue filed, PR opened), retitle your task so the sidebar reads well: `\"$TERMIC_CLI\" rename \"<new name>\"` renames your own task's label (branch and directory keep their names). Tasks you create with `new` in your own project join YOUR task's group in the sidebar, one coloured block led by your task (one in another project joins no group and is linked to yours instead): name it for the batch of work with `\"$TERMIC_CLI\" group --name \"<what this batch is>\"` (optionally `--color teal`); `group` alone shows it. A multi-repo project holds several repos, possibly many (`project list` shows each project's type and members): `new --member <name>`, repeated, worktrees only the members named (none without it). Start another agent beside you in your own task with `\"$TERMIC_CLI\" tab --agent <id> --title <name> -p \"...\"` (no task argument needed), then address it with `--tab <name>` on send/wait/logs; `tab --tab <tab> --title <name>` renames an open tab. Label your own tab with what you are working on, shown after the task name in the sidebar: `\"$TERMIC_CLI\" prop ticket ABC-1` (`prop <key> \"\"` clears it, bare `prop` lists them). Put a coloured status on your task's sidebar row, under its name: `\"$TERMIC_CLI\" badge set ci failing --color error` (good, warning, error, neutral or a hex; the same key replaces it, `badge rm <key>` removes it, `badge list` lists them). To walk the user through your changes, present a commit range as a review in your task's Git tab: `\"$TERMIC_CLI\" present new main..HEAD --title \"<title>\"` prints its id; `present comment r1 --file <path> --line 12-14 -m \"...\"` opens a thread (no `--line`: the whole file). The user's comments arrive in your terminal naming each thread: answer each with `present reply r1-t3 -m \"...\"`, not in the terminal; `present show r1 --since <seq>` catches up, and a new round after an amend or rebase is a new review. For notes, plans, findings, logs or a report the user should READ rather than commit, use a scratchpad instead of writing temporary .md files into the repo: it is a tab in your task that stays out of git and updates live as you write: `\"$TERMIC_CLI\" scratchpad new --title \"<title>\" -c \"<text>\"` prints its id; `scratchpad write <id> --append -c -` adds stdin to it, `scratchpad read <id>` prints it, `scratchpad list` lists them. If this machine is paired with others on its network (`\"$TERMIC_CLI\" peer list`), `--peer <machine>` runs any verb THERE (`\"$TERMIC_CLI\" --peer <machine> new <name> -p \"...\"`): add `peer:<this machine's name, from peer list>` to your header and ask for the reply as `termic --peer <this machine> send $TERMIC_TASK_ID ...`; a header carrying `peer:<machine>` came from that machine, so answer it with `--peer <machine>`.",
             );
         }
     }
@@ -14677,6 +14678,44 @@ pub struct GitCompare {
 /// surface, not a bulk export.
 const MAX_COMPARE_FILES: usize = 5_000;
 
+/// The tracked half of a diff, one row per path, in git's order. `revs` is
+/// `[base]` (base vs the working tree) or `[base, head]` (a commit range).
+/// `with_fp` stats the working-tree file, which only means something when the
+/// right side IS the working tree.
+fn tracked_diff_files(cwd: &Path, revs: &[&str], with_fp: bool) -> Vec<GitFile> {
+    // Both halves of the range in one pass each: name-status for the glyph,
+    // numstat for the churn. Two processes over the same range rather than
+    // one, because git has no format that carries both.
+    // `--relative` for the same reason as everywhere else: the paths these
+    // rows carry have to be the project's, not the repository root's.
+    let run = |kind: &str| {
+        let mut args = vec!["--no-pager", "diff", kind, "-M", "-z", "--relative"];
+        args.extend_from_slice(revs);
+        git(&args, cwd).unwrap_or_default()
+    };
+    let names = run("--name-status");
+    let stats = run("--numstat");
+    let churn: std::collections::HashMap<String, (Option<u32>, Option<u32>)> =
+        parse_numstat_z(&stats).into_iter().map(|(p, a, d)| (p, (a, d))).collect();
+
+    let mut files: Vec<GitFile> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for (status, path) in parse_name_status_z(&names) {
+        if !seen.insert(path.clone()) {
+            continue;
+        }
+        let (added, removed) = churn.get(&path).copied().unwrap_or((None, None));
+        files.push(GitFile {
+            status,
+            fp: if with_fp { file_fp(&cwd.join(&path)) } else { String::new() },
+            path,
+            added,
+            removed,
+        });
+    }
+    files
+}
+
 fn git_compare(cwd: &Path, base: &str, merge_base: bool) -> Result<GitCompare, String> {
     let tip = resolve_rev(cwd, base)?;
     // Three-dot semantics by default: "what this branch added", not "how the
@@ -14699,33 +14738,8 @@ fn git_compare(cwd: &Path, base: &str, merge_base: bool) -> Result<GitCompare, S
         tip.clone()
     };
 
-    // Both halves of the range in one pass each: name-status for the glyph,
-    // numstat for the churn. Two processes over the same range rather than
-    // one, because git has no format that carries both.
-    // `--relative` for the same reason as everywhere else: the paths these
-    // rows carry have to be the project's, not the repository root's.
-    let names = git(&["--no-pager", "diff", "--name-status", "-M", "-z", "--relative", &base_sha], cwd)
-        .unwrap_or_default();
-    let stats = git(&["--no-pager", "diff", "--numstat", "-M", "-z", "--relative", &base_sha], cwd)
-        .unwrap_or_default();
-    let churn: std::collections::HashMap<String, (Option<u32>, Option<u32>)> =
-        parse_numstat_z(&stats).into_iter().map(|(p, a, d)| (p, (a, d))).collect();
-
-    let mut files: Vec<GitFile> = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    for (status, path) in parse_name_status_z(&names) {
-        if !seen.insert(path.clone()) {
-            continue;
-        }
-        let (added, removed) = churn.get(&path).copied().unwrap_or((None, None));
-        files.push(GitFile {
-            status,
-            fp: file_fp(&cwd.join(&path)),
-            path,
-            added,
-            removed,
-        });
-    }
+    let mut files = tracked_diff_files(cwd, &[&base_sha], true);
+    let mut seen: std::collections::HashSet<String> = files.iter().map(|f| f.path.clone()).collect();
 
     // Untracked files are part of "different from the base" even though no
     // tree contains them — an agent's brand-new, not-yet-added file is exactly
@@ -14752,6 +14766,11 @@ fn git_compare(cwd: &Path, base: &str, merge_base: bool) -> Result<GitCompare, S
         });
     }
 
+    Ok(compare_result(base.to_string(), base_sha, current_branch(cwd).unwrap_or_default(), no_merge_base, files))
+}
+
+/// Sorts, caps and sums `files` into the reply both Compare modes send.
+fn compare_result(base: String, base_sha: String, branch: String, no_merge_base: bool, mut files: Vec<GitFile>) -> GitCompare {
     files.sort_by(|a, b| a.path.cmp(&b.path));
     let truncated = files.len() > MAX_COMPARE_FILES;
     if truncated {
@@ -14761,18 +14780,72 @@ fn git_compare(cwd: &Path, base: &str, merge_base: bool) -> Result<GitCompare, S
     // actually on screen.
     let added = files.iter().filter_map(|f| f.added).sum();
     let removed = files.iter().filter_map(|f| f.removed).sum();
-
-    Ok(GitCompare {
-        base: base.to_string(),
+    GitCompare {
+        base,
         base_short: base_sha.chars().take(8).collect(),
         base_sha,
-        branch: current_branch(cwd).unwrap_or_default(),
+        branch,
         no_merge_base,
         files,
         added,
         removed,
         truncated,
+    }
+}
+
+/// A review's `base..head`: committed blobs on both sides, so no untracked
+/// pass, no branch, and an empty `fp` on every row (nothing to mark viewed).
+fn git_range(cwd: &Path, base_sha: &str, head_sha: &str) -> Result<GitCompare, String> {
+    // `tracked_diff_files` reads a git failure as "no files", and a review is
+    // never empty, so a sha gc'd after an amend must be an error, not a blank list.
+    for sha in [base_sha, head_sha] {
+        if git(&["cat-file", "-e", &format!("{sha}^{{commit}}")], cwd).is_err() {
+            return Err(format!("commit {} is no longer in this repo", &sha[..sha.len().min(8)]));
+        }
+    }
+    let files = tracked_diff_files(cwd, &[base_sha, head_sha], false);
+    Ok(compare_result(base_sha.to_string(), base_sha.to_string(), String::new(), false, files))
+}
+
+#[tauri::command]
+async fn task_git_range(id: String, dir_name: String, base: String, head: String) -> Result<GitCompare, String> {
+    // The caller passes a review's stored full shas, never a typed ref.
+    if !is_commit_ish(&base) || !is_commit_ish(&head) {
+        return Err("base and head must be commit shas".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || -> Result<GitCompare, String> {
+        let w = load_tasks_all().into_iter().find(|w| w.id == id).ok_or("no task")?;
+        let cwd = repo_cwd(&w, &dir_name)?;
+        git_range(&cwd, &base, &head)
     })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn review_list(task_id: String) -> Result<Vec<termic_proto::Review>, String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<_, String> {
+        let w = load_tasks_all().into_iter().find(|w| w.id == task_id).ok_or("no task")?;
+        Ok(reviews::list(&w))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Tauri-initiated writes do not push `review_changed`: the caller applies
+/// the returned review itself.
+#[tauri::command]
+async fn review_post(
+    task_id: String,
+    review_id: String,
+    items: Vec<reviews::ReviewPostItem>,
+) -> Result<reviews::ReviewPostResult, String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<_, String> {
+        let w = load_tasks_all().into_iter().find(|w| w.id == task_id).ok_or("no task")?;
+        reviews::post(&w, &review_id, items).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -17196,7 +17269,8 @@ fn task_file_diff_sides_for_task(w: &Task, path: &str, scope: Option<&str>) -> R
     //   "unstaged"  → index vs working tree  (what `git diff` shows)
     //   "commit:SHA"→ SHA^ vs SHA            (History tab, issue #199)
     //   "base:SHA"  → SHA vs working tree    (History › Compare, issue #208)
-    //   None        → HEAD vs working tree   (full uncommitted delta; the
+    //   "review:ID" → the review's base vs head (agent-presented reviews)
+    //   None       → HEAD vs working tree   (full uncommitted delta; the
     //                 pre-#122 behavior, kept for callers with no pane)
     //
     // "base:" is the only scope besides the default whose RIGHT side is the
@@ -17235,11 +17309,27 @@ fn task_file_diff_sides_for_task(w: &Task, path: &str, scope: Option<&str>) -> R
     let show_at = |rev: &str| git_bytes(&["--no-pager", "show", &format!("{rev}:./{rel_path}")], &cwd).ok();
     let commit_sha = scope.and_then(|s| s.strip_prefix("commit:")).filter(|s| is_commit_ish(s));
     let base_sha = scope.and_then(|s| s.strip_prefix("base:")).filter(|s| is_commit_ish(s));
-    let (original, modified) = match (commit_sha, base_sha, scope) {
-        (Some(sha), _, _) => (show_at(&format!("{sha}^")), show_at(sha)),
-        (None, Some(sha), _) => (show_at(sha), read_worktree()),
-        (None, None, Some("staged")) => (show_head(), show_index()),
-        (None, None, Some("unstaged")) => (show_index(), read_worktree()),
+    let review = match scope.and_then(|s| s.strip_prefix("review:")) {
+        Some(rid) => {
+            let r = reviews::load(w, rid).map_err(|e| e.to_string())?;
+            // Rust wrote both shas from rev-parse; checked anyway, like every
+            // other revision that reaches `git show` here.
+            if !is_commit_ish(&r.base) || !is_commit_ish(&r.head) {
+                return Err(format!("review {rid} holds a malformed sha"));
+            }
+            if cwd != repo_cwd(w, &r.dir_name)? {
+                return Err(format!("{path} is not in review {rid}'s repo"));
+            }
+            Some(r)
+        }
+        None => None,
+    };
+    let (original, modified) = match (&review, commit_sha, base_sha, scope) {
+        (Some(r), _, _, _) => (show_at(&r.base), show_at(&r.head)),
+        (None, Some(sha), _, _) => (show_at(&format!("{sha}^")), show_at(sha)),
+        (None, None, Some(sha), _) => (show_at(sha), read_worktree()),
+        (None, None, None, Some("staged")) => (show_head(), show_index()),
+        (None, None, None, Some("unstaged")) => (show_index(), read_worktree()),
         _ => (show_head(), read_worktree()),
     };
     let fp = modified_path.as_deref().map(file_fp).unwrap_or_default();
@@ -27334,7 +27424,7 @@ pub fn run() {
             task_diff, task_diff_stat, task_files,
             desktop_integration_status, desktop_integration_add, desktop_integration_remove, task_list_files_for_finder, task_match_ignored_files, task_send_diff_to_main,
             task_changes, task_git_status, task_git_branches, project_git_branches, project_branch_context, project_git_current_branch, task_git_checkout, task_git_update, task_git_update_all, task_git_update_info, task_stage, task_unstage, task_commit, task_discard,
-            task_git_log, task_git_refs, task_git_push, task_git_commit_files, task_git_compare, task_git_blame, task_git_commit_meta, task_git_commit_offset,
+            task_git_log, task_git_refs, task_git_push, task_git_commit_files, task_git_compare, task_git_range, review_list, review_post, task_git_blame, task_git_commit_meta, task_git_commit_offset,
             detect_forges, task_pr_status, task_member_pr_status, task_pr_create, task_pr_comments, task_set_pr_watch, task_set_pr_comments_seen,
             project_forge_issues, project_forge_provider, project_forge_prs, project_fetch_pr_branch, project_git_checkout,
             task_file_diff, task_file_diff_sides, task_file_read, file_read_external, clipboard_image_save, clipboard_image_capture, task_file_read_base64, task_file_fp, task_file_write, task_dir_list, task_path_stat,
@@ -35400,6 +35490,96 @@ filename f.rs
         // default HEAD-vs-worktree sides.
         let bogus = task_file_diff_sides_for_task(&task, "shared.txt", Some("base:not-hex")).unwrap();
         assert_eq!(bogus.original, "one\ntwo\n", "an unparseable scope falls back to HEAD");
+    }
+
+    #[test]
+    fn git_range_lists_only_committed_changes_between_the_two_shas_with_no_fingerprints() {
+        let dir = tempdir().unwrap();
+        let repo = dir.path().to_path_buf();
+        let main = compare_fixture(&repo);
+        let base = git(&["rev-parse", &main], &repo).unwrap().trim().to_string();
+        let head = git(&["rev-parse", "HEAD"], &repo).unwrap().trim().to_string();
+
+        let cmp = git_range(&repo, &base, &head).unwrap();
+
+        // The uncommitted edit to shared.txt and untracked.txt are not in the range.
+        let paths: Vec<&str> = cmp.files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(paths, vec!["committed.txt"]);
+        assert_eq!(cmp.files[0].status, "A");
+        assert_eq!(cmp.files[0].fp, "");
+        assert_eq!((cmp.added, cmp.removed), (1, 0));
+        assert_eq!((cmp.base.as_str(), cmp.base_sha.as_str(), cmp.branch.as_str()), (base.as_str(), base.as_str(), ""));
+    }
+
+    #[test]
+    fn review_scoped_diff_sides_read_the_reviews_base_and_head_blobs_never_the_working_tree() {
+        let dir = tempdir().unwrap();
+        let repo = dir.path().to_path_buf();
+        let main = compare_fixture(&repo);
+        let task = Task { id: "t1".into(), ..task_at(&repo) };
+        crate::test_support::with_scratch_data_dir(|_| {
+            let review = reviews::create(&task, reviews::NewReview {
+                range: format!("{main}..topic"),
+                title: None,
+                author: "claude".into(),
+                recipient_tab: None,
+                dir_name: String::new(),
+            })
+            .unwrap();
+            let scope = format!("review:{}", review.id);
+
+            let added = task_file_diff_sides_for_task(&task, "committed.txt", Some(&scope)).unwrap();
+            // shared.txt is edited in the working tree; the head side is still the commit.
+            let shared = task_file_diff_sides_for_task(&task, "shared.txt", Some(&scope)).unwrap();
+            let unknown = task_file_diff_sides_for_task(&task, "committed.txt", Some("review:r9"));
+
+            assert!(!added.original_exists && added.modified_exists);
+            assert_eq!(added.modified, "c\n");
+            assert_eq!((shared.original.as_str(), shared.modified.as_str()), ("one\ntwo\n", "one\ntwo\n"));
+            assert_eq!(unknown.err().as_deref(), Some("no such review r9"));
+        });
+    }
+
+    #[test]
+    fn git_range_refuses_a_well_formed_sha_that_is_not_in_the_repo() {
+        let dir = tempdir().unwrap();
+        let repo = dir.path().to_path_buf();
+        compare_fixture(&repo);
+        let head = git(&["rev-parse", "HEAD"], &repo).unwrap().trim().to_string();
+
+        let res = git_range(&repo, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", &head);
+
+        assert_eq!(res.err().as_deref(), Some("commit deadbeef is no longer in this repo"));
+    }
+
+    #[test]
+    fn review_scoped_diff_sides_refuse_a_malformed_id_a_malformed_stored_sha_and_a_path_outside_the_reviews_repo() {
+        let dir = tempdir().unwrap();
+        let repo = dir.path().to_path_buf();
+        let main = compare_fixture(&repo);
+        let member = tempdir().unwrap();
+        let task = Task {
+            id: "t1".into(),
+            composition: vec![TaskMember { dir_name: "frontend".into(), path: member.path().to_string_lossy().into_owned(), ..Default::default() }],
+            ..task_at(&repo)
+        };
+        crate::test_support::with_scratch_data_dir(|_| {
+            let new = |range: String| reviews::NewReview { range, title: None, author: "claude".into(), recipient_tab: None, dir_name: String::new() };
+            reviews::create(&task, new(format!("{main}..topic"))).unwrap();
+            let r2 = reviews::create(&task, new(format!("{main}..topic"))).unwrap();
+            // Hand-edit r2 on disk so its base is no longer a sha.
+            let file = profile_dir(&task.profile).unwrap().join("scratch/t1/reviews/r2.json");
+            let text = fs::read_to_string(&file).unwrap().replace(&r2.base, "--output=x");
+            fs::write(&file, text).unwrap();
+
+            let malformed_id = task_file_diff_sides_for_task(&task, "committed.txt", Some("review:../x"));
+            let malformed_sha = task_file_diff_sides_for_task(&task, "committed.txt", Some("review:r2"));
+            let other_repo = task_file_diff_sides_for_task(&task, "frontend/committed.txt", Some("review:r1"));
+
+            assert!(malformed_id.is_err());
+            assert_eq!(malformed_sha.err().as_deref(), Some("review r2 holds a malformed sha"));
+            assert_eq!(other_repo.err().as_deref(), Some("frontend/committed.txt is not in review r1's repo"));
+        });
     }
 
     #[test]

@@ -13,7 +13,12 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { EditorView } from "@codemirror/view";
 import { reviewCommentsExtension, dispatchFileComment, dispatchSelectionComment } from "./reviewCommentsExt";
+import { sendReviewComments } from "@/lib/sendReviewComments";
 import { useReviewComments } from "@/store/reviewComments";
+import { useReviews } from "@/store/reviews";
+import type { Review, ReviewThread } from "@/lib/types";
+
+vi.mock("@/lib/sendReviewComments", () => ({ sendReviewComments: vi.fn(async () => true) }));
 
 const TASK = "task-157";
 const FILE = "src/thing.ts";
@@ -288,5 +293,241 @@ describe("selection gutter", () => {
     view.dispatch({ selection: { anchor: 0 } });
     await settle();
     expect(view.dom.querySelector(".tc-instant-tip")).toBeNull();
+  });
+});
+
+describe("agent-presented review threads in a review: diff", () => {
+  const REVIEW = "r1";
+
+  function thread(id: string, file: string, lines: [number, number] | null, ...by: ("agent" | "user")[]): ReviewThread {
+    return {
+      id, file, start_line: lines?.[0] ?? null, end_line: lines?.[1] ?? null, quote: lines ? "x" : "",
+      comments: by.map((b, i) => ({ seq: i + 1, by: b, author: b === "agent" ? "claude" : "", body: `${b} ${i}`, at: "" })),
+    };
+  }
+
+  function putReview(seq: number, threads: ReviewThread[], dirName = "") {
+    const review: Review = {
+      version: 1, id: REVIEW, task_id: TASK, dir_name: dirName, base: "a", head: "b", base_ref: "main",
+      head_ref: "HEAD", title: null, author: "claude", recipient_tab: null, created_at: "", seq,
+      files: [FILE], files_truncated: false, threads,
+    };
+    useReviews.getState().apply(TASK, review);
+  }
+
+  function mountReview(file = FILE) {
+    const parent = document.createElement("div");
+    document.body.appendChild(parent);
+    const view = new EditorView({
+      parent,
+      doc: DOC,
+      extensions: [reviewCommentsExtension(TASK, file, undefined, REVIEW)],
+    });
+    views.push(view);
+    return view;
+  }
+
+  const cards = (view: EditorView) => Array.from(view.contentDOM.querySelectorAll<HTMLElement>(".tc-thread-card"));
+  const authors = (card: HTMLElement) =>
+    Array.from(card.querySelectorAll(".tc-thread-author")).map(e => e.textContent);
+
+  beforeEach(() => {
+    useReviews.setState({ byKey: {}, idsByTask: {}, awaiting: {}, loaded: {}, shown: {} });
+  });
+
+  it("renders each of this file's threads as a card with an author line per comment, the user as You", async () => {
+    putReview(3, [
+      thread("r1-t1", FILE, [2, 3], "agent", "user"),
+      thread("r1-t2", "src/other.ts", [1, 1], "agent"),
+    ]);
+
+    const view = mountReview();
+    await settle();
+
+    const [card, ...rest] = cards(view);
+    expect(rest).toHaveLength(0);
+    expect(card.dataset.threadId).toBe("r1-t1");
+    expect(authors(card)).toEqual(["claude", "You"]);
+    expect(Array.from(card.querySelectorAll(".tc-comment-body")).map(e => e.textContent)).toEqual(["agent 0", "user 1"]);
+    expect(view.contentDOM.querySelectorAll(".tc-commented-line")).toHaveLength(2);
+    expectMeasuredBox(card, view);
+  });
+
+  it("puts a file-level thread above the first line", async () => {
+    putReview(1, [thread("r1-t1", FILE, null, "agent")]);
+
+    const view = mountReview();
+    await settle();
+
+    const first = view.contentDOM.firstElementChild!;
+    expect(first.querySelector(".tc-thread-card")?.getAttribute("data-thread-id")).toBe("r1-t1");
+    expect(view.contentDOM.querySelectorAll(".tc-commented-line")).toHaveLength(0);
+  });
+
+  it("matches a member repo's threads by the review's dir_name prefix", async () => {
+    putReview(1, [thread("r1-t1", FILE, [1, 1], "agent")], "api");
+
+    const atRoot = mountReview(FILE);
+    const inMember = mountReview(`api/${FILE}`);
+    await settle();
+
+    expect(cards(atRoot)).toHaveLength(0);
+    expect(cards(inMember)).toHaveLength(1);
+  });
+
+  const draftCards = (view: EditorView) =>
+    Array.from(view.contentDOM.querySelectorAll<HTMLElement>(".tc-comment-card:not(.tc-thread-card)"));
+  const clickReply = (view: EditorView, threadId: string) =>
+    view.contentDOM.querySelector<HTMLButtonElement>(`[data-thread-id="${threadId}"] .tc-btn-reply`)!.click();
+  const typeAndClick = (view: EditorView, body: string, btn: string) => {
+    view.contentDOM.querySelector<HTMLTextAreaElement>(".tc-comment-textarea")!.value = body;
+    view.contentDOM.querySelector<HTMLButtonElement>(btn)!.click();
+  };
+
+  it("shows only this review's drafts, never a plain draft or another review's", async () => {
+    addComment(2, "plain draft");
+    useReviewComments.getState().add({ taskId: TASK, file: FILE, startLine: 3, endLine: 3, quote: "x", body: "mine", reviewId: REVIEW });
+    useReviewComments.getState().add({ taskId: TASK, file: FILE, startLine: 3, endLine: 3, quote: "x", body: "r2's", reviewId: "r2" });
+    putReview(1, [thread("r1-t1", FILE, [4, 4], "agent")]);
+
+    const view = mountReview();
+    await settle();
+
+    expect(draftCards(view).map(c => c.querySelector(".tc-comment-body")!.textContent)).toEqual(["mine"]);
+  });
+
+  it("keeps a review draft out of the plain diff of the same file", async () => {
+    useReviewComments.getState().add({ taskId: TASK, file: FILE, startLine: 3, endLine: 3, quote: "x", body: "mine", reviewId: REVIEW });
+
+    const view = mount();
+    await settle();
+
+    expect(draftCards(view)).toHaveLength(0);
+  });
+
+  it("offers the selection pill and the line gutter, so a new thread can start on any line", async () => {
+    const view = mountReview();
+    await settle();
+    view.dispatch({ selection: { anchor: view.state.doc.line(1).from, head: view.state.doc.line(2).to } });
+    await settle();
+
+    expect(view.dom.querySelector(".tc-comment-gutter")).not.toBeNull();
+    expect(view.dom.querySelector(".tc-add-comment-btn")).not.toBeNull();
+  });
+
+  it("queues a new thread with the review id and no thread id", async () => {
+    const view = mountReview();
+    await settle();
+    view.dispatch({ selection: { anchor: view.state.doc.line(2).from, head: view.state.doc.line(3).to } });
+    dispatchSelectionComment(view);
+    await settle();
+
+    typeAndClick(view, "split this", ".tc-btn-queue");
+
+    expect(useReviewComments.getState().byTask[TASK]).toEqual([expect.objectContaining({
+      file: FILE, startLine: 2, endLine: 3, quote: "two\nthree", body: "split this", reviewId: REVIEW, threadId: undefined,
+    })]);
+  });
+
+  it("opens a Reply composer under the thread, and its pending card stacks between the thread and a new composer", async () => {
+    putReview(1, [thread("r1-t1", FILE, [2, 2], "agent")]);
+    const view = mountReview();
+    await settle();
+
+    clickReply(view, "r1-t1");
+    await settle();
+    expect(view.contentDOM.querySelector(".tc-comment-composer .tc-comment-loc")?.textContent).toBe("Reply to r1-t1 · thing.ts · line 2");
+    typeAndClick(view, "it was flaky", ".tc-btn-queue");
+    await settle();
+    clickReply(view, "r1-t1");
+    await settle();
+
+    expect(useReviewComments.getState().byTask[TASK]).toEqual([expect.objectContaining({
+      body: "it was flaky", reviewId: REVIEW, threadId: "r1-t1", startLine: 2, endLine: 2,
+    })]);
+    const order = Array.from(view.contentDOM.querySelectorAll(".tc-thread-card, .tc-comment-card, .tc-comment-composer"))
+      .filter((e, i, all) => !all.some((o, j) => j !== i && o.contains(e) && o !== e))
+      .map(e => e.classList.contains("tc-thread-card") ? "thread" : e.classList.contains("tc-comment-composer") ? "composer" : "draft");
+    expect(order).toEqual(["thread", "draft", "composer"]);
+    expect(draftCards(view)[0].querySelector(".tc-comment-loc")?.textContent).toBe("Pending reply to r1-t1 · thing.ts · line 2");
+  });
+
+  it("stacks a reply to the first of two file-level threads above line 1 as threads, then its draft, then a new composer, each naming its thread", async () => {
+    putReview(1, [thread("r1-t1", FILE, null, "agent"), thread("r1-t2", FILE, null, "agent")]);
+    const view = mountReview();
+    await settle();
+
+    clickReply(view, "r1-t1");
+    await settle();
+    typeAndClick(view, "first", ".tc-btn-queue");
+    await settle();
+    clickReply(view, "r1-t1");
+    await settle();
+
+    const order = Array.from(view.contentDOM.querySelectorAll(".tc-thread-card, .tc-comment-card, .tc-comment-composer"))
+      .filter((e, i, all) => !all.some((o, j) => j !== i && o.contains(e) && o !== e))
+      .map(e => e.classList.contains("tc-thread-card") ? e.getAttribute("data-thread-id") : e.classList.contains("tc-comment-composer") ? "composer" : "draft");
+    expect(order).toEqual(["r1-t1", "r1-t2", "draft", "composer"]);
+    expect(draftCards(view)[0].querySelector(".tc-comment-loc")?.textContent).toBe("Pending reply to r1-t1 · thing.ts · whole file");
+    expect(view.contentDOM.querySelector(".tc-comment-composer .tc-comment-loc")?.textContent).toBe("Reply to r1-t1 · thing.ts · whole file");
+  });
+
+  it("puts a sent reply back as a pending review draft when the post is refused", async () => {
+    vi.mocked(sendReviewComments).mockResolvedValueOnce(false);
+    putReview(1, [thread("r1-t1", FILE, [2, 2], "agent")]);
+    const view = mountReview();
+    await settle();
+    clickReply(view, "r1-t1");
+    await settle();
+
+    typeAndClick(view, "too long", ".tc-btn-send");
+    await settle();
+
+    expect(useReviewComments.getState().byTask[TASK]).toEqual([expect.objectContaining({
+      body: "too long", reviewId: REVIEW, threadId: "r1-t1", startLine: 2, endLine: 2,
+    })]);
+  });
+
+  it("refuses an empty review comment even with a quote, and sends a written one through sendReviewComments", async () => {
+    vi.mocked(sendReviewComments).mockClear();
+    putReview(1, [thread("r1-t1", FILE, [2, 2], "agent")]);
+    const view = mountReview();
+    await settle();
+    clickReply(view, "r1-t1");
+    await settle();
+
+    typeAndClick(view, "  ", ".tc-btn-send");
+    typeAndClick(view, "", ".tc-btn-queue");
+    const stillOpen = !!view.contentDOM.querySelector(".tc-comment-textarea");
+    typeAndClick(view, "ship it", ".tc-btn-send");
+
+    expect(stillOpen).toBe(true);
+    expect(useReviewComments.getState().byTask[TASK] ?? []).toHaveLength(0);
+    expect(vi.mocked(sendReviewComments).mock.calls).toEqual([[TASK, REVIEW, [expect.objectContaining({
+      body: "ship it", threadId: "r1-t1", reviewId: REVIEW,
+    })]]]);
+  });
+
+  it("grows an open card live when a reply lands in the store", async () => {
+    putReview(1, [thread("r1-t1", FILE, [2, 2], "agent")]);
+    const view = mountReview();
+    await settle();
+
+    putReview(2, [thread("r1-t1", FILE, [2, 2], "agent", "user")]);
+    await settle();
+
+    expect(authors(cards(view)[0])).toEqual(["claude", "You"]);
+  });
+
+  it("does not dispatch when a push leaves this file's threads unchanged", async () => {
+    putReview(1, [thread("r1-t1", FILE, [2, 2], "agent"), thread("r1-t2", "src/other.ts", [1, 1], "agent")]);
+    const view = mountReview();
+    await settle();
+    const dispatch = vi.spyOn(view, "dispatch");
+
+    putReview(2, [thread("r1-t1", FILE, [2, 2], "agent"), thread("r1-t2", "src/other.ts", [1, 1], "agent", "user")]);
+    await settle();
+
+    expect(dispatch).not.toHaveBeenCalled();
   });
 });

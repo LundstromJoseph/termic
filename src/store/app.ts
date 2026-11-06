@@ -2833,9 +2833,9 @@ export const useApp = create<AppState>((set, get) => ({
       // the clearest possible statement that you want to see it as it is now.
       //
       // Only on this branch, which is a user opening the same file a second
-      // time. A `commit:` diff is exempt: both its sides are committed blobs
-      // and cannot have moved.
-      if (data.type === "diff" && !data.scope?.startsWith("commit:")) {
+      // time. `commit:` and `review:` diffs are exempt: both their sides are
+      // committed blobs and cannot have moved.
+      if (data.type === "diff" && !data.scope?.startsWith("commit:") && !data.scope?.startsWith("review:")) {
         patch.reloadNonce = ((existing as { reloadNonce?: number }).reloadNonce ?? 0) + 1;
       }
       // A permanent open of a file that is sitting in the preview slot pins

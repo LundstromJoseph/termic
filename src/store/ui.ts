@@ -400,6 +400,15 @@ interface UIState {
    *  effect on every task switch, so an un-consumed one pins the panel to the
    *  Git tab for the rest of the session. Found the hard way, see ui.md. */
   clearCommitReveal: () => void;
+  /** "Show this review": `present new` and its toast's Open. Read by
+   *  RightPanel (Git tab) and GitPanel (Compare view). Same request and
+   *  consume contract as `commitReveal`: GitPanel, the last reader, MUST call
+   *  `clearReviewReveal` once it has switched. Unlike a commit reveal,
+   *  RightPanel must NOT un-hide the panel for it: an agent's `present new`
+   *  never changes the layout, and only the toast's Open un-hides it. */
+  reviewReveal: { taskId: string; reviewId: string; at: number } | null;
+  revealReview: (taskId: string, reviewId: string) => void;
+  clearReviewReveal: () => void;
   closeSandbox: () => void;
   openFileFinder: (taskId: string) => void;
   closeFileFinder: () => void;
@@ -669,6 +678,9 @@ export const useUI = create<UIState>((set, get) => ({
     // the two stores a cycle.
     set({ commitReveal: { taskId, sha, at: Date.now() } }),
   clearCommitReveal: () => set({ commitReveal: null }),
+  reviewReveal: null,
+  revealReview: (taskId, reviewId) => set({ reviewReveal: { taskId, reviewId, at: Date.now() } }),
+  clearReviewReveal: () => set({ reviewReveal: null }),
   closeSandbox:      () => set({ sandboxForTaskId: null }),
   openFileFinder:    (taskId) => set({ fileFinderTaskId: taskId }),
   openSearchEverywhere:  (taskId) => set({ searchEverywhereTaskId: taskId }),

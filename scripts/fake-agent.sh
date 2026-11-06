@@ -411,7 +411,7 @@ while IFS= read -r line; do
       osc133 C
       for i in $(seq 1 60); do
         set_title "${SPINNER[$((i % 8))]} ${name}"
-        if IFS= read -r -t 1 -N 1 _key; then
+        if IFS= read -r -t 1 -n 1 _key; then
           echo "FAKE-AGENT interrupted"
           set_title "✳ ${name}"
           continue 2
@@ -442,7 +442,7 @@ while IFS= read -r line; do
       osc133 C
       for i in $(seq 1 60); do
         printf '.'
-        if IFS= read -r -t 1 -N 1 _key; then
+        if IFS= read -r -t 1 -n 1 _key; then
           echo "FAKE-AGENT interrupted"
           continue 2
         fi

@@ -126,7 +126,13 @@ use std::io::{self, BufRead, Read, Write};
 /// task's badges, and `TaskSummary` carries them. A v24 server does not know
 /// the verbs, and the version check says "restart the app" where the bare
 /// failure would read as a broken command.
-pub const PROTOCOL_VERSION: u32 = 25;
+///
+/// v26: the `present_*` verbs (`present_new`, `present_comment`,
+/// `present_reply`, `present_show`, `present_list`, `present_claim`) open
+/// an agent-presented review of a commit range and thread comments on it.
+/// A v25 server does not know them; the bump turns that into "restart the
+/// app" instead of an unknown-command failure.
+pub const PROTOCOL_VERSION: u32 = 26;
 
 /// A pasted "123", "#123", "!123" or a PR / MR link, reduced to its number.
 /// None for anything else. The webview's `parsePrRef` (src/lib/prReview.ts)
@@ -307,6 +313,188 @@ pub fn badge_color_problem(color: &str) -> Option<String> {
     Some(format!(
         "unknown colour \"{color}\" (good, warning, error, neutral, or a hex like #3b82f6)"
     ))
+}
+
+/// An agent-presented review: an immutable `base..head` range plus comment
+/// threads on its head side. This one type is the on-disk record
+/// (`scratch/<task_id>/reviews/<id>.json`, written only by the app), the
+/// wire reply and the webview's mirror, so the three cannot drift.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Review {
+    /// Record format version, 1.
+    pub version: u32,
+    /// `r<N>`, sequential per task.
+    pub id: String,
+    pub task_id: String,
+    /// Composition member the range lives in; "" is the host repo.
+    pub dir_name: String,
+    /// Full shas when the review was opened: `head` is B, `base` the
+    /// merge-base of A and B (A itself when they share no commit).
+    pub base: String,
+    pub head: String,
+    /// The two refs as the agent typed them, for display.
+    pub base_ref: String,
+    pub head_ref: String,
+    pub title: Option<String>,
+    /// The name the review's agent comments carry.
+    pub author: String,
+    /// Agent tab the user's comments are delivered to. None until claimed.
+    pub recipient_tab: Option<String>,
+    pub created_at: String,
+    /// Bumped once per appended comment and once per claim that moved
+    /// something, so a higher seq is always the newer record. Each comment
+    /// stores the value it was given, so `--since <seq>` reads "everything
+    /// after this".
+    pub seq: u64,
+    /// Changed paths in the range, repo-relative, sorted, capped.
+    pub files: Vec<String>,
+    pub files_truncated: bool,
+    pub threads: Vec<ReviewThread>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ReviewThread {
+    /// `<review id>-t<M>`, e.g. `r1-t3`.
+    pub id: String,
+    /// Repo-relative path, one of `Review::files`.
+    pub file: String,
+    /// Head-side lines, 1-based and inclusive. Both None for a file-level thread.
+    pub start_line: Option<u32>,
+    pub end_line: Option<u32>,
+    /// The head-side text of those lines when the thread opened; "" at file level.
+    pub quote: String,
+    pub comments: Vec<ReviewComment>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ReviewComment {
+    pub seq: u64,
+    pub by: ReviewBy,
+    /// The agent's name; "" for the user, whom the UI shows as "You".
+    pub author: String,
+    pub body: String,
+    pub at: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ReviewBy {
+    Agent,
+    User,
+}
+
+/// Review limits. Titles, names and bodies come from agents, so they are
+/// validated, not escaped.
+pub const REVIEW_TITLE_MAX: usize = 120;
+pub const REVIEW_AUTHOR_MAX: usize = 40;
+pub const REVIEW_BODY_MAX: usize = 8000;
+pub const REVIEW_QUOTE_MAX: usize = 4000;
+pub const REVIEW_THREADS_MAX: usize = 500;
+pub const REVIEW_COMMENTS_PER_THREAD_MAX: usize = 200;
+
+/// Why `title` cannot be a review title: one line, no control characters,
+/// at most `REVIEW_TITLE_MAX` characters once trimmed.
+pub fn review_title_problem(title: &str) -> Option<String> {
+    if title.chars().any(char::is_control) {
+        return Some("a review title must be one line, with no control characters".into());
+    }
+    if title.trim().chars().count() > REVIEW_TITLE_MAX {
+        return Some(format!("a review title is longer than {REVIEW_TITLE_MAX} characters"));
+    }
+    None
+}
+
+/// Why `author` cannot be a review author name: one line, no control
+/// characters, not blank, at most `REVIEW_AUTHOR_MAX` characters once trimmed.
+pub fn review_author_problem(author: &str) -> Option<String> {
+    if author.chars().any(char::is_control) {
+        return Some("an author name must be one line, with no control characters".into());
+    }
+    let trimmed = author.trim();
+    if trimmed.is_empty() {
+        return Some("an author name cannot be empty".into());
+    }
+    if trimmed.chars().count() > REVIEW_AUTHOR_MAX {
+        return Some(format!("an author name is longer than {REVIEW_AUTHOR_MAX} characters"));
+    }
+    None
+}
+
+/// Why `body` cannot be a review comment: not blank, no NUL, at most
+/// `REVIEW_BODY_MAX` characters once trimmed. Newlines and tabs are fine.
+pub fn review_body_problem(body: &str) -> Option<String> {
+    if body.contains('\0') {
+        return Some("a comment cannot contain a NUL byte".into());
+    }
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        return Some("a comment cannot be empty".into());
+    }
+    if trimmed.chars().count() > REVIEW_BODY_MAX {
+        return Some(format!("a comment is longer than {REVIEW_BODY_MAX} characters"));
+    }
+    None
+}
+
+/// Why `range` cannot be a review range: `A..B`, both sides non-empty.
+/// Three dots are refused rather than read as a merge-base range, because
+/// the review's left side has to be exactly what the agent named.
+pub fn review_range_problem(range: &str) -> Option<String> {
+    if range.contains("...") {
+        return Some(format!("\"{range}\" is a three-dot range; use A..B"));
+    }
+    match range.split_once("..") {
+        Some((a, b)) if !a.is_empty() && !b.is_empty() && !b.contains("..") => None,
+        _ => Some(format!("\"{range}\" is not a range; use A..B, e.g. main..HEAD")),
+    }
+}
+
+/// `r<N>` with N >= 1 and no leading zero.
+fn numbered(s: &str, prefix: char) -> bool {
+    s.strip_prefix(prefix).is_some_and(|n| {
+        n.starts_with(|c: char| ('1'..='9').contains(&c)) && n.chars().all(|c| c.is_ascii_digit())
+    })
+}
+
+/// Why `id` cannot be a review id: `r1`, `r2`, ...
+pub fn review_id_problem(id: &str) -> Option<String> {
+    if numbered(id, 'r') {
+        None
+    } else {
+        Some(format!("\"{id}\" is not a review id (r1, r2, ...)"))
+    }
+}
+
+/// Why `id` cannot be a thread id: `r1-t3`, ...
+pub fn review_thread_id_problem(id: &str) -> Option<String> {
+    if split_thread_id(id).is_some() {
+        None
+    } else {
+        Some(format!("\"{id}\" is not a thread id (r1-t1, r1-t2, ...)"))
+    }
+}
+
+/// `("r1", "r1-t3")` for `"r1-t3"`, so a thread id locates its review.
+pub fn split_thread_id(id: &str) -> Option<(&str, &str)> {
+    let (review, thread) = id.split_once('-')?;
+    (numbered(review, 'r') && numbered(thread, 't')).then_some((review, id))
+}
+
+/// `"N"` or `"N-M"`, 1-based and inclusive, with `1 <= N <= M`.
+pub fn parse_line_range(s: &str) -> Result<(u32, u32), String> {
+    let bad = || format!("\"{s}\" is not a line or a range (12 or 12-14)");
+    let num = |p: &str| p.parse::<u32>().ok().filter(|n| *n >= 1 && p.chars().all(|c| c.is_ascii_digit()));
+    let (start, end) = match s.split_once('-') {
+        Some((a, b)) => (num(a).ok_or_else(bad)?, num(b).ok_or_else(bad)?),
+        None => {
+            let n = num(s).ok_or_else(bad)?;
+            (n, n)
+        }
+    };
+    if start > end {
+        return Err(format!("\"{s}\" ends before it starts"));
+    }
+    Ok((start, end))
 }
 
 /// serde default for `QuitData::running`.
@@ -735,6 +923,99 @@ pub enum Command {
         task: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         project: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cwd: Option<String>,
+    },
+    /// v26: open a review of `range` (`A..B`) in the task's Git tab.
+    /// `tab` is the agent tab the user's comments go to. Replies
+    /// `ReplyData::Review`.
+    PresentNew {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project: Option<String>,
+        range: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        /// The name the review's agent comments carry; the server defaults
+        /// it to the tab's agent display name.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        author: Option<String>,
+        /// Composition member `dir_name`; the server defaults it to the
+        /// member holding `cwd`, then the host repo.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        repo: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tab: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cwd: Option<String>,
+    },
+    /// v26: open a thread on `file` of a review, on head-side lines
+    /// `start_line..=end_line`, or at file level without them. Replies
+    /// `ReplyData::ReviewWrite`.
+    PresentComment {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project: Option<String>,
+        review: String,
+        file: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        start_line: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        end_line: Option<u32>,
+        body: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cwd: Option<String>,
+    },
+    /// v26: reply in a thread (`r1-t3`, which names its review). Replies
+    /// `ReplyData::ReviewWrite`.
+    PresentReply {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project: Option<String>,
+        thread: String,
+        body: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cwd: Option<String>,
+    },
+    /// v26: one review. With `since`, only the comments whose seq is
+    /// greater, in the threads that have one. Replies `ReplyData::Review`.
+    PresentShow {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project: Option<String>,
+        review: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        since: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cwd: Option<String>,
+    },
+    /// v26: the task's reviews. Replies `ReplyData::Reviews`.
+    PresentList {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cwd: Option<String>,
+    },
+    /// v26: point a review at another agent tab of its task, and with
+    /// `author` (default: that tab's agent name) the name its future agent
+    /// comments carry. Replies `ReplyData::ReviewClaim`.
+    PresentClaim {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project: Option<String>,
+        review: String,
+        /// Required by the server; the CLI fills it from `$TERMIC_TAB_ID`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tab: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        author: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cwd: Option<String>,
     },
@@ -1219,6 +1500,14 @@ pub enum ReplyData {
     Prop(PropData),
     /// `badge set`, `badge rm` and `badge list` (v25).
     Badges(BadgesData),
+    /// `present new` and `present show` (v26).
+    Review(ReviewData),
+    /// `present claim` (v26).
+    ReviewClaim(ReviewClaimData),
+    /// `present comment` and `present reply` (v26).
+    ReviewWrite(ReviewWriteData),
+    /// `present list` (v26).
+    Reviews(ReviewsData),
     Quit(QuitData),
     Archive(ArchiveData),
     Rename(RenameData),
@@ -1296,6 +1585,58 @@ pub struct BadgesData {
     /// Whether a set or remove changed anything.
     #[serde(default, skip_serializing_if = "is_false")]
     pub changed: bool,
+}
+
+/// One review in full (v26).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ReviewData {
+    pub task_id: String,
+    /// `project/name`.
+    pub task: String,
+    pub review: Review,
+}
+
+/// Where a `present comment` or `present reply` landed (v26).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ReviewWriteData {
+    pub task_id: String,
+    pub review_id: String,
+    pub thread_id: String,
+    /// The comment's seq: `present show --since <seq>` reads what came after.
+    pub seq: u64,
+    pub new_thread: bool,
+}
+
+/// One row of `present list` (v26).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ReviewSummary {
+    pub id: String,
+    pub title: Option<String>,
+    pub base_ref: String,
+    pub head_ref: String,
+    pub author: String,
+    pub recipient_tab: Option<String>,
+    pub threads: u32,
+    pub comments: u32,
+    pub seq: u64,
+}
+
+/// `present claim`'s reply: the review's list row, not its threads, which
+/// a claim does not change and which can outgrow the reply line.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ReviewClaimData {
+    pub task_id: String,
+    /// `project/name`.
+    pub task: String,
+    pub review: ReviewSummary,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ReviewsData {
+    pub task_id: String,
+    /// `project/name`.
+    pub task: String,
+    pub reviews: Vec<ReviewSummary>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -2674,6 +3015,38 @@ mod tests {
             },
             Command::BadgeRemove { task: Some("fix-auth".into()), project: None, key: "ci".into(), cwd: None },
             Command::BadgeList { task: None, project: None, cwd: Some("/t".into()) },
+            // v26: agent-presented reviews.
+            Command::PresentNew {
+                task: Some("fix-auth".into()),
+                project: Some("web".into()),
+                range: "main..HEAD".into(),
+                title: Some("Login fix".into()),
+                author: Some("Claude".into()),
+                repo: Some("api".into()),
+                tab: Some("tab-1".into()),
+                cwd: None,
+            },
+            Command::PresentNew {
+                task: None, project: None, range: "HEAD~2..HEAD".into(), title: None, author: None,
+                repo: None, tab: None, cwd: Some("/t".into()),
+            },
+            Command::PresentComment {
+                task: None, project: None, review: "r1".into(), file: "src/a.rs".into(),
+                start_line: Some(12), end_line: Some(14), body: "why?".into(), cwd: Some("/t".into()),
+            },
+            Command::PresentComment {
+                task: Some("fix-auth".into()), project: None, review: "r1".into(), file: "gen.rs".into(),
+                start_line: None, end_line: None, body: "generated".into(), cwd: None,
+            },
+            Command::PresentReply { task: None, project: None, thread: "r1-t3".into(), body: "done".into(), cwd: None },
+            Command::PresentShow { task: None, project: None, review: "r1".into(), since: Some(4), cwd: None },
+            Command::PresentShow { task: None, project: None, review: "r2".into(), since: None, cwd: Some("/t".into()) },
+            Command::PresentList { task: Some("fix-auth".into()), project: Some("web".into()), cwd: None },
+            Command::PresentClaim {
+                task: None, project: None, review: "r1".into(), tab: Some("tab-2".into()),
+                author: Some("Codex".into()), cwd: None,
+            },
+            Command::PresentClaim { task: None, project: None, review: "r1".into(), tab: None, author: None, cwd: None },
             Command::Agents,
             Command::Prompts { selector: None },
             Command::Prompts { selector: Some("builtin:review".into()) },
@@ -3002,6 +3375,61 @@ mod tests {
             }),
             ReplyData::Badges(BadgesData {
                 task_id: "w1".into(), task: "web/fix-auth".into(), badges: Vec::new(), changed: false,
+            }),
+            ReplyData::Review(ReviewData {
+                task_id: "w1".into(),
+                task: "web/fix-auth".into(),
+                review: Review {
+                    version: 1,
+                    id: "r1".into(),
+                    task_id: "w1".into(),
+                    dir_name: String::new(),
+                    base: "a".repeat(40),
+                    head: "b".repeat(40),
+                    base_ref: "main".into(),
+                    head_ref: "HEAD".into(),
+                    title: None,
+                    author: "claude".into(),
+                    recipient_tab: Some("tab-1".into()),
+                    created_at: "2026-11-06T10:00:00+00:00".into(),
+                    seq: 0,
+                    files: vec!["src/a.rs".into()],
+                    files_truncated: false,
+                    threads: Vec::new(),
+                },
+            }),
+            ReplyData::ReviewWrite(ReviewWriteData {
+                task_id: "w1".into(), review_id: "r1".into(), thread_id: "r1-t2".into(), seq: 3, new_thread: true,
+            }),
+            ReplyData::ReviewClaim(ReviewClaimData {
+                task_id: "w1".into(),
+                task: "web/fix-auth".into(),
+                review: ReviewSummary {
+                    id: "r1".into(),
+                    title: None,
+                    base_ref: "main".into(),
+                    head_ref: "HEAD".into(),
+                    author: "codex".into(),
+                    recipient_tab: Some("tab-2".into()),
+                    threads: 0,
+                    comments: 0,
+                    seq: 0,
+                },
+            }),
+            ReplyData::Reviews(ReviewsData {
+                task_id: "w1".into(),
+                task: "web/fix-auth".into(),
+                reviews: vec![ReviewSummary {
+                    id: "r1".into(),
+                    title: Some("Login fix".into()),
+                    base_ref: "main".into(),
+                    head_ref: "HEAD".into(),
+                    author: "claude".into(),
+                    recipient_tab: None,
+                    threads: 2,
+                    comments: 3,
+                    seq: 3,
+                }],
             }),
             ReplyData::Open(OpenData { task: Some(summary.clone()), raised: true }),
             ReplyData::Open(OpenData { task: None, raised: true }),
@@ -3511,6 +3939,129 @@ mod tests {
 
         assert!(!line.contains("changed"), "{line}");
         assert!(summary.get("badges").is_none(), "{summary}");
+    }
+
+    #[test]
+    fn review_title_author_and_body_are_validated_at_their_limits() {
+        assert_eq!(review_title_problem(&format!("  {}  ", "t".repeat(REVIEW_TITLE_MAX))), None, "trimmed");
+        assert_eq!(review_title_problem(""), None);
+        assert!(review_title_problem(&"t".repeat(REVIEW_TITLE_MAX + 1)).unwrap().contains("longer"));
+        assert!(review_title_problem("a\nb").unwrap().contains("one line"));
+
+        assert_eq!(review_author_problem(&"a".repeat(REVIEW_AUTHOR_MAX)), None);
+        assert!(review_author_problem(&"a".repeat(REVIEW_AUTHOR_MAX + 1)).unwrap().contains("longer"));
+        assert!(review_author_problem("  ").unwrap().contains("empty"));
+        assert!(review_author_problem("a\tb").unwrap().contains("one line"));
+
+        assert_eq!(review_body_problem("line one\n\tline two"), None, "newlines and tabs are fine");
+        assert_eq!(review_body_problem(&format!("\n{}\n", "b".repeat(REVIEW_BODY_MAX))), None, "trimmed");
+        assert!(review_body_problem(&"b".repeat(REVIEW_BODY_MAX + 1)).unwrap().contains("longer"));
+        assert!(review_body_problem(" \n ").unwrap().contains("empty"));
+        assert!(review_body_problem("a\0b").unwrap().contains("NUL"));
+    }
+
+    #[test]
+    fn review_range_must_be_two_dot_with_both_sides() {
+        for ok in ["main..HEAD", "abc123..def456", "origin/main..topic"] {
+            assert_eq!(review_range_problem(ok), None, "{ok}");
+        }
+        assert!(review_range_problem("main...HEAD").unwrap().contains("use A..B"));
+        for bad in ["main", "..HEAD", "main..", "..", "a..b..c", ""] {
+            assert!(review_range_problem(bad).unwrap().contains("not a range"), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn review_and_thread_ids_are_r_n_and_r_n_t_m() {
+        for ok in ["r1", "r9", "r10", "r123"] {
+            assert_eq!(review_id_problem(ok), None, "{ok}");
+        }
+        for bad in ["", "r", "r0", "r01", "R1", "1", "r1-t1", "r1 ", "../r1", "r+1"] {
+            assert!(review_id_problem(bad).is_some(), "{bad:?}");
+        }
+        for ok in ["r1-t1", "r12-t30"] {
+            assert_eq!(review_thread_id_problem(ok), None, "{ok}");
+        }
+        for bad in ["r1", "r1-t0", "r0-t1", "r1-t", "r1-3", "t1", "r1-t1-t2", "r1_t1"] {
+            assert!(review_thread_id_problem(bad).is_some(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn split_thread_id_returns_the_review_id_and_the_whole_thread_id() {
+        assert_eq!(split_thread_id("r12-t3"), Some(("r12", "r12-t3")));
+        assert_eq!(split_thread_id("r12"), None);
+        assert_eq!(split_thread_id("x1-t3"), None);
+    }
+
+    #[test]
+    fn parse_line_range_accepts_n_and_n_m_with_n_at_least_1_and_not_after_m() {
+        assert_eq!(parse_line_range("12"), Ok((12, 12)));
+        assert_eq!(parse_line_range("12-14"), Ok((12, 14)));
+        assert_eq!(parse_line_range("3-3"), Ok((3, 3)));
+        assert!(parse_line_range("14-12").unwrap_err().contains("ends before"));
+        for bad in ["0", "0-2", "x", "", "-3", "3-", "+3", "1-+3", "1--2", " 3"] {
+            assert!(parse_line_range(bad).unwrap_err().contains("not a line"), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_review_round_trips_through_json_with_lowercase_authorship() {
+        let review = Review {
+            version: 1,
+            id: "r1".into(),
+            task_id: "t1".into(),
+            dir_name: String::new(),
+            base: "a".repeat(40),
+            head: "b".repeat(40),
+            base_ref: "main".into(),
+            head_ref: "HEAD".into(),
+            title: Some("Login fix".into()),
+            author: "claude".into(),
+            recipient_tab: None,
+            created_at: "2026-11-06T10:00:00+00:00".into(),
+            seq: 1,
+            files: vec!["src/a.rs".into()],
+            files_truncated: false,
+            threads: vec![ReviewThread {
+                id: "r1-t1".into(),
+                file: "src/a.rs".into(),
+                start_line: Some(2),
+                end_line: Some(3),
+                quote: "x\ny".into(),
+                comments: vec![ReviewComment {
+                    seq: 1,
+                    by: ReviewBy::Agent,
+                    author: "claude".into(),
+                    body: "why".into(),
+                    at: "2026-11-06T10:00:01+00:00".into(),
+                }],
+            }],
+        };
+
+        let json = serde_json::to_string(&review).unwrap();
+        let back: Review = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(back, review);
+        assert!(json.contains(r#""by":"agent""#), "{json}");
+    }
+
+    #[test]
+    fn review_messages_obey_copy_rules() {
+        let msgs = [
+            review_title_problem("\n").unwrap(),
+            review_author_problem("").unwrap(),
+            review_body_problem("").unwrap(),
+            review_range_problem("a...b").unwrap(),
+            review_range_problem("a").unwrap(),
+            review_id_problem("x").unwrap(),
+            review_thread_id_problem("x").unwrap(),
+            parse_line_range("x").unwrap_err(),
+            parse_line_range("2-1").unwrap_err(),
+        ];
+        for m in msgs {
+            assert!(!m.contains('\u{2014}'), "em dash in {m:?}");
+        }
     }
 
     #[test]

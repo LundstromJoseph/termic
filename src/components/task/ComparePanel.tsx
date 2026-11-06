@@ -29,6 +29,13 @@
 // so the review affordances stay switched on: viewed marks anchor to a real
 // worktree fingerprint and an inline comment lands on the version about to be
 // edited. That is what makes this the surface for reviewing a whole feature.
+//
+// Review mode: while the reviews store `shown`s one of the task's
+// agent-presented reviews, the panel lists that review's fixed `base..head`
+// range instead (docs/ui.md "Agent-presented reviews"). The bar names the
+// review, rows open `review:<id>` diffs and carry thread counts, and nothing
+// is fingerprinted, so there are no viewed marks. The branch compare's state
+// survives untouched underneath for "Back to branch compare".
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -36,8 +43,10 @@ import {
   ChevronRight, ChevronDown, Check, Eye, Loader2, GitCompare as GitCompareIcon,
   ArrowRight, MessageSquare, AlertTriangle, FileText,
 } from "lucide-react";
-import type { GitCompare, GitFile, Task } from "@/lib/types";
-import { taskGitCompare, taskGitRefs } from "@/lib/ipc";
+import type { GitCompare, GitFile, Review, Task } from "@/lib/types";
+import { taskGitCompare, taskGitRange, taskGitRefs } from "@/lib/ipc";
+import { useApp } from "@/store/app";
+import { useReviews, useReview, useTaskReviewIds } from "@/store/reviews";
 import { useFileViewed, useIsViewed } from "@/store/fileViewed";
 import { useReviewComments } from "@/store/reviewComments";
 import { cn } from "@/lib/utils";
@@ -53,6 +62,7 @@ import { fileIconUrl, folderIconUrl } from "@/lib/explorer/iconResolver";
 import { flattenRows, type FlatRow, type ViewMode } from "./GitPanel";
 import { SC, COL, INK, LBL } from "@/lib/gitStatus";
 import { kbd } from "@/lib/platform";
+import { i18n } from "@/lib/i18n";
 
 /** Whether the compare runs from the merge base. Global rather than per task:
  *  it expresses how someone reads a diff, not anything about one branch. */
@@ -126,6 +136,13 @@ export function ComparePanel({ task, repoDir, search, viewMode, reloadToken, onO
   const [err, setErr] = useState<string | null>(null);
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
   const [selected, setSelected] = useState<string | null>(null);
+  const shownId = useReviews(s => s.shown[task.id] ?? null);
+  const review = useReview(task.id, shownId);
+  const reviewIds = useTaskReviewIds(task.id);
+  const reviewKey = review ? `${task.id}/${review.id}` : null;
+  /** The shown review's file list, keyed by task/review. A review's range is
+   *  immutable, so it is read once and never on reloadToken. */
+  const [range, setRange] = useState<{ key: string; cmp: GitCompare | null; err: string | null } | null>(null);
 
   const persist = (key: string, val: string) => { try { localStorage.setItem(key, val); } catch {} };
   const toggleMergeBase = () => setMergeBase(v => { const n = !v; persist(LS_MERGE_BASE, n ? "1" : "0"); return n; });
@@ -145,6 +162,7 @@ export function ComparePanel({ task, repoDir, search, viewMode, reloadToken, onO
   useEffect(() => { setSelected(null); setRefs(null); }, [repoDir]);
 
   useEffect(() => {
+    if (reviewKey) return;
     if (!base) { setLoading(false); return; }
     let alive = true;
     setLoading(true);
@@ -153,7 +171,32 @@ export function ComparePanel({ task, repoDir, search, viewMode, reloadToken, onO
       .catch(e => { if (alive) { setErr(String(e)); setCmp(null); } })
       .finally(() => { if (alive) setLoading(false); });
     return () => { alive = false; };
-  }, [task.id, repoDir, base, mergeBase, reloadToken]);
+  }, [task.id, repoDir, base, mergeBase, reloadToken, reviewKey]);
+
+  useEffect(() => {
+    setSelected(null);
+    if (!review || !reviewKey || (range?.key === reviewKey && !range.err)) return;
+    let alive = true;
+    taskGitRange(task.id, review.dir_name, review.base, review.head)
+      .then(r => { if (alive) setRange({ key: reviewKey, cmp: r, err: null }); })
+      .catch(e => { if (alive) setRange({ key: reviewKey, cmp: null, err: String(e) }); });
+    return () => { alive = false; };
+    // A new seq on the same review is a new comment, not a new range.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reviewKey]);
+
+  const shownRange = reviewKey && range?.key === reviewKey ? range : null;
+  const view = review
+    ? { cmp: shownRange?.cmp ?? null, err: shownRange?.err ?? null, loading: !shownRange }
+    : { cmp, err, loading };
+  // Rows prefix with the review's own repo, whatever GitPanel's pill says.
+  const dir = review ? review.dir_name : repoDir;
+  const threadCounts = useMemo(() => {
+    if (!review) return null;
+    const m = new Map<string, number>();
+    for (const th of review.threads) m.set(th.file, (m.get(th.file) ?? 0) + 1);
+    return m;
+  }, [review]);
 
   /** Refs are only needed once the picker opens, and re-reading them on every
    *  compare would be a process per keystroke of the filter. */
@@ -173,9 +216,9 @@ export function ComparePanel({ task, repoDir, search, viewMode, reloadToken, onO
 
   const files = useMemo(() => {
     const q = search.trim().toLowerCase();
-    const all = cmp?.files ?? [];
+    const all = view.cmp?.files ?? [];
     return q ? all.filter(f => f.path.toLowerCase().includes(q)) : all;
-  }, [cmp, search]);
+  }, [view.cmp, search]);
 
   const rows = useMemo(
     () => flattenRows(files, viewMode, collapsed, "compare"),
@@ -198,18 +241,20 @@ export function ComparePanel({ task, repoDir, search, viewMode, reloadToken, onO
   ), [files]);
 
   const openFile = useCallback((path: string) => {
-    if (!cmp) return;
+    if (!view.cmp) return;
     setSelected(path);
-    const full = repoDir ? `${repoDir}/${path}` : path;
-    onOpenDiff(full, cmp.base_sha, `Δ ${path.split("/").pop()}`);
-  }, [cmp, repoDir, onOpenDiff]);
+    const full = dir ? `${dir}/${path}` : path;
+    const title = `Δ ${path.split("/").pop()}`;
+    if (review) useApp.getState().openPreviewTab(task.id, { type: "diff", path: full, scope: `review:${review.id}`, title: `${title} · ${review.id}` });
+    else onOpenDiff(full, view.cmp.base_sha, title);
+  }, [view.cmp, dir, review, task.id, onOpenDiff]);
 
   // The other reading of the same row: the file itself, not the comparison.
   // Selection moves either way, so the list keeps your place when you switch.
   const openWholeFile = useCallback((path: string) => {
     setSelected(path);
-    onOpenFile(repoDir ? `${repoDir}/${path}` : path);
-  }, [repoDir, onOpenFile]);
+    onOpenFile(dir ? `${dir}/${path}` : path);
+  }, [dir, onOpenFile]);
 
   // ── virtual scroll (same fixed-height slice the Commit tab's list uses) ──
   const containerRef = useRef<HTMLDivElement>(null);
@@ -230,7 +275,7 @@ export function ComparePanel({ task, repoDir, search, viewMode, reloadToken, onO
   const branchLabel = cmp?.branch || task.branch || t("compare.workingTree");
 
   return (
-    <div className="flex h-full min-h-0 flex-col" data-testid="compare-panel">
+    <div className="flex h-full min-h-0 flex-col" data-testid="compare-panel" data-review={review?.id ?? ""}>
       {/* 1. Compare bar. Reads left-to-right as the diff does: the base on the
           left is the side being compared FROM, this branch on the right is the
           side being compared TO. Without naming both, a file marked "D" is
@@ -243,6 +288,7 @@ export function ComparePanel({ task, repoDir, search, viewMode, reloadToken, onO
           that only shows it when it is needed; a ref you cannot read costs the
           whole bar its point. `min-h-8` + `py-1` keeps the one-row case the
           same 32px it was. */}
+      {review ? <ReviewBar task={task} review={review} reviewIds={reviewIds} /> : (
       <div className="flex min-h-8 shrink-0 flex-wrap items-center gap-x-1.5 gap-y-1 border-b border-[var(--color-border-soft)] px-2 py-1 text-[11.5px]">
         <GitCompareIcon className="h-3.5 w-3.5 shrink-0 text-[var(--color-fg-faint)]" />
         <DropdownRoot onOpenChange={o => { if (o) loadRefs(); }}>
@@ -290,6 +336,14 @@ export function ComparePanel({ task, repoDir, search, viewMode, reloadToken, onO
                 </span>
               </span>
             </DropdownItem>
+            {reviewIds.length > 0 && (<>
+              <DropdownSeparator />
+              <DropdownLabel>{t("compare.review.reviews")}</DropdownLabel>
+              {reviewIds.map(id => (
+                <ReviewItem key={id} taskId={task.id} id={id} active={false}
+                  onSelect={() => useReviews.getState().setShown(task.id, id)} />
+              ))}
+            </>)}
           </DropdownMenu>
         </DropdownRoot>
         <ArrowRight className="h-3 w-3 shrink-0 text-[var(--color-fg-faint)]" />
@@ -310,11 +364,12 @@ export function ComparePanel({ task, repoDir, search, viewMode, reloadToken, onO
           </Tip>
         )}
       </div>
+      )}
 
       {/* 2. Summary strip. The whole reason someone opens this tab is to judge
           size and impact before reading a single file, so the count and the
           diffstat come before the list, not buried in it. */}
-      {cmp && !err && (
+      {view.cmp && !view.err && (
         <div
           data-testid="compare-summary"
           data-files={files.length}
@@ -333,13 +388,13 @@ export function ComparePanel({ task, repoDir, search, viewMode, reloadToken, onO
         </div>
       )}
 
-      {cmp?.no_merge_base && (
+      {!review && cmp?.no_merge_base && (
         <Note>
           <AlertTriangle className="h-3 w-3 shrink-0" />
           {t("compare.noMergeBase", { base })}
         </Note>
       )}
-      {cmp?.truncated && <Note>{t("compare.truncated")}</Note>}
+      {view.cmp?.truncated && <Note>{t("compare.truncated")}</Note>}
 
       {/* 5. Rows. */}
       <div
@@ -347,20 +402,20 @@ export function ComparePanel({ task, repoDir, search, viewMode, reloadToken, onO
         className="min-h-0 flex-1 overflow-auto py-0.5"
         onScroll={e => setScrollTop(e.currentTarget.scrollTop)}
       >
-        {err && <Empty tone="err">{err}</Empty>}
-        {!err && !base && (
+        {view.err && <Empty tone="err">{view.err}</Empty>}
+        {!review && !err && !base && (
           <Empty>{t("compare.noBase")}</Empty>
         )}
-        {!err && base && loading && !cmp && (
+        {!view.err && (review || base) && view.loading && !view.cmp && (
           <div className="flex items-center gap-2 px-3 py-3 text-[12px] text-[var(--color-fg-faint)]">
             <Loader2 className="h-3.5 w-3.5 animate-spin" /> {t("compare.comparing")}
           </div>
         )}
-        {!err && cmp && files.length === 0 && (
+        {!view.err && view.cmp && files.length === 0 && (
           <Empty>
             {search.trim()
               ? t("compare.noMatch")
-              : t("compare.nothingDiffers", { base: cmp.base })}
+              : review ? t("compare.review.empty") : t("compare.nothingDiffers", { base: view.cmp.base })}
           </Empty>
         )}
 
@@ -371,7 +426,8 @@ export function ComparePanel({ task, repoDir, search, viewMode, reloadToken, onO
             row={row}
             taskId={task.id}
             root={task.path}
-            repoDir={repoDir}
+            repoDir={dir}
+            threads={threadCounts && row.kind === "file" ? threadCounts.get(row.file.path) ?? 0 : undefined}
             selected={row.kind === "file" && selected === row.file.path}
             onOpen={openFile}
             onOpenWholeFile={openWholeFile}
@@ -403,6 +459,65 @@ function Note({ children }: { children: React.ReactNode }) {
   );
 }
 
+const reviewLabel = (r: Review) =>
+  r.title || i18n.t("panels:compare.review.untitled", { id: r.id });
+
+/** Review mode's bar: which review, its range, and whose it is. The picker
+ *  switches between the task's reviews and back to branch compare. */
+function ReviewBar({ task, review, reviewIds }: { task: Task; review: Review; reviewIds: readonly string[] }) {
+  const { t } = useTranslation("panels");
+  return (
+    <div className="flex min-h-8 shrink-0 flex-wrap items-center gap-x-1.5 gap-y-1 border-b border-[var(--color-border-soft)] px-2 py-1 text-[11.5px]">
+      <MessageSquare className="h-3.5 w-3.5 shrink-0 text-[var(--color-fg-faint)]" />
+      <DropdownRoot>
+        <DropdownTrigger asChild>
+          <button
+            data-testid="compare-review"
+            data-review={review.id}
+            title={t("compare.review.pickTip")}
+            className="flex h-6 min-w-0 shrink items-center gap-1 rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-1.5 transition-colors hover:border-[var(--color-accent-soft)]"
+          >
+            <span className="truncate text-[var(--color-fg)]">{reviewLabel(review)}</span>
+            <ChevronDown className="h-3 w-3 shrink-0 text-[var(--color-fg-faint)]" />
+          </button>
+        </DropdownTrigger>
+        <DropdownMenu align="start">
+          <DropdownLabel>{t("compare.review.reviews")}</DropdownLabel>
+          {reviewIds.map(id => (
+            <ReviewItem key={id} taskId={task.id} id={id} active={id === review.id}
+              onSelect={() => useReviews.getState().setShown(task.id, id)} />
+          ))}
+          <DropdownSeparator />
+          <DropdownItem data-testid="compare-review-exit" onSelect={() => useReviews.getState().setShown(task.id, null)}>
+            <GitCompareIcon className="h-3.5 w-3.5 shrink-0" />
+            <span className="text-[12px]">{t("compare.review.back")}</span>
+          </DropdownItem>
+        </DropdownMenu>
+      </DropdownRoot>
+      <span className="flex min-w-0 shrink items-center gap-1 font-mono text-[var(--color-fg-dim)]" data-testid="compare-review-range">
+        <span className="truncate" title={review.base.slice(0, 7)}>{review.base_ref}</span>
+        <ArrowRight className="h-3 w-3 shrink-0 text-[var(--color-fg-faint)]" />
+        <span className="truncate" title={review.head.slice(0, 7)}>{review.head_ref}</span>
+      </span>
+      <span className="ml-auto shrink-0 text-[var(--color-fg-faint)]" data-testid="compare-review-author">
+        {t("compare.review.by", { author: review.author })}
+      </span>
+    </div>
+  );
+}
+
+function ReviewItem({ taskId, id, active, onSelect }: { taskId: string; id: string; active: boolean; onSelect: () => void }) {
+  const review = useReview(taskId, id);
+  if (!review) return null;
+  return (
+    <DropdownItem onSelect={onSelect} className="items-center" data-testid="compare-review-item" data-review={id}>
+      <Check className={cn("h-3.5 w-3.5 shrink-0", !active && "opacity-0")} />
+      <span className="truncate text-[12px]">{reviewLabel(review)}</span>
+      <span className="ml-auto shrink-0 pl-2 font-mono text-[11px] text-[var(--color-fg-faint)]">{id}</span>
+    </DropdownItem>
+  );
+}
+
 function RefItem({ label, active, onSelect }: { label: string; active: boolean; onSelect: () => void }) {
   return (
     <DropdownItem onSelect={onSelect} className="items-center">
@@ -412,11 +527,13 @@ function RefItem({ label, active, onSelect }: { label: string; active: boolean; 
   );
 }
 
-function Row({ row, taskId, root, repoDir, selected, onOpen, onOpenWholeFile, setCollapsed }: {
+function Row({ row, taskId, root, repoDir, threads, selected, onOpen, onOpenWholeFile, setCollapsed }: {
   row: FlatRow;
   taskId: string;
   root: string;
   repoDir: string;
+  /** Review mode: the file's thread count, shown in place of draft comments. */
+  threads?: number;
   selected: boolean;
   onOpen: (path: string) => void;
   onOpenWholeFile: (path: string) => void;
@@ -435,7 +552,7 @@ function Row({ row, taskId, root, repoDir, selected, onOpen, onOpenWholeFile, se
   return (
     <FileRow
       file={row.file} label={row.label} depth={row.depth}
-      taskId={taskId} root={root} repoDir={repoDir}
+      taskId={taskId} root={root} repoDir={repoDir} threads={threads}
       selected={selected} onOpen={onOpen} onOpenWholeFile={onOpenWholeFile}
     />
   );
@@ -474,13 +591,14 @@ function DirRow({ row, setCollapsed }: {
  *  and plus a churn column: the same glyph, icon, strike-through-when-viewed
  *  and eye toggle, so moving between the two tabs never asks you to relearn
  *  a row. */
-function FileRow({ file, label, depth, taskId, root, repoDir, selected, onOpen, onOpenWholeFile }: {
+function FileRow({ file, label, depth, taskId, root, repoDir, threads, selected, onOpen, onOpenWholeFile }: {
   file: GitFile;
   label: string;
   depth: number;
   taskId: string;
   root: string;
   repoDir: string;
+  threads?: number;
   selected: boolean;
   onOpen: (path: string) => void;
   onOpenWholeFile: (path: string) => void;
@@ -493,7 +611,7 @@ function FileRow({ file, label, depth, taskId, root, repoDir, selected, onOpen, 
     const arr = s.byTask[taskId];
     if (!arr) return 0;
     let n = 0;
-    for (const c of arr) if (c.file === fullPath) n++;
+    for (const c of arr) if (c.file === fullPath && !c.reviewId) n++;
     return n;
   });
   // A file deleted in the working tree has nothing to fingerprint, so its
@@ -531,7 +649,14 @@ function FileRow({ file, label, depth, taskId, root, repoDir, selected, onOpen, 
           )}>
             {label}
           </span>
-          {commentCount > 0 && (
+          {threads !== undefined ? threads > 0 && (
+            <Tip side="left" content={threads === 1 ? t("compare.review.threadOne") : t("compare.review.threadMany", { count: threads })}>
+              <span data-testid="compare-thread-count" className="flex shrink-0 items-center gap-0.5 rounded bg-[var(--color-bg-3)] px-1 text-[10.5px] tabular-nums text-[var(--color-fg-dim)]">
+                <MessageSquare className="h-2.5 w-2.5" />
+                {threads}
+              </span>
+            </Tip>
+          ) : commentCount > 0 && (
             <Tip side="left" content={commentCount === 1 ? t("shared.inlineCommentOne") : t("shared.inlineCommentMany", { count: commentCount })}>
               <span className="flex shrink-0 items-center gap-0.5 rounded bg-[var(--color-bg-3)] px-1 text-[10.5px] tabular-nums text-[var(--color-fg-dim)]">
                 <MessageSquare className="h-2.5 w-2.5" />

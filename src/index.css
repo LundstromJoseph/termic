@@ -855,6 +855,8 @@ html.termic-mod-held .xterm .xterm-cursor-pointer { cursor: pointer; }
 }
 .tc-comment-tools { display: flex; gap: 2px; opacity: 0; transition: opacity 120ms; }
 .tc-comment-card:hover .tc-comment-tools { opacity: 1; }
+/* Reply is what a thread is for, so it never hides behind a hover. */
+.tc-thread-card .tc-comment-tools { opacity: 1; }
 .tc-comment-body {
   font-size: 13px;
   line-height: 1.45;
@@ -863,6 +865,20 @@ html.termic-mod-held .xterm .xterm-cursor-pointer { cursor: pointer; }
   word-break: break-word;
 }
 .tc-comment-body-empty { color: var(--color-fg-faint); font-style: italic; }
+/* an agent-presented review's thread (buildThreadCard): one entry per comment,
+   each under its author line */
+.tc-thread-entry + .tc-thread-entry {
+  margin-top: 7px;
+  padding-top: 7px;
+  border-top: 1px solid var(--color-border-soft);
+}
+.tc-thread-author {
+  margin-bottom: 2px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--color-fg-dim);
+}
+.tc-thread-entry[data-by="agent"] .tc-thread-author { color: var(--color-accent); }
 /* the selected code, quoted above the box: the same fenced snippet the agent
    is about to receive */
 .tc-comment-quote {

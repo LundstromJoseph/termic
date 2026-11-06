@@ -37,6 +37,11 @@ export interface ReviewComment {
    *  which is not a review of anything, and the framing would be a lie. Absent
    *  = diff (the original surface). */
   source?: "diff" | "editor";
+  /** Set when the comment was written in a `review:<id>` diff: it is posted
+   *  to that review and goes to the review's agent, not the bar's pick. */
+  reviewId?: string;
+  /** A reply to this thread of `reviewId`; absent opens a new thread. */
+  threadId?: string;
 }
 
 /** A comment-in-progress: range + quote captured, body not yet written.
@@ -62,6 +67,7 @@ interface ReviewCommentsState {
    *  it. Moves the LOCATOR only: the quote stays exactly what was selected. */
   reanchor: (taskId: string, id: string, at: { startLine: number; endLine: number }) => void;
   remove: (taskId: string, id: string) => void;
+  removeMany: (taskId: string, ids: readonly string[]) => void;
   clear: (taskId: string) => void;
 }
 
@@ -102,6 +108,13 @@ export const useReviewComments = create<ReviewCommentsState>((set) => ({
       byTask: { ...s.byTask, [taskId]: (s.byTask[taskId] ?? []).filter((c) => c.id !== id) },
     })),
 
+  removeMany: (taskId, ids) =>
+    set((s) => {
+      const list = s.byTask[taskId] ?? [];
+      const next = list.filter((c) => !ids.includes(c.id));
+      return next.length === list.length ? s : { byTask: { ...s.byTask, [taskId]: next } };
+    }),
+
   clear: (taskId) =>
     set((s) => {
       if (!s.byTask[taskId]?.length) return s;
@@ -118,6 +131,17 @@ const EMPTY: ReviewComment[] = [];
 /** Subscribe to one task's pending comments. */
 export function useTaskComments(taskId: string): ReviewComment[] {
   return useReviewComments((s) => s.byTask[taskId] ?? EMPTY);
+}
+
+/** Fence quoted source so multi-line snippets stay intact and the agent reads
+ *  them as a reference, not as instructions. The fence is longer than any
+ *  backtick run inside the quote, so a quoted ``` line (e.g. from a markdown
+ *  file) can't close the block early. */
+export function fenceQuote(quote: string): string {
+  const q = quote.replace(/\n+$/, "");
+  const longest = (q.match(/`+/g) ?? []).reduce((m, r) => Math.max(m, r.length), 0);
+  const fence = "`".repeat(Math.max(3, longest + 1));
+  return `${fence}\n${q}\n${fence}`;
 }
 
 /** Compose the batched comments into a single message for an agent. Groups
@@ -151,16 +175,7 @@ export function composeCommentsMessage(comments: ReviewComment[]): string {
             : `${file}:${c.startLine}`;
 
       let block = loc;
-      if (c.quote.trim()) {
-        // Fence the quoted source so multi-line snippets stay intact and the
-        // agent reads them as a reference, not as instructions. Size the
-        // fence longer than any backtick run inside the quote so a quoted
-        // ``` line (e.g. from a markdown file) can't close the block early.
-        const q = c.quote.replace(/\n+$/, "");
-        const longest = (q.match(/`+/g) ?? []).reduce((m, r) => Math.max(m, r.length), 0);
-        const fence = "`".repeat(Math.max(3, longest + 1));
-        block += `\n${fence}\n${q}\n${fence}`;
-      }
+      if (c.quote.trim()) block += `\n${fenceQuote(c.quote)}`;
       // A comment body is optional when there is a quote: sending a selection
       // with nothing to say about it is a real gesture ("look at this"). Don't
       // leave a dangling blank line behind the fence for it.

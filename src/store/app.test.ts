@@ -548,6 +548,25 @@ describe("openPreviewTab", () => {
     expect(tab.revealAt).toEqual({ line: 42, col: 5 });
   });
 
+  it("reopening an open diff bumps reloadNonce, except for commit: and review: scopes", () => {
+    const taskId = "ws1";
+    const diff = (id: string, scope?: string): Tab =>
+      ({ id, type: "diff", title: `Δ ${id}`, path: `src/${id}.ts`, scope, preview: false }) as any;
+    useApp.setState({
+      tabs: { [taskId]: [diff("live", "base:abc"), diff("commit", "commit:abc"), diff("review", "review:r1")] },
+      activeTab: { [taskId]: "live" },
+    });
+
+    for (const [id, scope] of [["live", "base:abc"], ["commit", "commit:abc"], ["review", "review:r1"]] as const) {
+      useApp.getState().openPreviewTab(taskId, { type: "diff", path: `src/${id}.ts`, title: `Δ ${id}`, scope });
+    }
+
+    const nonce = (id: string) => (useApp.getState().tabs[taskId].find(t => t.id === id) as any).reloadNonce;
+    expect(nonce("live")).toBe(1);
+    expect(nonce("commit")).toBeUndefined();
+    expect(nonce("review")).toBeUndefined();
+  });
+
   it("sets revealHeading on existing tab (file.md#heading link to an open file)", () => {
     const wsId = "ws1";
     const existing: Tab = { id: "e1", type: "edit", title: "guide.md", path: "docs/guide.md", preview: false } as any;

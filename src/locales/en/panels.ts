@@ -47,6 +47,7 @@ export default {
     markViewedAdvance: "Mark as viewed, then go to the next unviewed file",
     viewed: "Viewed",
     comparingWithParent: "Comparing {{sha}} with its parent",
+    reviewChipTip: "From the agent's review {{id}}",
   },
 
   binaryDiff: {
@@ -385,6 +386,18 @@ export default {
     comparing: "Comparing…",
     noMatch: "No changed file matches that filter.",
     nothingDiffers: "Nothing differs from {{base}}.",
+    review: {
+      reviews: "Reviews",
+      untitled: "Review {{id}}",
+      pickTip: "Switch review, or go back to branch compare",
+      back: "Back to branch compare",
+      by: "by {{author}}",
+      empty: "This review's range changes no files.",
+      threadOne: "1 review thread",
+      threadMany: "{{count}} review threads",
+      awaitingOne: "1 thread awaits your reply",
+      awaitingMany: "{{count}} threads await your reply",
+    },
   },
 
   pr: {
@@ -472,6 +485,8 @@ export default {
     wholeFile: "whole file",
     lines: "lines {{start}}–{{end}}",
     line: "line {{start}}",
+    replyTo: "reply to {{thread}}",
+    sendsToReviews: "Sends to each review's agent",
   },
 
   reviewExt: {
@@ -491,6 +506,10 @@ export default {
     commentOnLine: "＋ Comment on line {{line}}",
     sendSelection: "Send selection to agent",
     commentThisLine: "Comment on this line",
+    you: "You",
+    reply: "Reply to {{thread}} · {{loc}}",
+    pendingReply: "Pending reply to {{thread}} · {{loc}}",
+    replyAction: "Reply",
   },
 
   blame: {

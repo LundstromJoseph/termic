@@ -2769,15 +2769,6 @@ describe("comment on an editor selection for the agent", () => {
   const activeTabId = () =>
     browser.execute((id) => window.__termic!.useApp.getState().activeTab[id], taskId!);
 
-  /** Every agent terminal in the task. A send lands in one of these — which
-   *  one is the sender's business (default agent, active tab), not this
-   *  spec's, so cases assert membership rather than a captured id. */
-  const agentTabIds = () =>
-    browser.execute((id) =>
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (window.__termic!.useApp.getState().tabs[id] ?? []).filter((t: any) => t.type === "terminal")
-        .map((t: any) => t.id), taskId!) as Promise<string[]>;
-
   it("opens a file with a live agent alongside it", async () => {
     await waitForAppShell();
     await requireTermicApi();
@@ -2918,11 +2909,15 @@ describe("comment on an editor selection for the agent", () => {
 
     await writeComment("explain this heading", "send");
 
-    // Sending hands the stage to the agent, the way the pending bar does.
-    await browser.waitUntil(
-      async () => (await agentTabIds()).includes((await activeTabId()) as string),
-      { timeout: 8_000, timeoutMsg: "sending never switched to the agent" },
-    );
+    // Sending goes through the agent's queue and leaves the user where they
+    // were: the editor keeps the stage, and focus never moves into the
+    // agent's terminal. Not "focus is in .cm-editor": earlier specs can leave
+    // README in markdown preview, whose composer refocuses the preview root.
+    expect(await activeTabId()).toBe(editTabId);
+    expect(await browser.execute(() => {
+      const a = document.activeElement;
+      return !!a && a !== document.body && !a.closest(".xterm");
+    })).toBe(true);
 
     // It reached the agent with the CODE, not just a line reference...
     await browser.waitUntil(
@@ -2933,12 +2928,15 @@ describe("comment on an editor selection for the agent", () => {
       },
       { timeout: 30_000, timeoutMsg: "the instant send never reached the agent's PTY" },
     );
-    // ...and it never joined the queue.
+    // ...and it never joined the pending list, nor moved the user off the
+    // editor. Focus again now that delivery resolved: the old steal happened
+    // only after the write landed.
     expect((await cards()).length).toBe(before);
-
-    // The cases below carry on in the editor.
-    await browser.execute((id, tab) =>
-      window.__termic!.useApp.getState().setActiveTabId(id, tab), taskId!, editTabId);
+    expect(await activeTabId()).toBe(editTabId);
+    expect(await browser.execute(() => {
+      const a = document.activeElement;
+      return !!a && a !== document.body && !a.closest(".xterm");
+    })).toBe(true);
   });
 
   it("stacks a second comment from the keyboard route", async () => {
@@ -2998,6 +2996,21 @@ describe("comment on an editor selection for the agent", () => {
   });
 
   it("sends the whole batch to the agent in one message", async () => {
+    // The instant send above started a turn. A send into a working agent
+    // queues until that turn ends, so let it end first: this case is about
+    // the batch, not the queue (sendComments.test.ts pins queueing). Wait for
+    // "done", not "not working": the send itself resets the tab to idle
+    // before the agent's turn registers, so "not working" passes too early.
+    // And wait BEFORE switching to the agent: activating a tab reads its
+    // "done" and resets it to idle.
+    await browser.waitUntil(
+      () => browser.execute((id, tab) => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const t: any = (window.__termic!.useApp.getState().tabs[id] ?? []).find((x: any) => x.id === tab);
+        return t?.workState === "done" && !t?.queue?.length;
+      }, taskId!, agentTabId),
+      { timeout: 30_000, timeoutMsg: "the agent never finished the instant send's turn" },
+    );
     // The pending-comments bar lives on the terminal footer strip, so switch
     // to the agent the way a user would before sending.
     await browser.execute((id, tab) =>
@@ -3007,6 +3020,16 @@ describe("comment on an editor selection for the agent", () => {
     expect(await browser.execute(() =>
       document.querySelector('[data-testid="review-comments-pill"]')!.textContent))
       .toContain("2 pending comments");
+    // Put focus in the agent's terminal input, as a user typing there would
+    // have it. The store switch above moves no focus in an unfocused window,
+    // and from <body> there is nothing for the bar to return focus to.
+    expect(await browser.execute((id) => {
+      const input = [...document.querySelectorAll<HTMLTextAreaElement>(`[data-task-id="${id}"] .xterm-helper-textarea`)]
+        .find(el => !el.closest('[style*="display: none"]'));
+      input?.setAttribute("data-e2e-focus-origin", "");
+      input?.focus();
+      return document.activeElement === input;
+    }, taskId!)).toBe(true);
     // Open and send in ONE step that retries the open. Activating the agent
     // tab queues a terminal focus on the next frame (TerminalPane's "refit +
     // focus" effect), and a Radix popover dismisses when focus leaves it. So
@@ -3055,6 +3078,12 @@ describe("comment on an editor selection for the agent", () => {
       { timeout: 8_000, timeoutMsg: "the queue was never cleared after sending" });
     expect(await browser.execute(() =>
       !!document.querySelector('[data-testid="review-comments-pill"]'))).toBe(false);
+    // Emptying the list unmounts the popover WITH its trigger, so Radix has
+    // nowhere to return focus: the bar puts it back where it was on open.
+    await browser.waitUntil(
+      () => browser.execute(() => document.activeElement?.hasAttribute("data-e2e-focus-origin") ?? false),
+      { timeout: 8_000, timeoutMsg: "focus did not return to where it was when the bar opened" },
+    );
     await snap("editor-selection-comments.png");
   });
 });

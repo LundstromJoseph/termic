@@ -358,6 +358,37 @@ defaulting to your own task.
 
 Address pads by id: a title works when it is unique, but titles change.
 
+### Presenting your changes for review
+
+To walk the user through what you changed, present a commit range as a
+review: it opens in your task's Git tab (Compare) without taking focus,
+and you and the user talk it through in comment threads on its new side.
+Every `present` verb targets your own task unless you pass `--task`. Over
+MCP the same verbs are `present_new`, `present_comment`, `present_reply`,
+`present_show`, `present_list` and `present_claim`; pass your
+`$TERMIC_TAB_ID` as `tab` to `present_new` and `present_claim`.
+
+- `"$TERMIC_CLI" present new main..HEAD --title "<title>"` - open one and
+  print its id (`r1`). Any two commit-ish revs (`HEAD~3..HEAD`, shas);
+  `A..B` shows what B adds since it branched from A, so commits A gained
+  later stay out. Three dots are refused. The user's comments go to the
+  tab you ran it from.
+- `"$TERMIC_CLI" present comment r1 --file <path> --line 12-14 -m
+  "<text>"` - open a thread on new-side lines; without `--line`, on the
+  whole file. `-m -` reads stdin.
+- The user's comments ARRIVE in your terminal as one message naming each
+  thread (`r1-t3`). Answer each with `"$TERMIC_CLI" present reply r1-t3 -m
+  "<text>"`, not in the terminal: the thread is where the user reads it.
+- `"$TERMIC_CLI" present show r1 --since <seq>` - catch up on what came
+  after that seq (every comment carries one); without `--since`, the whole
+  review. `present list` lists the task's reviews.
+- `"$TERMIC_CLI" present claim r1` - from another agent tab of the task,
+  take the review over: the user's next comments go there.
+
+The range never moves. After an amend, rebase or new commit, open a fresh
+review for the next round instead of commenting on the old one. A caged
+(enforce/enforce-fs) task has no CLI, so it cannot present.
+
 ### Recurring task schedules
 
 Termic supports recurring schedules on tasks: recurring runs cut child tasks at specified cadences (daily, weekdays, weekly, or once on a date), run the configured prompt or prompt library template, and generate markdown reports under `.termic/reports/`. Every `schedule` verb targets your own task by default when `$TERMIC_TASK_ID` is set, or accepts `<TASK>` / `--task`. Over MCP the corresponding tools are `schedule_list`, `schedule_show`, `schedule_set`, `schedule_run`, and `schedule_delete`.

@@ -34,7 +34,7 @@ use std::io::BufReader;
 use termic_proto::local::{Listener as LocalListener, Stream as LocalStream};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
-use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, LazyLock, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use tauri::{Emitter, Manager};
@@ -551,6 +551,9 @@ impl EventSink for SocketSink<'_> {
 #[derive(Debug, Clone)]
 pub(crate) struct AgentMeta {
     pub id: String,
+    /// The registry's display name: what a review's agent comments carry
+    /// unless `--author` says otherwise.
+    pub display_name: String,
     /// "agent" or "terminal" (terminal entries have no work-done
     /// machinery at all).
     pub kind: String,
@@ -647,6 +650,9 @@ pub(crate) trait CliHost: Send + Sync {
     /// Queue a `task_badges` push for the webview. Never blocks: the CLI
     /// reply must not wait on a best-effort push.
     fn push_task_badges(&self, params: serde_json::Value);
+    /// Queue a `review_changed` push for the webview, same contract as
+    /// `push_task_badges`.
+    fn push_review(&self, params: serde_json::Value);
     /// The retained output tail of a role-tagged PTY.
     fn pty_logs(&self, pty_id: &str, max: usize) -> Result<(Vec<u8>, bool), String>;
     /// Register a live attach tap + backlog snapshot on a PTY.
@@ -932,6 +938,12 @@ pub(crate) fn dispatch_authenticated(
         Command::BadgeList { task, project, cwd } => {
             handle_badge(&req.id, host, task.as_deref(), project.as_deref(), cwd.as_deref(), None)
         }
+        Command::PresentNew { .. }
+        | Command::PresentComment { .. }
+        | Command::PresentReply { .. }
+        | Command::PresentShow { .. }
+        | Command::PresentList { .. }
+        | Command::PresentClaim { .. } => handle_present(&req.id, host, &req.cmd),
         Command::TabClose { task, project, tab, yes, cwd } => handle_tab_close(
             &req.id,
             host,
@@ -3421,6 +3433,225 @@ fn handle_badge(
     )
 }
 
+/// The `present` verbs. The server owns the review file (`crate::reviews`),
+/// so a review works whether or not the UI has the task open; the webview
+/// only hears about writes, best effort, through `review_changed`.
+fn handle_present(id: &str, host: &dyn CliHost, cmd: &Command) -> Reply {
+    let (task, project, cwd) = match cmd {
+        Command::PresentNew { task, project, cwd, .. }
+        | Command::PresentComment { task, project, cwd, .. }
+        | Command::PresentReply { task, project, cwd, .. }
+        | Command::PresentShow { task, project, cwd, .. }
+        | Command::PresentList { task, project, cwd }
+        | Command::PresentClaim { task, project, cwd, .. } => (task.as_deref(), project.as_deref(), cwd.as_deref()),
+        _ => unreachable!("dispatch sends only the present verbs here"),
+    };
+    let (projects, tasks) = host.projects_tasks();
+    let t = match resolve_task_arg(&projects, &tasks, task, project, cwd) {
+        Ok(t) => t,
+        Err(e) => return Reply { id: id.into(), ok: false, data: None, error: Some(e) },
+    };
+    let name = qualified(&projects, t);
+    let host_is_repo = !projects.iter().any(|p| p.id == t.project_id && p.non_git);
+    // Held across the write and the enqueue so one task's pushes are sent in
+    // write order (the handle_badge rule), and so a claim cannot land between
+    // a comment's author read and its write. Per task: a slow git read in one
+    // task must not hold up another's comments.
+    static PUSH_ORDER: LazyLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> = LazyLock::new(Default::default);
+    let task_lock = (!matches!(cmd, Command::PresentShow { .. } | Command::PresentList { .. })).then(|| {
+        let mut locks = PUSH_ORDER.lock().unwrap_or_else(|p| p.into_inner());
+        Arc::clone(locks.entry(t.id.clone()).or_default())
+    });
+    let _order = task_lock.as_ref().map(|l| l.lock().unwrap_or_else(|p| p.into_inner()));
+    match present(host, t, &name, host_is_repo, cwd, cmd) {
+        Ok(data) => Reply::ok(id, data),
+        Err(PresentError::Bad(why)) => Reply::err(id, ErrorCode::BadRequest, why),
+        Err(PresentError::Tab(e)) => Reply { id: id.into(), ok: false, data: None, error: Some(e) },
+        Err(PresentError::Review(e)) => {
+            let code = match e {
+                crate::reviews::ReviewError::NoSuchReview(_) | crate::reviews::ReviewError::NoSuchThread(_) => {
+                    ErrorCode::NotFound
+                }
+                crate::reviews::ReviewError::Invalid(_) | crate::reviews::ReviewError::Git(_) => ErrorCode::BadRequest,
+                crate::reviews::ReviewError::Io(_) => ErrorCode::Internal,
+            };
+            Reply::err(id, code, e.to_string())
+        }
+    }
+}
+
+enum PresentError {
+    Bad(String),
+    /// `resolve_tab_selector`'s refusal, code and all.
+    Tab(proto::ErrorBody),
+    Review(crate::reviews::ReviewError),
+}
+
+impl From<crate::reviews::ReviewError> for PresentError {
+    fn from(e: crate::reviews::ReviewError) -> Self {
+        Self::Review(e)
+    }
+}
+
+/// `present show`'s reply budget: the reply line caps at MAX_LINE_BYTES
+/// post-escape, and the envelope rides the same line (the DIFF_BUDGET rule).
+const REVIEW_REPLY_BUDGET: usize = 850 * 1024;
+
+fn review_summary(r: proto::Review) -> proto::ReviewSummary {
+    proto::ReviewSummary {
+        threads: r.threads.len() as u32,
+        comments: r.threads.iter().map(|th| th.comments.len() as u32).sum(),
+        id: r.id,
+        title: r.title,
+        base_ref: r.base_ref,
+        head_ref: r.head_ref,
+        author: r.author,
+        recipient_tab: r.recipient_tab,
+        seq: r.seq,
+    }
+}
+
+fn present(
+    host: &dyn CliHost,
+    t: &Task,
+    name: &str,
+    host_is_repo: bool,
+    cwd: Option<&str>,
+    cmd: &Command,
+) -> Result<ReplyData, PresentError> {
+    use crate::reviews::{self, ReviewOp};
+    let review_data = |review| ReplyData::Review(proto::ReviewData { task_id: t.id.clone(), task: name.into(), review });
+    let write_data = |review_id: String, p: reviews::Posted| {
+        ReplyData::ReviewWrite(proto::ReviewWriteData {
+            task_id: t.id.clone(),
+            review_id,
+            thread_id: p.thread_id,
+            seq: p.seq,
+            new_thread: p.new_thread,
+        })
+    };
+    // The recipient must be an agent tab of THIS task: the user's comments
+    // are typed into it.
+    let agent_tab = |tab: &str| resolve_tab_selector(host, t, tab).map_err(PresentError::Tab);
+    let display_name = |cli: &str| {
+        host.agents().into_iter().find(|a| a.id == cli).map(|a| a.display_name).filter(|n| !n.trim().is_empty())
+    };
+    match cmd {
+        Command::PresentNew { range, title, author, repo, tab, .. } => {
+            let rt = tab.as_deref().map(agent_tab).transpose()?;
+            let author = author
+                .clone()
+                .or_else(|| rt.as_ref().and_then(|rt| display_name(&rt.cli)))
+                .unwrap_or_else(|| "Agent".into());
+            let dir_name = review_repo(t, name, host_is_repo, repo.as_deref(), cwd).map_err(PresentError::Bad)?;
+            let review = reviews::create(t, reviews::NewReview {
+                range: range.clone(),
+                title: title.clone(),
+                author,
+                recipient_tab: rt.map(|rt| rt.id),
+                dir_name,
+            })?;
+            host.push_review(serde_json::json!({ "taskId": t.id, "review": review, "reveal": true }));
+            Ok(review_data(review))
+        }
+        Command::PresentComment { review, file, start_line, end_line, body, .. } => {
+            let author = reviews::load(t, review)?.author;
+            let lines = match (start_line, end_line) {
+                (Some(s), e) => Some((*s, e.unwrap_or(*s))),
+                (None, None) => None,
+                (None, Some(_)) => return Err(PresentError::Bad("end_line without start_line".into())),
+            };
+            let op = ReviewOp::Comment {
+                file: file.clone(),
+                lines,
+                body: body.clone(),
+                by: proto::ReviewBy::Agent,
+                author,
+                quote: None,
+            };
+            let (r, mut posted, _) = reviews::apply(t, review, vec![op])?;
+            host.push_review(serde_json::json!({ "taskId": t.id, "review": r }));
+            Ok(write_data(r.id, posted.remove(0)))
+        }
+        Command::PresentReply { thread, body, .. } => {
+            let (review, _) = proto::split_thread_id(thread).ok_or_else(|| {
+                PresentError::Bad(proto::review_thread_id_problem(thread).unwrap_or_default())
+            })?;
+            let author = reviews::load(t, review)?.author;
+            let op = ReviewOp::Reply { thread_id: thread.clone(), body: body.clone(), by: proto::ReviewBy::Agent, author };
+            let (r, mut posted, _) = reviews::apply(t, review, vec![op])?;
+            host.push_review(serde_json::json!({ "taskId": t.id, "review": r }));
+            Ok(write_data(r.id, posted.remove(0)))
+        }
+        Command::PresentShow { review, since, .. } => {
+            let mut r = reviews::load(t, review)?;
+            if let Some(since) = since {
+                for th in &mut r.threads {
+                    th.comments.retain(|c| c.seq > *since);
+                }
+                r.threads.retain(|th| !th.comments.is_empty());
+            }
+            let id = r.id.clone();
+            let data = review_data(r);
+            // An over-long line reaches the CLI as "connection lost".
+            if serde_json::to_string(&data).map_or(0, |s| s.len()) > REVIEW_REPLY_BUDGET {
+                return Err(PresentError::Bad(format!(
+                    "review {id} is too large to print whole; read it in parts with --since <seq>"
+                )));
+            }
+            Ok(data)
+        }
+        Command::PresentList { .. } => {
+            let reviews = reviews::list(t).into_iter().map(review_summary).collect();
+            Ok(ReplyData::Reviews(proto::ReviewsData { task_id: t.id.clone(), task: name.into(), reviews }))
+        }
+        Command::PresentClaim { review, tab, author, .. } => {
+            let tab = tab
+                .clone()
+                .ok_or_else(|| PresentError::Bad("no tab: run this from an agent tab or pass --tab".into()))?;
+            let rt = agent_tab(&tab)?;
+            let author = author.clone().or_else(|| display_name(&rt.cli));
+            let (r, _, changed) = reviews::apply(t, review, vec![ReviewOp::Claim { tab: rt.id, author }])?;
+            if changed {
+                host.push_review(serde_json::json!({ "taskId": t.id, "review": r }));
+            }
+            Ok(ReplyData::ReviewClaim(proto::ReviewClaimData {
+                task_id: t.id.clone(),
+                task: name.into(),
+                review: review_summary(r),
+            }))
+        }
+        _ => unreachable!("dispatch sends only the present verbs here"),
+    }
+}
+
+/// Which repo of the task a review's range lives in: `--repo` names a
+/// composition member, otherwise the member holding the caller's cwd, else
+/// the host repo (""). A plain-folder host is no repo, so there a member
+/// must be named (an MCP caller sends no cwd).
+fn review_repo(t: &Task, name: &str, host_is_repo: bool, repo: Option<&str>, cwd: Option<&str>) -> Result<String, String> {
+    if let Some(r) = repo {
+        return match t.composition.iter().any(|m| m.dir_name == r) {
+            true => Ok(r.to_string()),
+            false => Err(format!("{name} has no member repo {r}")),
+        };
+    }
+    let member = cwd.and_then(|c| {
+        t.composition
+            .iter()
+            .filter(|m| !m.path.is_empty() && Path::new(c).starts_with(&m.path))
+            .max_by_key(|m| m.path.len())
+    });
+    match member {
+        Some(m) => Ok(m.dir_name.clone()),
+        None if host_is_repo || t.composition.is_empty() => Ok(String::new()),
+        None => {
+            let members: Vec<&str> = t.composition.iter().map(|m| m.dir_name.as_str()).collect();
+            Err(format!("{name}'s root is not a git repo; pass --repo, one of: {}", members.join(", ")))
+        }
+    }
+}
+
 const TAB_TITLE_ERR: &str = "cli_tab_title:";
 
 fn parse_tab_title_error(e: &str) -> (ErrorCode, String) {
@@ -4492,6 +4723,7 @@ impl CliHost for TauriHost {
             .iter()
             .map(|a| AgentMeta {
                 id: a.id.clone(),
+                display_name: a.display_name.clone(),
                 kind: a.kind.clone(),
                 work_done: a.work_done,
                 disabled: a.disabled,
@@ -4580,23 +4812,11 @@ impl CliHost for TauriHost {
     }
     fn push_task_badges(&self, params: serde_json::Value) {
         static QUEUE: OnceLock<mpsc::Sender<serde_json::Value>> = OnceLock::new();
-        let tx = QUEUE.get_or_init(|| {
-            let (tx, rx) = mpsc::channel();
-            let app = self.app.clone();
-            std::thread::spawn(move || {
-                run_badge_pusher(
-                    rx,
-                    || webview_ready().wait(Duration::ZERO),
-                    |params| {
-                        if let Err(e) = webview_rpc(&app, "task_badges", params, Duration::from_secs(5)) {
-                            eprintln!("[cli] task_badges push failed: {e}");
-                        }
-                    },
-                )
-            });
-            tx
-        });
-        let _ = tx.send(params);
+        let _ = QUEUE.get_or_init(|| spawn_pusher(self.app.clone(), "task_badges")).send(params);
+    }
+    fn push_review(&self, params: serde_json::Value) {
+        static QUEUE: OnceLock<mpsc::Sender<serde_json::Value>> = OnceLock::new();
+        let _ = QUEUE.get_or_init(|| spawn_pusher(self.app.clone(), "review_changed")).send(params);
     }
     fn find_tab_pty(&self, task_id: &str, tab_id: &str) -> Result<String, String> {
         crate::find_tab_pty(&self.app.state::<crate::PtyManager>(), task_id, tab_id)
@@ -5332,9 +5552,27 @@ fn webview_rpc(
     webview_rpc_stream(app, method, params, timeout, &mut |_| {})
 }
 
-/// The one thread that sends `task_badges` pushes, in queue order. A push
-/// dequeued before the webview's RPC listener exists is dropped: the
-/// webview's first `loadAll` reads the badges from disk anyway.
+/// The sender of a `method` push queue, drained by its own thread.
+fn spawn_pusher(app: tauri::AppHandle, method: &'static str) -> mpsc::Sender<serde_json::Value> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        run_badge_pusher(
+            rx,
+            || webview_ready().wait(Duration::ZERO),
+            |params| {
+                if let Err(e) = webview_rpc(&app, method, params, Duration::from_secs(5)) {
+                    eprintln!("[cli] {method} push failed: {e}");
+                }
+            },
+        )
+    });
+    tx
+}
+
+/// The one thread that sends one method's pushes (`task_badges`,
+/// `review_changed`), in queue order. A push dequeued before the webview's
+/// RPC listener exists is dropped: the webview reads the record from disk
+/// on its first load anyway.
 fn run_badge_pusher(
     rx: mpsc::Receiver<serde_json::Value>,
     ready: impl Fn() -> bool,
@@ -6334,7 +6572,7 @@ pub(crate) mod test_support {
     }
 
     pub(crate) fn agent_meta(id: &str, work_done: bool) -> AgentMeta {
-        AgentMeta { id: id.into(), kind: "agent".into(), work_done, disabled: false, id_resume: id == "claude", accounts: Vec::new() }
+        AgentMeta { id: id.into(), display_name: id.into(), kind: "agent".into(), work_done, disabled: false, id_resume: id == "claude", accounts: Vec::new() }
     }
 
     pub(crate) struct StubHost {
@@ -6633,6 +6871,9 @@ pub(crate) mod test_support {
         }
         fn push_task_badges(&self, params: serde_json::Value) {
             self.rpc_calls.lock().unwrap().push(("task_badges".into(), params));
+        }
+        fn push_review(&self, params: serde_json::Value) {
+            self.rpc_calls.lock().unwrap().push(("review_changed".into(), params));
         }
         fn find_tab_pty(&self, task_id: &str, tab_id: &str) -> Result<String, String> {
             self.tab_ptys
@@ -8646,6 +8887,7 @@ mod tests {
         let mut host = StubHost::default();
         host.agents.push(AgentMeta {
             id: "parked".into(),
+            display_name: "parked".into(),
             kind: "agent".into(),
             work_done: true,
             disabled: true,
@@ -8667,6 +8909,7 @@ mod tests {
         let mut host = StubHost::default();
         host.agents.push(AgentMeta {
             id: "acct".into(),
+            display_name: "acct".into(),
             kind: "agent".into(),
             work_done: true,
             disabled: false,
@@ -9794,6 +10037,417 @@ mod tests {
 
         assert!(!d.changed);
         assert_eq!(badge_pushes(&host).len(), 1, "only the first set pushed");
+    }
+
+    // ── present (v26) ────────────────────────────────────────────────
+
+    fn git_in(repo: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git").args(args).current_dir(repo).output().unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    }
+
+    /// A repo where `base..main` edits a.txt (4 lines at main) and adds b.txt,
+    /// and leaves same.txt alone.
+    fn present_repo() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        git_in(p, &["init", "-q", "-b", "main"]);
+        for (k, v) in [("user.name", "Test"), ("user.email", "t@t"), ("core.autocrlf", "false")] {
+            git_in(p, &["config", k, v]);
+        }
+        for (name, content) in [("a.txt", "one\ntwo\n"), ("same.txt", "same\n")] {
+            std::fs::write(p.join(name), content).unwrap();
+        }
+        git_in(p, &["add", "."]);
+        git_in(p, &["commit", "-q", "-m", "base"]);
+        git_in(p, &["branch", "base"]);
+        std::fs::write(p.join("a.txt"), "one\ntwo\nthree\nfour\n").unwrap();
+        std::fs::write(p.join("b.txt"), "b\n").unwrap();
+        git_in(p, &["add", "."]);
+        git_in(p, &["commit", "-q", "-m", "head"]);
+        dir
+    }
+
+    /// The stub with task w9 (web/rev) on `repo`, an agent tab of each of
+    /// claude ("Claude") and codex, and a shell tab, live and persisted. The
+    /// test build's CACHE_STALE_AFTER is 800ms, which the scratch-dir lock or
+    /// a few git processes can outlast: build it INSIDE
+    /// `with_scratch_data_dir`, and the persisted copy keeps exact ids
+    /// resolving once the snapshot goes stale (titles still need it fresh).
+    fn present_host(repo: &Path) -> StubHost {
+        let mut host = StubHost::default();
+        let persisted = |id: &str, cli: &str| crate::PersistedTab { props: Default::default(), marked_unread: false,
+            agent_args: Vec::new(),
+            id: id.into(),
+            cli: cli.into(),
+            title: None,
+            custom_title: false,
+            is_default: id == "tab-c",
+            command: None,
+            session_id: None,
+            pane_leaf_id: None,
+            run_member: None,
+            pinned: false,
+            scheduled: Vec::new(),
+        };
+        host.tasks.push(Task {
+            persisted_tabs: vec![persisted("tab-c", "claude"), persisted("tab-x", "codex"), persisted("tab-s", "shell")],
+            ..task("w9", "rev", "p1", &repo.to_string_lossy())
+        });
+        host.agents[0].display_name = "Claude".into();
+        push_present_tabs(&host);
+        host
+    }
+
+    fn push_present_tabs(host: &StubHost) {
+        push_tabs(host, "w9", "idle", vec![
+            tab_state("tab-c", "agent", "claude", "claude", Some("idle"), true, true),
+            tab_state("tab-x", "agent", "codex", "codex", Some("idle"), true, false),
+            tab_state("tab-s", "shell", "shell", "shell", None, true, false),
+        ]);
+    }
+
+    fn present_new(tab: Option<&str>, author: Option<&str>) -> Request {
+        req(
+            Command::PresentNew {
+                task: Some("w9".into()),
+                project: None,
+                range: "base..main".into(),
+                title: Some("Login fix".into()),
+                author: author.map(str::to_string),
+                repo: None,
+                tab: tab.map(str::to_string),
+                cwd: None,
+            },
+            Some("tok"),
+        )
+    }
+
+    fn present_comment(review: &str, file: &str, lines: Option<(u32, u32)>, body: &str) -> Request {
+        req(
+            Command::PresentComment {
+                task: Some("w9".into()),
+                project: None,
+                review: review.into(),
+                file: file.into(),
+                start_line: lines.map(|l| l.0),
+                end_line: lines.map(|l| l.1),
+                body: body.into(),
+                cwd: None,
+            },
+            Some("tok"),
+        )
+    }
+
+    fn present_reply(thread: &str, body: &str) -> Request {
+        req(Command::PresentReply { task: Some("w9".into()), project: None, thread: thread.into(), body: body.into(), cwd: None }, Some("tok"))
+    }
+
+    fn present_show(review: &str, since: Option<u64>) -> Request {
+        req(Command::PresentShow { task: Some("w9".into()), project: None, review: review.into(), since, cwd: None }, Some("tok"))
+    }
+
+    fn present_claim(tab: Option<&str>, author: Option<&str>) -> Request {
+        req(
+            Command::PresentClaim {
+                task: Some("w9".into()),
+                project: None,
+                review: "r1".into(),
+                tab: tab.map(str::to_string),
+                author: author.map(str::to_string),
+                cwd: None,
+            },
+            Some("tok"),
+        )
+    }
+
+    fn review_of(reply: Reply) -> proto::Review {
+        assert!(reply.ok, "{:?}", reply.error);
+        let Some(ReplyData::Review(d)) = reply.data else { panic!("expected a review") };
+        d.review
+    }
+
+    fn write_of(reply: Reply) -> proto::ReviewWriteData {
+        assert!(reply.ok, "{:?}", reply.error);
+        let Some(ReplyData::ReviewWrite(d)) = reply.data else { panic!("expected a review write") };
+        d
+    }
+
+    fn claim_of(reply: Reply) -> proto::ReviewSummary {
+        assert!(reply.ok, "{:?}", reply.error);
+        let Some(ReplyData::ReviewClaim(d)) = reply.data else { panic!("expected a claim") };
+        d.review
+    }
+
+    fn err_of(reply: Reply) -> (ErrorCode, String) {
+        assert!(!reply.ok, "expected an error, got {:?}", reply.data);
+        let e = reply.error.unwrap();
+        (e.code, e.message)
+    }
+
+    fn review_pushes(host: &StubHost) -> Vec<serde_json::Value> {
+        host.rpc_calls.lock().unwrap().iter().filter(|(m, _)| m == "review_changed").map(|(_, p)| p.clone()).collect()
+    }
+
+    #[test]
+    fn present_new_from_an_agent_tab_opens_r1_named_after_the_tabs_agent_and_pushes_a_reveal() {
+        let repo = present_repo();
+        crate::test_support::with_scratch_data_dir(|_| {
+            let host = present_host(repo.path());
+            let r = review_of(handle(&present_new(Some("tab-c"), None), &host));
+
+            assert_eq!(r.id, "r1");
+            assert_eq!(r.author, "Claude", "the registry display name, not the cli id");
+            assert_eq!(r.recipient_tab.as_deref(), Some("tab-c"));
+            assert_eq!(r.files, vec!["a.txt", "b.txt"]);
+            let pushes = review_pushes(&host);
+            assert_eq!(pushes.len(), 1);
+            assert_eq!(pushes[0]["taskId"], "w9");
+            assert_eq!(pushes[0]["reveal"], true);
+            assert_eq!(pushes[0]["review"]["id"], "r1");
+        });
+    }
+
+    #[test]
+    fn present_new_without_a_tab_has_no_recipient_and_signs_as_agent_unless_author_is_given() {
+        let repo = present_repo();
+        crate::test_support::with_scratch_data_dir(|_| {
+            let host = present_host(repo.path());
+            let bare = review_of(handle(&present_new(None, None), &host));
+            let named = review_of(handle(&present_new(Some("tab-c"), Some("Reviewer")), &host));
+
+            assert_eq!((bare.author.as_str(), bare.recipient_tab.as_deref()), ("Agent", None));
+            assert_eq!((named.id.as_str(), named.author.as_str()), ("r2", "Reviewer"));
+        });
+    }
+
+    #[test]
+    fn present_new_refuses_a_shell_tab_as_unsupported_and_an_unknown_tab_as_not_found_and_writes_no_review() {
+        let repo = present_repo();
+        crate::test_support::with_scratch_data_dir(|_| {
+            let host = present_host(repo.path());
+            let shell = err_of(handle(&present_new(Some("tab-s"), None), &host));
+            let unknown = err_of(handle(&present_new(Some("nope"), None), &host));
+
+            assert_eq!(shell.0, ErrorCode::Unsupported);
+            assert_eq!(unknown.0, ErrorCode::NotFound);
+            assert!(review_pushes(&host).is_empty());
+            let list = handle(&req(Command::PresentList { task: Some("w9".into()), project: None, cwd: None }, Some("tok")), &host);
+            let Some(ReplyData::Reviews(d)) = list.data else { panic!("expected reviews") };
+            assert!(d.reviews.is_empty());
+        });
+    }
+
+    #[test]
+    fn present_new_takes_a_tab_the_live_snapshot_has_not_reported_yet_from_the_persisted_strip() {
+        let repo = present_repo();
+        crate::test_support::with_scratch_data_dir(|_| {
+            let mut host = present_host(repo.path());
+            host.tasks.iter_mut().find(|t| t.id == "w9").unwrap().persisted_tabs.push(crate::PersistedTab { props: Default::default(), marked_unread: false,
+                agent_args: Vec::new(),
+                id: "tab-new".into(),
+                cli: "claude".into(),
+                title: None,
+                custom_title: false,
+                is_default: false,
+                command: None,
+                session_id: None,
+                pane_leaf_id: None,
+                run_member: None,
+                pinned: false,
+                scheduled: Vec::new(),
+            });
+
+            let r = review_of(handle(&present_new(Some("tab-new"), None), &host));
+
+            assert_eq!((r.recipient_tab.as_deref(), r.author.as_str()), (Some("tab-new"), "Claude"));
+        });
+    }
+
+    #[test]
+    fn present_show_refuses_a_review_too_large_for_one_reply_line_and_points_at_since() {
+        let repo = present_repo();
+        crate::test_support::with_scratch_data_dir(|_| {
+            let host = present_host(repo.path());
+            handle(&present_new(Some("tab-c"), None), &host);
+            handle(&present_comment("r1", "a.txt", None, "start"), &host);
+            let body = "x".repeat(proto::REVIEW_BODY_MAX);
+            let replies = (0..120)
+                .map(|_| crate::reviews::ReviewOp::Reply {
+                    thread_id: "r1-t1".into(),
+                    body: body.clone(),
+                    by: proto::ReviewBy::User,
+                    author: String::new(),
+                })
+                .collect();
+            let w9 = host.tasks.iter().find(|t| t.id == "w9").unwrap();
+            crate::reviews::apply(w9, "r1", replies).unwrap();
+
+            let whole = err_of(handle(&present_show("r1", None), &host));
+            let tail = review_of(handle(&present_show("r1", Some(120)), &host));
+
+            assert_eq!(
+                whole,
+                (ErrorCode::BadRequest, "review r1 is too large to print whole; read it in parts with --since <seq>".into())
+            );
+            assert_eq!(tail.threads[0].comments.len(), 1);
+        });
+    }
+
+    #[test]
+    fn present_comment_quotes_the_head_lines_signs_with_the_reviews_author_and_reply_appends_to_the_thread() {
+        let repo = present_repo();
+        crate::test_support::with_scratch_data_dir(|_| {
+            let host = present_host(repo.path());
+            handle(&present_new(Some("tab-c"), None), &host);
+
+            let line = write_of(handle(&present_comment("r1", "a.txt", Some((3, 4)), "why?"), &host));
+            let file = write_of(handle(&present_comment("r1", "b.txt", None, "generated"), &host));
+            let reply = write_of(handle(&present_reply("r1-t1", "because"), &host));
+
+            assert_eq!((line.thread_id.as_str(), line.seq, line.new_thread), ("r1-t1", 1, true));
+            assert_eq!((file.thread_id.as_str(), file.seq, file.new_thread), ("r1-t2", 2, true));
+            assert_eq!((reply.thread_id.as_str(), reply.seq, reply.new_thread), ("r1-t1", 3, false));
+            let r = review_of(handle(&present_show("r1", None), &host));
+            assert_eq!(r.threads[0].quote, "three\nfour");
+            assert_eq!(r.threads[1].quote, "", "file level");
+            let t1: Vec<(&str, &str)> = r.threads[0].comments.iter().map(|c| (c.author.as_str(), c.body.as_str())).collect();
+            assert_eq!(t1, vec![("Claude", "why?"), ("Claude", "because")]);
+            assert!(r.threads[0].comments.iter().all(|c| c.by == proto::ReviewBy::Agent));
+            let pushes = review_pushes(&host);
+            assert_eq!(pushes.len(), 4, "new + three writes");
+            assert!(pushes[1..].iter().all(|p| p.get("reveal").is_none()), "only new reveals");
+            assert_eq!(pushes[3]["review"]["seq"], 3);
+        });
+    }
+
+    #[test]
+    fn present_show_since_keeps_only_later_comments_and_drops_threads_with_none() {
+        let repo = present_repo();
+        crate::test_support::with_scratch_data_dir(|_| {
+            let host = present_host(repo.path());
+            handle(&present_new(Some("tab-c"), None), &host);
+            handle(&present_comment("r1", "a.txt", Some((1, 1)), "first"), &host);
+            handle(&present_comment("r1", "b.txt", None, "second"), &host);
+            handle(&present_reply("r1-t1", "third"), &host);
+
+            let r = review_of(handle(&present_show("r1", Some(2)), &host));
+
+            assert_eq!(r.threads.len(), 1);
+            assert_eq!(r.threads[0].id, "r1-t1");
+            let bodies: Vec<&str> = r.threads[0].comments.iter().map(|c| c.body.as_str()).collect();
+            assert_eq!(bodies, vec!["third"]);
+        });
+    }
+
+    #[test]
+    fn present_list_summarises_each_review_with_thread_and_comment_counts() {
+        let repo = present_repo();
+        crate::test_support::with_scratch_data_dir(|_| {
+            let host = present_host(repo.path());
+            handle(&present_new(Some("tab-c"), None), &host);
+            handle(&present_new(None, None), &host);
+            handle(&present_comment("r1", "a.txt", None, "x"), &host);
+            handle(&present_reply("r1-t1", "y"), &host);
+
+            let reply = handle(&req(Command::PresentList { task: Some("w9".into()), project: None, cwd: None }, Some("tok")), &host);
+
+            let Some(ReplyData::Reviews(d)) = reply.data else { panic!("expected reviews") };
+            let rows: Vec<(&str, u32, u32, u64)> = d.reviews.iter().map(|r| (r.id.as_str(), r.threads, r.comments, r.seq)).collect();
+            assert_eq!(rows, vec![("r1", 1, 2, 2), ("r2", 0, 0, 0)]);
+            assert_eq!(d.task, "web/rev");
+        });
+    }
+
+    #[test]
+    fn present_claim_by_tab_title_stores_that_tabs_id_moves_the_author_replies_a_summary_and_pushes_only_on_change() {
+        let repo = present_repo();
+        crate::test_support::with_scratch_data_dir(|_| {
+            let host = present_host(repo.path());
+            handle(&present_new(Some("tab-c"), None), &host);
+            handle(&present_comment("r1", "a.txt", None, "x"), &host);
+            // A title resolves only against a fresh snapshot; the git work above can outlast it.
+            push_present_tabs(&host);
+
+            let claimed = claim_of(handle(&present_claim(Some("codex"), None), &host));
+            let again = claim_of(handle(&present_claim(Some("tab-x"), None), &host));
+            let renamed = claim_of(handle(&present_claim(Some("tab-x"), Some("Codex")), &host));
+
+            assert_eq!((claimed.recipient_tab.as_deref(), claimed.author.as_str()), (Some("tab-x"), "codex"));
+            assert_eq!((claimed.id.as_str(), claimed.threads, claimed.comments), ("r1", 1, 1));
+            assert_eq!(again, claimed);
+            assert_eq!(renamed.author, "Codex");
+            assert_eq!(review_pushes(&host).len(), 4, "new, the comment, the first claim and the rename; not the repeat");
+        });
+    }
+
+    #[test]
+    fn present_claim_without_a_tab_is_a_bad_request_and_from_a_shell_tab_unsupported() {
+        let repo = present_repo();
+        crate::test_support::with_scratch_data_dir(|_| {
+            let host = present_host(repo.path());
+            handle(&present_new(Some("tab-c"), None), &host);
+
+            let none = err_of(handle(&present_claim(None, None), &host));
+            let shell = err_of(handle(&present_claim(Some("tab-s"), None), &host));
+
+            assert_eq!(none, (ErrorCode::BadRequest, "no tab: run this from an agent tab or pass --tab".into()));
+            assert_eq!(shell.0, ErrorCode::Unsupported);
+        });
+    }
+
+    #[test]
+    fn present_errors_map_missing_things_to_not_found_and_refusals_to_bad_request() {
+        let repo = present_repo();
+        crate::test_support::with_scratch_data_dir(|_| {
+            let host = present_host(repo.path());
+            handle(&present_new(Some("tab-c"), None), &host);
+
+            let no_review = err_of(handle(&present_show("r9", None), &host));
+            let no_thread = err_of(handle(&present_reply("r1-t9", "x"), &host));
+            let unchanged = err_of(handle(&present_comment("r1", "same.txt", None, "x"), &host));
+            let past_eof = err_of(handle(&present_comment("r1", "a.txt", Some((5, 5)), "x"), &host));
+            let bad_range = err_of(handle(
+                &req(Command::PresentNew { task: Some("w9".into()), project: None, range: "nope..main".into(), title: None, author: None, repo: None, tab: None, cwd: None }, Some("tok")),
+                &host,
+            ));
+            let no_task = err_of(handle(
+                &req(Command::PresentList { task: Some("ghost".into()), project: None, cwd: None }, Some("tok")),
+                &host,
+            ));
+
+            assert_eq!(no_review, (ErrorCode::NotFound, "no such review r9".into()));
+            assert_eq!(no_thread, (ErrorCode::NotFound, "no such thread r1-t9".into()));
+            assert_eq!(unchanged, (ErrorCode::BadRequest, "same.txt is not changed in base..main".into()));
+            assert_eq!(past_eof.0, ErrorCode::BadRequest);
+            assert_eq!(bad_range, (ErrorCode::BadRequest, "nope isn't a commit in this repo".into()));
+            assert_eq!(no_task.0, ErrorCode::NotFound);
+        });
+    }
+
+    #[test]
+    fn review_repo_takes_a_named_member_else_the_member_holding_cwd_else_a_git_host_and_never_a_plain_folder_host() {
+        let member = |dir: &str, path: &str| crate::TaskMember { dir_name: dir.into(), path: path.into(), ..Default::default() };
+        let t = Task {
+            composition: vec![member("api", "/t/rev/api"), member("web", "/t/rev/web")],
+            ..task("w9", "rev", "p1", "/t/rev")
+        };
+
+        let named = review_repo(&t, "web/rev", true, Some("web"), Some("/t/rev/api"));
+        let unknown = review_repo(&t, "web/rev", true, Some("ios"), None);
+        let by_cwd = review_repo(&t, "web/rev", true, None, Some("/t/rev/api/src"));
+        let host = review_repo(&t, "web/rev", true, None, Some("/t/rev"));
+        let no_cwd = review_repo(&t, "web/rev", true, None, None);
+        let plain_host = review_repo(&t, "web/rev", false, None, None);
+        let plain_host_member_cwd = review_repo(&t, "web/rev", false, None, Some("/t/rev/web"));
+
+        assert_eq!(named, Ok("web".into()));
+        assert_eq!(unknown, Err("web/rev has no member repo ios".into()));
+        assert_eq!(by_cwd, Ok("api".into()));
+        assert_eq!(host, Ok(String::new()));
+        assert_eq!(no_cwd, Ok(String::new()));
+        assert_eq!(plain_host, Err("web/rev's root is not a git repo; pass --repo, one of: api, web".into()));
+        assert_eq!(plain_host_member_cwd, Ok("web".into()));
     }
 
     #[test]

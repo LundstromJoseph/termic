@@ -9,7 +9,7 @@
 // The tab was renamed "Commit" by #199 because two git surfaces made "Git"
 // ambiguous; folding them back together makes "Git" right again.
 
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -68,7 +68,10 @@ export function RightPanel() {
   const addTab = useApp(s => s.addTab);
   const split = useApp(s => !!s.terminalSplit[task?.id ?? ""]);
   const toggleSplit = useApp(s => s.toggleTerminalSplit);
-  const [view, setView] = useState<"files" | "changes" | "scratchpad">("files");
+  // A pending `present new` reveal for this task seeds the Git tab, so a panel
+  // un-hidden onto it never mounts the file tree first.
+  const [view, setView] = useState<"files" | "changes" | "scratchpad">(() =>
+    task && useUI.getState().reviewReveal?.taskId === task.id ? "changes" : "files");
   // The "review the changes" tip (docs/guide.md), on the Git tab: this task
   // has changed files, no agent in it is still working, and the user is not
   // already on the Git view. Held for a few seconds so it does not land on
@@ -98,6 +101,18 @@ export function RightPanel() {
     if (useApp.getState().rightPanelHidden) useApp.getState().toggleRightPanel();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [commitReveal, task?.id]);
+  // An agent's `present new`: the Git tab, where GitPanel takes it to Compare.
+  // Unlike a commit reveal it never un-hides the panel; only the toast's Open
+  // changes the layout.
+  const reviewReveal = useUI(s => s.reviewReveal);
+  const seenReviewAt = useRef(0);
+  useLayoutEffect(() => {
+    if (!reviewReveal || !task || reviewReveal.taskId !== task.id) return;
+    if (reviewReveal.at === seenReviewAt.current) return;
+    seenReviewAt.current = reviewReveal.at;
+    setView("changes");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reviewReveal, task?.id]);
   useEffect(() => {
     if (revealFile && task && revealFile.taskId === task.id) setView("files");
     // eslint-disable-next-line react-hooks/exhaustive-deps

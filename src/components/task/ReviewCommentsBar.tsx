@@ -8,7 +8,7 @@
 // PTY, send the Enter a beat later (sendMessageToPty), and stamp lastInputAt
 // so TerminalPane re-arms work-done detection.
 
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { useTranslation, Trans } from "react-i18next";
 import type { TFunction } from "i18next";
 import { useApp } from "@/store/app";
@@ -18,7 +18,8 @@ import { PopoverRoot, PopoverTrigger, PopoverContent } from "@/components/ui/Pop
 import { Button } from "@/components/ui/Button";
 import { Tip } from "@/components/ui/Tooltip";
 import { CliIcon, CLI_BRAND_COLOR, resolveIconId } from "@/icons/cli";
-import { sendCommentsToAgent } from "@/lib/sendComments";
+import { sendPendingComments } from "@/lib/sendReviewComments";
+import { useReview } from "@/store/reviews";
 import { isTerminalCli } from "@/lib/agents";
 import { cn } from "@/lib/utils";
 import { MessagesSquare, X, Send, Trash2 } from "lucide-react";
@@ -42,6 +43,7 @@ export function ReviewCommentsBar({ taskId, compact = false, className }: {
   const { t } = useTranslation("panels");
   const comments = useTaskComments(taskId);
   const remove = useReviewComments(s => s.remove);
+  const removeMany = useReviewComments(s => s.removeMany);
   const clear = useReviewComments(s => s.clear);
 
   const tabsForTask = useApp(s => s.tabs[taskId]);
@@ -64,6 +66,16 @@ export function ReviewCommentsBar({ taskId, compact = false, className }: {
   const [open, setOpen] = useState(false);
   const [selectedTabId, setSelectedTabId] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
+  // Where focus was when the popover opened. Send no longer hands focus to
+  // the agent, and a Send that clears the list unmounts the trigger with the
+  // popover, so Radix's own return lands on <body> unless we put it back.
+  const returnFocus = useRef<HTMLElement | null>(null);
+  // Never the pill itself: Chromium focuses a button on mousedown, and Send
+  // unmounts the pill. Pointerdown runs before that focus moves.
+  const captureFocus = () => {
+    const el = document.activeElement as HTMLElement | null;
+    if (!el?.closest('[data-testid="review-comments-pill"]')) returnFocus.current = el;
+  };
 
   // Resolve the active target: explicit selection → active main tab → first.
   const target =
@@ -74,42 +86,51 @@ export function ReviewCommentsBar({ taskId, compact = false, className }: {
 
   const count = comments.length;
   if (count === 0) return null;
+  // Review drafts go to their review's agent, so the pick only matters for
+  // plain ones.
+  const hasPlain = comments.some(c => !c.reviewId);
+  const hasReview = comments.some(c => c.reviewId);
 
-  function jumpTo(file: string) {
-    openPreviewTab(taskId, { type: "diff", path: file, title: file.split("/").pop() || file });
+  function jumpTo(file: string, reviewId?: string) {
+    const base = `Δ ${file.split("/").pop() || file}`;
+    openPreviewTab(taskId, reviewId
+      ? { type: "diff", path: file, scope: `review:${reviewId}`, title: `${base} · ${reviewId}` }
+      : { type: "diff", path: file, title: file.split("/").pop() || file });
     setOpen(false);
   }
 
   async function send() {
-    if (!target?.ptyId || !comments.length || sending) return;
+    if (sending || (!hasReview && !target?.ptyId)) return;
     setSending(true);
-    // Shared with the composer's own Send button (lib/sendComments.ts): one
-    // delivery path, so target resolution, the lastInputAt stamp, the focus
-    // handover and the toast can't drift between the two entry points. Only
-    // clear once the bytes actually landed — a dead agent keeps the batch.
-    const ok = await sendCommentsToAgent(taskId, comments, { tabId: target.id });
+    // Shared with the composer's own Send button (lib/sendComments.ts,
+    // lib/sendReviewComments.ts): one delivery path, so target resolution,
+    // the agent queue and the toast can't drift between the two entry points.
+    // Only what reached a PTY, a queue or a review file leaves the list: a
+    // dead agent keeps its group.
+    const sent = await sendPendingComments(taskId, comments, target?.id ?? null);
     setSending(false);
-    if (!ok) return;
-    clear(taskId);
-    setOpen(false);
+    removeMany(taskId, sent);
+    if (sent.length === comments.length) setOpen(false);
   }
 
-  // Group comments by file, preserving first-seen order.
-  const byFile = new Map<string, typeof comments>();
+  // Group comments by review and file, preserving first-seen order.
+  const groups = new Map<string, { file: string; reviewId?: string; list: typeof comments }>();
   for (const c of comments) {
-    const arr = byFile.get(c.file) ?? [];
-    arr.push(c);
-    byFile.set(c.file, arr as typeof comments);
+    const key = `${c.reviewId ?? ""}\0${c.file}`;
+    const g = groups.get(key) ?? { file: c.file, reviewId: c.reviewId, list: [] };
+    g.list.push(c);
+    groups.set(key, g);
   }
 
   return (
-    <PopoverRoot open={open} onOpenChange={setOpen}>
+    <PopoverRoot open={open} onOpenChange={o => { if (o) captureFocus(); setOpen(o); }}>
       <Tip content={count === 1 ? t("reviewBar.pendingTipOne") : t("reviewBar.pendingTipMany", { count })} side="top">
         <span className={cn("inline-flex shrink-0", className)}>
           <PopoverTrigger asChild>
             <button
               type="button"
               data-testid="review-comments-pill"
+              onPointerDown={captureFocus}
               className={cn(
                 "flex shrink-0 items-center gap-1.5 rounded-md whitespace-nowrap font-medium text-[12.5px] transition-colors",
                 compact ? "h-7 px-2.5" : "px-2.5 py-1",
@@ -127,7 +148,13 @@ export function ReviewCommentsBar({ taskId, compact = false, className }: {
         </span>
       </Tip>
 
-      <PopoverContent side="top" align="start" className="flex w-[380px] flex-col gap-2">
+      <PopoverContent
+        side="top" align="start" className="flex w-[380px] flex-col gap-2"
+        onCloseAutoFocus={e => {
+          const el = returnFocus.current;
+          if (el?.isConnected && el !== document.body) { e.preventDefault(); el.focus(); }
+        }}
+      >
         <div className="flex items-center justify-between">
           <span className="text-[12.5px] font-medium text-[var(--color-fg)]">
             {t("reviewBar.title")}
@@ -143,15 +170,18 @@ export function ReviewCommentsBar({ taskId, compact = false, className }: {
         {/* Comment list, grouped by file. Click the location to jump to the
             file's diff; X removes a single comment. */}
         <ul className="flex max-h-[44vh] flex-col gap-2 overflow-y-auto">
-          {[...byFile.entries()].map(([file, list]) => (
-            <li key={file} className="flex flex-col gap-1">
-              <button
-                onClick={() => jumpTo(file)}
-                title={t("reviewBar.openDiff")}
-                className="truncate text-left font-mono text-[11px] text-[var(--color-fg-dim)] hover:text-[var(--color-accent)]"
-              >
-                {file}
-              </button>
+          {[...groups.entries()].map(([key, { file, reviewId, list }]) => (
+            <li key={key} className="flex flex-col gap-1">
+              <div className="flex min-w-0 items-baseline gap-1.5">
+                <button
+                  onClick={() => jumpTo(file, reviewId)}
+                  title={t("reviewBar.openDiff")}
+                  className="min-w-0 truncate text-left font-mono text-[11px] text-[var(--color-fg-dim)] hover:text-[var(--color-accent)]"
+                >
+                  {file}
+                </button>
+                {reviewId && <ReviewTag taskId={taskId} reviewId={reviewId} />}
+              </div>
               {list.map(c => (
                 <div
                   key={c.id}
@@ -159,7 +189,7 @@ export function ReviewCommentsBar({ taskId, compact = false, className }: {
                 >
                   <div className="min-w-0 flex-1">
                     <div className="font-mono text-[10.5px] text-[var(--color-fg-faint)]">
-                      {locLabel(t, c.startLine, c.endLine)}
+                      {c.threadId ? t("reviewBar.replyTo", { thread: c.threadId }) : locLabel(t, c.startLine, c.endLine)}
                     </div>
                     {/* The body is optional when a selection was queued on its
                         own, so fall back to naming that rather than showing an
@@ -185,7 +215,7 @@ export function ReviewCommentsBar({ taskId, compact = false, className }: {
         </ul>
 
         {/* Agent picker — only when there's a choice to make. */}
-        {targets.length > 1 && (
+        {hasPlain && targets.length > 1 && (
           <div className="flex flex-wrap gap-1 border-t border-[var(--color-border-soft)] pt-2">
             {targets.map(t => {
               const on = t.id === target?.id;
@@ -212,16 +242,29 @@ export function ReviewCommentsBar({ taskId, compact = false, className }: {
 
         <div className="flex items-center justify-between">
           <span className="text-[11px] text-[var(--color-fg-faint)]">
-            {target
+            {!hasPlain
+              ? t("reviewBar.sendsToReviews")
+              : target
               ? <Trans ns="panels" i18nKey="reviewBar.sendsTo" values={{ label: tabLabel(target) }} components={{ span: <span className="text-[var(--color-fg-dim)]" /> }} />
               : t("reviewBar.noAgent")}
           </span>
           <Button variant="primary" size="sm" className="gap-1.5" data-testid="review-comments-send"
-                  disabled={!target || sending} onClick={send}>
+                  disabled={(!target && !hasReview) || sending} onClick={send}>
             <Send className="h-3.5 w-3.5" /> {sending ? t("reviewBar.sending") : t("reviewBar.send")}
           </Button>
         </div>
       </PopoverContent>
     </PopoverRoot>
+  );
+}
+
+/** "-> <review title>" beside a file whose drafts belong to a review. */
+function ReviewTag({ taskId, reviewId }: { taskId: string; reviewId: string }) {
+  const { t } = useTranslation("panels");
+  const review = useReview(taskId, reviewId);
+  return (
+    <span data-testid="review-comments-review-tag" className="shrink-0 truncate text-[11px] text-[var(--color-accent)]">
+      → {review?.title || t("compare.review.untitled", { id: reviewId })}
+    </span>
   );
 }

@@ -13,6 +13,8 @@ import { waitForAgentReady, hooksOwnStartupReadiness } from "@/lib/agentReady";
 import { ptyAlive } from "@/lib/ipc";
 import { deliverMessage } from "@/lib/agentSend";
 import { isTerminalCli, builtinBaseId } from "@/lib/agents";
+import { agentSendDisposition } from "@/lib/agentSendDisposition";
+import { reportCliPromptDelivery } from "@/lib/cliPromptReports";
 import type { TerminalTab } from "@/lib/types";
 
 const SPAWN_DEADLINE_MS = 15_000;
@@ -53,6 +55,74 @@ export async function waitForAgentPty(taskId: string, tabId?: string): Promise<b
     await sleep(POLL_MS);
   }
   return false;
+}
+
+/** queueOrDeliver's throw when the text WAS written but the PTY died or was
+ *  replaced before the write could be confirmed: unlike every other throw,
+ *  the agent may have received it. */
+export class PtyExitedDuringDelivery extends Error {
+  constructor() { super("the agent PTY exited while the prompt was being typed"); }
+}
+
+/** Prompt a LIVE agent tab. Mid-turn (or behind a queued backlog):
+ *  QUEUE, delivered by TerminalPane's drain when the turn ends
+ *  (runPrompt.ts's rule); only capable agents queue, since without
+ *  detection there is no "turn ended" edge to drain on and the prompt
+ *  would sit forever. Idle: deliver now, tracked (injectPromptTracked's
+ *  rules, minus the boot settle a fresh spawn needs). Shared by `termic
+ *  send` (both target paths) and every UI comment send, so the two can
+ *  never disagree on when a message waits for the turn to end. Never
+ *  switches tab or moves focus. */
+export async function queueOrDeliver(
+  taskId: string,
+  tab: TerminalTab,
+  text: string,
+  opts: { capable: boolean; promptId?: string; now?: boolean },
+): Promise<"delivered" | "queued" | "queued-flushed"> {
+  const ptyId = tab.ptyId;
+  if (!ptyId) throw new Error("the agent tab lost its PTY before the prompt could be typed");
+  // An agent stalled on delegated work (its own loop stopped, subagents or
+  // shells still running) takes the prompt now rather than queueing it.
+  // And whatever the agent is doing: a user mid-draft in its prompt. Typing
+  // now would land inside their unsubmitted text and Enter would send both
+  // as one message, so the prompt queues and follows their draft instead.
+  // The rule itself is `agentSendDisposition`, pure and unit-tested: it is
+  // four flags and the failure mode is a deadlock nobody notices until an
+  // agent has been silent for ten minutes.
+  const how = agentSendDisposition({
+    capable: opts.capable,
+    workState: tab.workState,
+    delegatedIdle: !!tab.delegatedIdle,
+    queued: tab.queue?.length ?? 0,
+    composing: !!tab.composing,
+    now: !!opts.now,
+  });
+  if (how !== "deliver") {
+    useApp.getState().enqueueAgentMessage(taskId, tab.id, text, 1, opts.promptId);
+    // Delegated-idle with a backlog: nothing is coming to drain it, so release
+    // the whole queue back to back, oldest first. Enqueue-then-flush rather
+    // than delivering ahead of what was already waiting, which would reorder
+    // the conversation to fix a liveness bug.
+    if (how === "queue-flush") useApp.getState().flushAgentQueue(taskId, tab.id);
+    return how === "queue-flush" ? "queued-flushed" : "queued";
+  }
+  // A message typed INTO a running turn (`--now`) leaves the turn's state
+  // alone: the agent is still working, and calling it idle here would drop
+  // its spinner and let the next queued message drain into the same turn.
+  // Only that case: a delegated-idle agent is also "working" in the store and
+  // has always been reset here, since its own loop has stopped.
+  const intoLiveTurn = !!opts.now && tab.workState === "working" && !tab.delegatedIdle;
+  if (!intoLiveTurn) {
+    useApp.getState().patchTab(taskId, tab.id, { workState: "idle", unread: null });
+  }
+  await deliverMessage(ptyId, text);
+  const still = agentTabFor(taskId, tab.id);
+  const samePty = still?.id === tab.id && still.ptyId === ptyId;
+  const alive = samePty && (await ptyAlive(ptyId).catch(() => false));
+  if (!alive) throw new PtyExitedDuringDelivery();
+  useApp.getState().patchTab(taskId, tab.id, { lastInputAt: Date.now() });
+  if (opts.promptId) await reportCliPromptDelivery(opts.promptId, true);
+  return "delivered";
 }
 
 export type DeliveryResult = { ok: true; tabId: string } | { ok: false; error: string };

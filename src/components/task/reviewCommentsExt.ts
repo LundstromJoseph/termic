@@ -9,6 +9,9 @@
 // into the editor via a StateEffect so cards stay in sync when a comment is
 // deleted from the pending-comments bar elsewhere.
 //
+// In a `review:` diff the same surface also shows the review's threads, and
+// what the user writes there (a reply or a new thread) joins that review.
+//
 // Only mounted on the MODIFIED side (unified editor, or the `b` pane of a
 // side-by-side MergeView) so line numbers and quotes always refer to the
 // new file — which is what an agent needs to act.
@@ -19,7 +22,9 @@ import {
 } from "@codemirror/view";
 import { StateField, StateEffect, type EditorState, RangeSet, type Range } from "@codemirror/state";
 import { useReviewComments, type ReviewComment } from "@/store/reviewComments";
-import { buildCard, buildComposer, type CommentTarget, type ComposerSpec } from "./commentBoxes";
+import { useReviews, selectReview } from "@/store/reviews";
+import type { ReviewThread } from "@/lib/types";
+import { buildCard, buildComposer, buildThreadCard, type CommentTarget, type ComposerSpec } from "./commentBoxes";
 import {
   anchorForLines, anchorStateChanged, linesForAnchor, mapAnchor, stateForAnchor, type Anchor,
 } from "@/lib/commentAnchors";
@@ -33,6 +38,8 @@ interface CommentData {
    *  line number — is where a comment actually points while the buffer is
    *  being edited under it. File-level comments (null lines) have no anchor. */
   anchors: Map<string, Anchor>;
+  /** An agent-presented review's threads on THIS file (review diffs only). */
+  threads: ReviewThread[];
 }
 
 /**
@@ -58,13 +65,14 @@ export interface ReviewSurface {
 const DIFF_SURFACE: ReviewSurface = { selection: "pill", hoverGutter: true, source: "diff" };
 
 const setComments = StateEffect.define<ReviewComment[]>();
+const setThreads = StateEffect.define<ReviewThread[]>();
 const openComposer = StateEffect.define<ComposerSpec>();
 const closeComposer = StateEffect.define<void>();
 
 const dataField = StateField.define<CommentData>({
-  create: () => ({ comments: [], composer: null, anchors: new Map() }),
+  create: () => ({ comments: [], composer: null, anchors: new Map(), threads: [] }),
   update(value, tr) {
-    let { comments, composer, anchors } = value;
+    let { comments, composer, anchors, threads } = value;
     // 1. Edits move every held selection. Do this FIRST, so an anchor seeded
     //    in the same transaction (below) is not mapped through changes it was
     //    already built against.
@@ -90,16 +98,19 @@ const dataField = StateField.define<CommentData>({
           next.set(c.id, held ?? anchorForLines(tr.newDoc, c.startLine, c.endLine ?? c.startLine));
         }
         anchors = next;
+      } else if (e.is(setThreads)) {
+        threads = e.value;
       } else if (e.is(openComposer)) {
         composer = e.value;
       } else if (e.is(closeComposer)) {
         composer = null;
       }
     }
-    if (comments === value.comments && composer === value.composer && anchors === value.anchors) {
+    if (comments === value.comments && composer === value.composer && anchors === value.anchors
+      && threads === value.threads) {
       return value;
     }
-    return { comments, composer, anchors };
+    return { comments, composer, anchors, threads };
   },
 });
 
@@ -187,6 +198,7 @@ class ComposerWidget extends WidgetType {
     // Same composer identity → reuse the DOM so an unrelated transaction
     // (e.g. a selection change) doesn't blow away a focused textarea.
     return other.c.id === this.c.id
+      && other.c.threadId === this.c.threadId
       && other.c.startLine === this.c.startLine
       && other.c.endLine === this.c.endLine;
   }
@@ -194,10 +206,17 @@ class ComposerWidget extends WidgetType {
   toDOM(view: EditorView) {
     const wrap = buildComposer(this.c, this.ctx,
       {
-        // a send hands the stage to the agent (switches to its tab, focuses
-        // its terminal), and an editor grabbing focus a beat before that
-        // lands would fight it.
-        onClose: (sent) => { view.dispatch({ effects: closeComposer.of() }); if (!sent) view.focus(); },
+        // a send never takes focus (it goes through the agent queue), so the
+        // editor takes it back on every close. A diff's read-only editor
+        // refuses focus, so its tab host takes it instead (as in tabFocus.ts),
+        // or it would fall to <body> and ⌘W / ⇧⌘[/] lose the pane.
+        onClose: () => {
+          view.dispatch({ effects: closeComposer.of() });
+          view.focus();
+          if (view.root.activeElement !== view.contentDOM) {
+            view.dom.closest<HTMLElement>("[data-main-tab-id], [data-split-leaf]")?.focus({ preventScroll: true });
+          }
+        },
         // the grow happens after CodeMirror measured the widget, so re-sync
         // the height map or the gutter drifts (see `blockShell`).
         onResize: () => view.requestMeasure(),
@@ -227,7 +246,28 @@ class CommentCardWidget extends WidgetType {
   toDOM(view: EditorView) {
     const c = this.comment;
     const wrap = buildCard(c, () => view.dispatch({
-      effects: openComposer.of({ id: c.id, startLine: c.startLine, endLine: c.endLine, quote: c.quote, body: c.body }),
+      effects: openComposer.of({ id: c.id, threadId: c.threadId, startLine: c.startLine, endLine: c.endLine, quote: c.quote, body: c.body }),
+    }));
+    sizeToPane(wrap, view);
+    return blockShell(wrap);
+  }
+
+  ignoreEvent() { return true; }
+}
+
+class ThreadCardWidget extends WidgetType {
+  constructor(readonly thread: ReviewThread) { super(); }
+
+  // A thread only ever grows: comments are appended, never edited.
+  eq(other: ThreadCardWidget) {
+    return other.thread.id === this.thread.id
+      && other.thread.comments.length === this.thread.comments.length;
+  }
+
+  toDOM(view: EditorView) {
+    const th = this.thread;
+    const wrap = buildThreadCard(th, () => view.dispatch({
+      effects: openComposer.of({ threadId: th.id, startLine: th.start_line, endLine: th.end_line, quote: "", body: "" }),
     }));
     sizeToPane(wrap, view);
     return blockShell(wrap);
@@ -239,7 +279,7 @@ class CommentCardWidget extends WidgetType {
 // ── Decorations ─────────────────────────────────────────────────────────────
 
 function buildDeco(state: EditorState, ctx: CommentTarget): DecorationSet {
-  const { comments, composer, anchors } = state.field(dataField);
+  const { comments, composer, anchors, threads } = state.field(dataField);
   const ranges: Range<Decoration>[] = [];
   // Where a comment sits RIGHT NOW: its mapped anchor while we hold one (the
   // store's line numbers lag by a keystroke), else the stored lines.
@@ -260,13 +300,31 @@ function buildDeco(state: EditorState, ctx: CommentTarget): DecorationSet {
     }
   }
 
+  // Widgets sharing a position stack thread card, then pending cards, then the
+  // composer, so a reply drafts under the thread it answers. File-level ones
+  // sit before line 1 (negative sides) in the same order.
+  // Review threads. Their lines are head-side, and a review diff's doc IS the
+  // head blob, so they need no anchor; the clamp only guards a bad file.
+  for (const th of threads) {
+    if (th.start_line == null) {
+      ranges.push(Decoration.widget({ widget: new ThreadCardWidget(th), block: true, side: -3 }).range(0));
+      continue;
+    }
+    const start = clampLine(state, th.start_line);
+    const end = clampLine(state, th.end_line ?? th.start_line);
+    for (let i = start; i <= end; i++) {
+      ranges.push(Decoration.line({ class: "tc-commented-line" }).range(state.doc.line(i).from));
+    }
+    ranges.push(Decoration.widget({ widget: new ThreadCardWidget(th), block: true, side: 1 }).range(state.doc.line(end).to));
+  }
+
   // Committed comment cards (skip the one currently being edited).
   for (const c of comments) {
     if (composer?.id === c.id) continue;
     const anchor = linesOf(c)?.end ?? null;
     const pos = anchor == null ? 0 : state.doc.line(anchor).to;
     ranges.push(
-      Decoration.widget({ widget: new CommentCardWidget(c, ctx), block: true, side: anchor == null ? -1 : 1 }).range(pos),
+      Decoration.widget({ widget: new CommentCardWidget(c, ctx), block: true, side: anchor == null ? -2 : 2 }).range(pos),
     );
   }
 
@@ -275,7 +333,7 @@ function buildDeco(state: EditorState, ctx: CommentTarget): DecorationSet {
     const anchor = composer.endLine == null ? null : clampLine(state, composer.endLine);
     const pos = anchor == null ? 0 : state.doc.line(anchor).to;
     ranges.push(
-      Decoration.widget({ widget: new ComposerWidget(composer, ctx), block: true, side: anchor == null ? -1 : 2 }).range(pos),
+      Decoration.widget({ widget: new ComposerWidget(composer, ctx), block: true, side: anchor == null ? -1 : 3 }).range(pos),
     );
   }
 
@@ -317,10 +375,11 @@ function commentTooltips(state: EditorState, surface: ReviewSurface): readonly T
 
 // ── Store subscription plugin ────────────────────────────────────────────────
 
-function commentsForFile(taskId: string, file: string): ReviewComment[] {
-  const all = useReviewComments.getState().byTask[taskId] ?? [];
+/** A review diff holds only that review's drafts, a plain diff only plain ones. */
+function commentsForFile(ctx: CommentTarget): ReviewComment[] {
+  const all = useReviewComments.getState().byTask[ctx.taskId] ?? [];
   return all
-    .filter((c) => c.file === file)
+    .filter((c) => c.file === ctx.file && c.reviewId === ctx.reviewId)
     .slice()
     // Sort by line, then by id as a stable tiebreaker so comments sharing a
     // line (or both file-level) keep a deterministic order — otherwise the
@@ -344,7 +403,7 @@ function storeSyncPlugin(ctx: CommentTarget) {
     let lastSig: string | null = null;
     const push = () => {
       if (destroyed) return;
-      const list = commentsForFile(ctx.taskId, ctx.file);
+      const list = commentsForFile(ctx);
       // JSON-encode so a free-form body (spaces, colons, newlines) can't
       // collide with another comment's serialization and suppress an update.
       const sig = JSON.stringify(list.map(c => [c.id, c.startLine, c.endLine, c.body]));
@@ -355,6 +414,29 @@ function storeSyncPlugin(ctx: CommentTarget) {
     const unsub = useReviewComments.subscribe(push);
     // Seed (the store may already hold comments for this file, e.g. when the
     // diff tab is re-opened). Defer so the field is installed first.
+    queueMicrotask(push);
+    return { destroy() { destroyed = true; unsub(); } };
+  });
+}
+
+/** The shown review's threads on `file`, kept in step with the reviews store.
+ *  Same two guards as storeSyncPlugin; the signature is id + comment count,
+ *  because a thread only changes by growing. */
+function reviewSyncPlugin(taskId: string, reviewId: string, file: string) {
+  return ViewPlugin.define((view): PluginValue => {
+    let destroyed = false;
+    let lastSig = "[]";
+    const push = () => {
+      if (destroyed) return;
+      const review = selectReview(taskId, reviewId)(useReviews.getState());
+      const pfx = review?.dir_name ? `${review.dir_name}/` : "";
+      const threads = review ? review.threads.filter(t => pfx + t.file === file) : [];
+      const sig = JSON.stringify(threads.map(t => [t.id, t.comments.length]));
+      if (sig === lastSig) return;
+      lastSig = sig;
+      view.dispatch({ effects: setThreads.of(threads) });
+    };
+    const unsub = useReviews.subscribe(push);
     queueMicrotask(push);
     return { destroy() { destroyed = true; unsub(); } };
   });
@@ -579,9 +661,13 @@ function hoverTrackPlugin() {
 // ── Public extension factory ─────────────────────────────────────────────────
 
 /** Build the review-comments extension for one file in one task. `surface`
- *  defaults to the diff pane's loud affordances; editors pass the quiet set. */
-export function reviewCommentsExtension(taskId: string, file: string, surface: ReviewSurface = DIFF_SURFACE) {
-  const ctx: CommentTarget = { taskId, file, source: surface.source };
+ *  defaults to the diff pane's loud affordances; editors pass the quiet set.
+ *  With `reviewId` (a `review:` diff) it also shows that review's threads, and
+ *  every comment written here joins that review instead of the plain list. */
+export function reviewCommentsExtension(
+  taskId: string, file: string, surface: ReviewSurface = DIFF_SURFACE, reviewId?: string,
+) {
+  const ctx: CommentTarget = { taskId, file, source: surface.source, ...(reviewId ? { reviewId } : {}) };
 
   const decoField = StateField.define<DecorationSet>({
     create: (state) => buildDeco(state, ctx),
@@ -604,6 +690,7 @@ export function reviewCommentsExtension(taskId: string, file: string, surface: R
   });
 
   return [
+    ...(reviewId ? [reviewSyncPlugin(taskId, reviewId, file)] : []),
     dataField,
     hoverLineField,
     decoField,

@@ -93,9 +93,20 @@ export default {
   sendComments: {
     noAgent: "此任务中没有正在运行的智能体可以发送。",
     unreachable: "无法连接到 {{name}}，未发送任何内容。",
+    exitedDuringSend: "{{name}} 在接收{{what}}时退出，可能未送达。",
     sent: "已将{{what}}发送给 {{name}}",
+    queued: "已将{{what}}加入 {{name}} 的队列，智能体空闲后发送。",
     commentsOne: "{{count}} 条评论",
     commentsOther: "{{count}} 条评论",
+  },
+
+  review: {
+    opened: "{{agent}} 发起了评审：{{title}}",
+    openedUntitled: "{{agent}} 发起了评审 {{id}}",
+    open: "打开",
+    postFailed: "无法保存到评审 {{id}}：{{error}}",
+    savedNoRecipient: "已保存到评审 {{id}}。它没有在线的智能体标签页：在某个智能体标签页中运行 termic present claim {{id}} 来接收。",
+    deliveryFailed: "已保存到评审 {{id}}，但无法联系 {{name}}。",
   },
 
   agentRace: {

@@ -23,7 +23,7 @@
 // repo-relative; member diffs are re-prefixed with `dir_name` before
 // opening (the host stays unprefixed).
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useTranslation, Trans } from "react-i18next";
 import {
   ChevronRight, ChevronDown, ArrowDown, ArrowUp, List, ListTree, Rows3, Check, Eye, Search, Trash2, MessageSquare, Loader2, GitBranch, GitMerge, RotateCw, FileText,
@@ -36,6 +36,7 @@ import { useUI } from "@/store/ui";
 import { usePrefs } from "@/store/prefs";
 import { useFileViewed, useIsViewed } from "@/store/fileViewed";
 import { useReviewComments } from "@/store/reviewComments";
+import { useReviews, useAwaiting } from "@/store/reviews";
 import { bindingMatches, bindingGlyphs, bindingText } from "@/lib/shortcuts";
 import { cn } from "@/lib/utils";
 import { ResizeHandle } from "@/components/ui/ResizeHandle";
@@ -163,7 +164,10 @@ export function GitPanel({ task, status, refresh, onOpenDiff, onOpenFile, onDoub
   // reset by the task-switch effect below.
   const [unstagedCollapsed, setUnstagedCollapsed] = useState<boolean>(() => readBool(LS_UCOL));
   const [stagedCollapsed, setStagedCollapsed] = useState<boolean>(() => readBool(LS_SCOL));
-  const [view, setView] = useState<GitView>(() => readGitView());
+  // A pending `present new` reveal seeds Compare, so a panel mounted to honour
+  // it never commits the persisted sub-tab first.
+  const [view, setView] = useState<GitView>(() =>
+    useUI.getState().reviewReveal?.taskId === task.id ? "compare" : readGitView());
   const changeView = (v: GitView) => { setView(v); persist(LS_VIEWTAB, v); };
   // The blame popup's "Show in History": RightPanel has already put this tab on
   // screen, and the Graph is the only view that can show a commit.
@@ -176,6 +180,20 @@ export function GitPanel({ task, status, refresh, onOpenDiff, onOpenFile, onDoub
     changeView("history");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [commitReveal, task.id]);
+  // An agent's `present new`. ComparePanel already shows the review (the
+  // store's `shown`); this only puts Compare on screen. The last reader, so it
+  // consumes the request (see ui.ts `reviewReveal`). A layout effect, so a
+  // task switch onto a pending reveal swaps the sub-tab before paint.
+  const reviewReveal = useUI(s => s.reviewReveal);
+  useLayoutEffect(() => {
+    if (!reviewReveal || reviewReveal.taskId !== task.id) return;
+    changeView("compare");
+    useUI.getState().clearReviewReveal();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reviewReveal, task.id]);
+  useEffect(() => { useReviews.getState().ensureLoaded(task.id); }, [task.id]);
+  // Agent comments waiting on the user, across the task's reviews.
+  const awaiting = useAwaiting(task.id);
   // History's scope lives here, not in HistoryPanel: the picker rides this
   // component's sub-tab row, so this is where the value it edits has to sit.
   // Reset per repo, since refs belong to one.
@@ -665,7 +683,8 @@ export function GitPanel({ task, status, refresh, onOpenDiff, onOpenFile, onDoub
               data-testid={`git-view-${v.id}`}
               data-active={view === v.id ? "true" : "false"}
               onClick={() => changeView(v.id)}
-              title={t(v.titleKey)}
+              // The awaiting pill carries its own Tip; a native title would stack on it.
+              title={v.id === "compare" && awaiting > 0 ? undefined : t(v.titleKey)}
               className={cn(
                 "flex h-6 items-center rounded-md px-1.5 text-[11.5px] leading-none transition-colors",
                 view === v.id
@@ -674,6 +693,16 @@ export function GitPanel({ task, status, refresh, onOpenDiff, onOpenFile, onDoub
               )}
             >
               {t(v.labelKey)}
+              {v.id === "compare" && awaiting > 0 && (
+                <Tip content={awaiting === 1 ? t("compare.review.awaitingOne") : t("compare.review.awaitingMany", { count: awaiting })}>
+                  <span
+                    data-testid="git-compare-awaiting"
+                    className="ml-1 inline-flex h-[15px] min-w-[15px] items-center justify-center rounded-full bg-[var(--color-accent)] px-1 text-[10px] font-medium tabular-nums text-[var(--color-accent-fg)]"
+                  >
+                    {awaiting}
+                  </span>
+                </Tip>
+              )}
             </button>
           ))}
         </div>
@@ -1633,7 +1662,7 @@ function FileRow({ file, label, depth = 0, pane, selectedKey, stageGlyph, taskId
     const arr = s.byTask[taskId];
     if (!arr) return 0;
     let n = 0;
-    for (const c of arr) if (c.file === fullPath) n++;
+    for (const c of arr) if (c.file === fullPath && !c.reviewId) n++;
     return n;
   });
   // A deletion has no working-tree file to fingerprint (fp === ""), so the

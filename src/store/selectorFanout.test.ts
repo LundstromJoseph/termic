@@ -49,7 +49,10 @@ import {
 import { parseBoardQuery } from "@/lib/boardFilter";
 import { taskQueryNeeds } from "@/hooks/useTaskQuery";
 import type { AppState } from "@/store/app";
-import type { Tab, Task, TerminalTab } from "@/lib/types";
+import {
+  useReviews, selectTaskReviewIds, selectReview, selectAwaiting, EMPTY_REVIEW_IDS, type ReviewsState,
+} from "@/store/reviews";
+import type { Review, Tab, Task, TerminalTab } from "@/lib/types";
 
 /** Mounted subscribers to simulate. A busy window is a handful of panes, not
  *  2500 — but the budget should hold with two orders of magnitude of slack. */
@@ -303,6 +306,80 @@ describe("selector fan-out budget (bear trap 5)", () => {
     expect(invalidations).toBe(before);
 
     unsub();
+  });
+
+  // ── Agent-presented reviews ────────────────────────────────────────
+  //
+  // Every `present comment` pushes the WHOLE review, and the server cannot
+  // tell what the webview already holds, so a push that brings nothing newer
+  // is routine. It must wake nobody.
+
+  function reviewsFanout(subs: ((s: ReviewsState) => unknown)[], write: () => void) {
+    let runs = 0, invalidations = 0;
+    const perSub = subs.map(() => 0);
+    const snap = subs.map(sel => sel(useReviews.getState()));
+    const unsub = useReviews.subscribe(() => {
+      for (let i = 0; i < subs.length; i++) {
+        runs++;
+        const next = subs[i](useReviews.getState());
+        if (!Object.is(next, snap[i])) { invalidations++; perSub[i]++; snap[i] = next; }
+      }
+    });
+    write();
+    unsub();
+    return { runs, invalidations, perSub };
+  }
+
+  function reviewFor(taskId: string, seq: number): Review {
+    return {
+      version: 1, id: "r1", task_id: taskId, dir_name: "", base: "a", head: "b", base_ref: "main",
+      head_ref: "HEAD", title: null, author: "claude", recipient_tab: "tab-1", created_at: "", seq,
+      files: [], files_truncated: false,
+      threads: seq === 0 ? [] : [{ id: "r1-t1", file: "a.ts", start_line: null, end_line: null, quote: "",
+        comments: [{ seq, by: "agent", author: "claude", body: "b", at: "" }] }],
+    };
+  }
+
+  function seedReviews(ids: string[]) {
+    useReviews.setState({ byKey: {}, idsByTask: {}, awaiting: {}, loaded: {}, shown: {} });
+    for (const id of ids) useReviews.getState().apply(id, reviewFor(id, 1));
+  }
+
+  function reviewSubs(ids: string[]) {
+    return ids.flatMap(id => [selectTaskReviewIds(id), selectReview(id, "r1"), selectAwaiting(id)]);
+  }
+
+  it("an unchanged or older review push notifies nobody (bear trap 8)", () => {
+    const ids = Array.from({ length: SUBSCRIBERS }, (_, i) => `task-${i}`);
+    seedReviews(ids);
+
+    const r = reviewsFanout(reviewSubs(ids), () => {
+      for (let i = 0; i < WRITES; i++) {
+        useReviews.getState().apply("task-7", reviewFor("task-7", 1));
+        useReviews.getState().apply("task-7", reviewFor("task-7", 0));
+      }
+    });
+
+    expect(r.runs).toBe(0);
+  });
+
+  it("a review push for one task leaves every other task's review selectors alone", () => {
+    const ids = Array.from({ length: SUBSCRIBERS }, (_, i) => `task-${i}`);
+    seedReviews(ids);
+
+    const r = reviewsFanout(reviewSubs(ids), () =>
+      useReviews.getState().apply("task-7", reviewFor("task-7", 2)));
+
+    // Only task-7's review selector: its id list and awaiting count are the same.
+    expect(r.invalidations).toBe(1);
+    expect(r.perSub[7 * 3 + 1]).toBe(1);
+    expect(r.runs).toBe(SUBSCRIBERS * 3);
+  });
+
+  it("tasks with no reviews share one frozen EMPTY_REVIEW_IDS reference", () => {
+    const s = useReviews.getState();
+    expect(selectTaskReviewIds("nope")(s)).toBe(EMPTY_REVIEW_IDS);
+    expect(Object.isFrozen(EMPTY_REVIEW_IDS)).toBe(true);
   });
 
   it("activeTab selectors are undefined-stable for unknown tasks", () => {

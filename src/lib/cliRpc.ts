@@ -23,13 +23,11 @@ import { invoke } from "@tauri-apps/api/core";
 import { type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { useApp } from "@/store/app";
-import { agentSendDisposition } from "@/lib/agentSendDisposition";
 import { usePrefs } from "@/store/prefs";
 import { usePromptLibrary } from "@/store/prompts";
 import {
   onPtyData,
   projectAdd,
-  ptyAlive,
   projectBranchContext,
   projectGitBranches,
   projectRemove,
@@ -53,8 +51,7 @@ import { startArchive } from "@/lib/archiveTask";
 import { withCreateLock } from "@/lib/createLock";
 import { markUnattendedSpawn } from "@/lib/unattendedSpawns";
 import { reportCliPromptDelivery } from "@/lib/cliPromptReports";
-import { agentTabFor, defaultAgentTab, deliverPromptWhenReady, waitForAgentPty } from "@/lib/agentDelivery";
-import { deliverMessage } from "@/lib/agentSend";
+import { defaultAgentTab, deliverPromptWhenReady, queueOrDeliver, waitForAgentPty } from "@/lib/agentDelivery";
 import {
   agentDisplayName, cliSupportsResumeById, isTerminalCli, isTerminalEntry, visibleCliIds,
   workDoneCapable,
@@ -71,6 +68,7 @@ import { slugify } from "@/lib/utils";
 import { checkoutTaskName, remoteNames } from "@/lib/existingBranch";
 import { padHandler } from "@/lib/scratchCli";
 import { scheduleHandler } from "@/lib/scheduleCli";
+import { reviewChangedHandler } from "@/lib/reviewsCli";
 import type { CreateMultiMember, SandboxMode, Task, TaskBadge, TerminalTab } from "@/lib/types";
 import {
   collectTaskProps, propKeyProblem, propValueProblem, PROP_KEYS_PER_TAB, type CollectedProp,
@@ -543,64 +541,16 @@ function sendableAgentTabs(taskId: string): TerminalTab[] {
   );
 }
 
-/** Prompt a LIVE agent tab. Mid-turn (or behind a queued backlog):
- *  QUEUE, delivered by TerminalPane's drain when the turn ends
- *  (runPrompt.ts's rule); only capable agents queue, since without
- *  detection there is no "turn ended" edge to drain on and the prompt
- *  would sit forever. Idle: deliver now, tracked (injectPromptTracked's
- *  rules, minus the boot settle a fresh spawn needs). Shared by the
- *  default-target and `--tab` targeted paths. */
+/** `termic send` into a LIVE agent tab: queue mid-turn, deliver when
+ *  idle (lib/agentDelivery.ts queueOrDeliver, shared with the UI's comment
+ *  sends). Shared by the default-target and `--tab` targeted paths. */
 async function deliverOrQueue(
   p: SendPromptParams,
   tab: TerminalTab,
   capable: boolean,
 ): Promise<{ mode: string; capable: boolean }> {
-  const ptyId = tab.ptyId;
-  if (!ptyId) throw new Error("the agent tab lost its PTY before the prompt could be typed");
-  // An agent stalled on delegated work (its own loop stopped, subagents or
-  // shells still running) takes the prompt now rather than queueing it.
-  // And whatever the agent is doing: a user mid-draft in its prompt. Typing
-  // now would land inside their unsubmitted text and Enter would send both
-  // as one message, so the prompt queues and follows their draft instead.
-  // The rule itself is `agentSendDisposition`, pure and unit-tested: it is
-  // four flags and the failure mode is a deadlock nobody notices until an
-  // agent has been silent for ten minutes.
-  const how = agentSendDisposition({
-    capable,
-    workState: tab.workState,
-    delegatedIdle: !!tab.delegatedIdle,
-    queued: tab.queue?.length ?? 0,
-    composing: !!tab.composing,
-    now: !!p.now,
-  });
-  if (how !== "deliver") {
-    useApp.getState().enqueueAgentMessage(p.taskId, tab.id, p.prompt, 1, p.promptId);
-    // Delegated-idle with a backlog: nothing is coming to drain it, so release
-    // the whole queue back to back, oldest first. Enqueue-then-flush rather
-    // than delivering ahead of what was already waiting, which would reorder
-    // the conversation to fix a liveness bug.
-    if (how === "queue-flush") useApp.getState().flushAgentQueue(p.taskId, tab.id);
-    return { mode: how === "queue-flush" ? "queued-flushed" : "queued", capable };
-  }
-  // A message typed INTO a running turn (`--now`) leaves the turn's state
-  // alone: the agent is still working, and calling it idle here would drop
-  // its spinner and let the next queued message drain into the same turn.
-  // Only that case: a delegated-idle agent is also "working" in the store and
-  // has always been reset here, since its own loop has stopped.
-  const intoLiveTurn = !!p.now && tab.workState === "working" && !tab.delegatedIdle;
-  if (!intoLiveTurn) {
-    useApp.getState().patchTab(p.taskId, tab.id, { workState: "idle", unread: null });
-  }
-  await deliverMessage(ptyId, p.prompt);
-  const still = agentTabFor(p.taskId, tab.id);
-  const samePty = still?.id === tab.id && still.ptyId === ptyId;
-  const alive = samePty && (await ptyAlive(ptyId).catch(() => false));
-  if (!alive) {
-    throw new Error("the agent PTY exited while the prompt was being typed");
-  }
-  useApp.getState().patchTab(p.taskId, tab.id, { lastInputAt: Date.now() });
-  await reportCliPromptDelivery(p.promptId, true);
-  return { mode: "delivered", capable };
+  const mode = await queueOrDeliver(p.taskId, tab, p.prompt, { capable, promptId: p.promptId, now: p.now });
+  return { mode, capable };
 }
 
 /** The CLI's `termic send`: prompt the RUNNING agent (queue when it is
@@ -1482,6 +1432,7 @@ const handlers: Record<string, Handler> = {
   rename_tab: renameTabHandler,
   tab_props: tabPropsHandler,
   task_badges: taskBadgesHandler,
+  review_changed: reviewChangedHandler,
   list_agents: listAgentsHandler,
   list_prompts: listPromptsHandler,
   send_prompt: sendPromptHandler,

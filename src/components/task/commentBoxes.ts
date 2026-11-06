@@ -9,6 +9,8 @@
 import { i18n } from "@/lib/i18n";
 import { useReviewComments, type ReviewComment } from "@/store/reviewComments";
 import { sendCommentsToAgent } from "@/lib/sendComments";
+import { sendReviewComments } from "@/lib/sendReviewComments";
+import type { ReviewThread } from "@/lib/types";
 
 const t = (key: string, opts?: Record<string, unknown>) => i18n.t(`panels:reviewExt.${key}`, opts);
 
@@ -20,16 +22,20 @@ function locLabel(start: number | null, end: number | null, file: string): strin
 }
 
 /** Where a comment goes: the task, its file, and the surface that made it
- *  (decides how the batch is worded to the agent, see composeCommentsMessage). */
+ *  (decides how the batch is worded to the agent, see composeCommentsMessage).
+ *  `reviewId` when the file is a `review:` diff: the comment joins that review. */
 export interface CommentTarget {
   taskId: string;
   file: string;
   source: "diff" | "editor";
+  reviewId?: string;
 }
 
-/** A comment being written. `id` is set when it edits a queued one. */
+/** A comment being written. `id` is set when it edits a queued one, and
+ *  `threadId` when it replies to a review thread. */
 export interface ComposerSpec {
   id?: string;
+  threadId?: string;
   startLine: number | null;
   endLine: number | null;
   quote: string;
@@ -58,15 +64,19 @@ function button(cls: string, text: string, onClick: () => void): HTMLButtonEleme
 }
 
 export function buildComposer(spec: ComposerSpec, target: CommentTarget, host: {
-  /** The composer is done. `sent` = it handed the stage to the agent, which
-   *  takes focus itself, so the host must not grab it back. */
+  /** The composer is done. `sent` = the comment went to the agent. A send
+   *  never takes focus, so the host refocuses itself either way. */
   onClose: (sent: boolean) => void;
   /** The box changed height after mounting (the textarea grew). */
   onResize?: () => void;
 }): HTMLElement {
   const wrap = el("div", "tc-comment-composer");
-  const label = locLabel(spec.startLine, spec.endLine, target.file);
+  const loc = locLabel(spec.startLine, spec.endLine, target.file);
+  const label = spec.threadId ? t("reply", { thread: spec.threadId, loc }) : loc;
   wrap.appendChild(el("div", "tc-comment-loc", label));
+  // A review comment is a message in a thread, so it needs words. The
+  // selection-only send of a plain comment has no thread to land in.
+  const review = target.reviewId;
 
   // The selected code, shown as the first "message" in the box. It always
   // travelled with the comment (composeCommentsMessage fences it), but the
@@ -79,7 +89,7 @@ export function buildComposer(spec: ComposerSpec, target: CommentTarget, host: {
   const ta = el("textarea", "tc-comment-textarea");
   // Send takes the selection with an empty body, so say so rather than
   // implying a comment is required.
-  ta.placeholder = quote ? t("placeholderOptional") : t("placeholder");
+  ta.placeholder = quote && !review ? t("placeholderOptional") : t("placeholder");
   ta.value = spec.body;
   // Rough starting height (no layout yet, so `scrollHeight` is 0 here) to
   // keep an edit composer from mounting at one line and popping open a frame
@@ -124,17 +134,25 @@ export function buildComposer(spec: ComposerSpec, target: CommentTarget, host: {
     // it. So only a comment with nothing in it at all — no quote either,
     // i.e. an empty whole-file remark — has nothing to queue, and that is
     // the one case worth bouncing back to the box.
-    if (!body && !quote) { ta.focus(); return; }
+    if (!body && (!quote || review)) { ta.focus(); return; }
     const store = useReviewComments.getState();
     if (spec.id) store.update(target.taskId, spec.id, body);
-    else store.add({ ...target, startLine: spec.startLine, endLine: spec.endLine, quote: spec.quote, body });
+    else store.add({ ...target, startLine: spec.startLine, endLine: spec.endLine, quote: spec.quote, body, threadId: spec.threadId });
     host.onClose(false);
   };
   const sendNow = () => {
+    const body = ta.value.trim();
+    if (review && !body) { ta.focus(); return; }
     const draft: ReviewComment = {
-      ...target, id: spec.id ?? "draft", startLine: spec.startLine, endLine: spec.endLine, quote: spec.quote, body: ta.value.trim(),
+      ...target, id: spec.id ?? "draft", startLine: spec.startLine, endLine: spec.endLine, quote: spec.quote, body,
+      threadId: spec.threadId,
     };
-    void sendCommentsToAgent(target.taskId, [draft], { label });
+    // The composer closes before the post resolves, so a refused post puts
+    // the text back as a pending draft rather than losing it to a toast.
+    if (review) void sendReviewComments(target.taskId, review, [draft]).then(ok => {
+      if (!ok) useReviewComments.getState().add({ ...target, startLine: spec.startLine, endLine: spec.endLine, quote: spec.quote, body, threadId: spec.threadId });
+    });
+    else void sendCommentsToAgent(target.taskId, [draft], { label });
     host.onClose(true);
   };
   const cancel = () => host.onClose(false);
@@ -180,7 +198,8 @@ export function buildComposer(spec: ComposerSpec, target: CommentTarget, host: {
 export function buildCard(comment: ReviewComment, onEdit: () => void): HTMLElement {
   const wrap = el("div", "tc-comment-card");
   const head = el("div", "tc-comment-card-head");
-  head.appendChild(el("span", "tc-comment-loc", locLabel(comment.startLine, comment.endLine, comment.file)));
+  const loc = locLabel(comment.startLine, comment.endLine, comment.file);
+  head.appendChild(el("span", "tc-comment-loc", comment.threadId ? t("pendingReply", { thread: comment.threadId, loc }) : loc));
   const tools = el("div", "tc-comment-tools");
   const edit = button("tc-icon-btn", i18n.t("common:edit"), onEdit);
   edit.title = t("editComment");
@@ -198,5 +217,26 @@ export function buildCard(comment: ReviewComment, onEdit: () => void): HTMLEleme
   const body = comment.body.trim();
   wrap.appendChild(el("div", body ? "tc-comment-body" : "tc-comment-body tc-comment-body-empty",
     body || i18n.t("panels:reviewBar.selectionOnly")));
+  return wrap;
+}
+
+/** One thread of an agent-presented review: its location, then every comment
+ *  in order under an author line (the agent's name, or "You"). */
+export function buildThreadCard(thread: ReviewThread, onReply: () => void): HTMLElement {
+  const wrap = el("div", "tc-comment-card tc-thread-card");
+  wrap.dataset.threadId = thread.id;
+  const head = el("div", "tc-comment-card-head");
+  head.appendChild(el("span", "tc-comment-loc", locLabel(thread.start_line, thread.end_line, thread.file)));
+  const tools = el("div", "tc-comment-tools");
+  tools.appendChild(button("tc-icon-btn tc-btn-reply", t("replyAction"), onReply));
+  head.appendChild(tools);
+  wrap.appendChild(head);
+  for (const c of thread.comments) {
+    const entry = el("div", "tc-thread-entry");
+    entry.dataset.by = c.by;
+    entry.appendChild(el("div", "tc-thread-author", c.by === "user" ? t("you") : c.author));
+    entry.appendChild(el("div", "tc-comment-body", c.body));
+    wrap.appendChild(entry);
+  }
   return wrap;
 }

@@ -102,4 +102,19 @@ describe("store", () => {
     // and forever. Re-reading lines 4-5 here would quote code they never saw.
     expect(got).toMatchObject({ body: "changed", startLine: 4, endLine: 5, quote: "x", source: "editor" });
   });
+
+  it("removeMany drops only the named ids, and leaves the state untouched when none match", () => {
+    const store = useReviewComments.getState();
+    store.clear(TASK);
+    const a = store.add({ taskId: TASK, file: "a", startLine: 1, endLine: 1, quote: "x", body: "a" });
+    const b = store.add({ taskId: TASK, file: "b", startLine: 1, endLine: 1, quote: "x", body: "b" });
+    const before = useReviewComments.getState();
+
+    store.removeMany(TASK, ["nope"]);
+    const untouched = useReviewComments.getState();
+    store.removeMany(TASK, [a]);
+
+    expect(untouched).toBe(before);
+    expect(useReviewComments.getState().byTask[TASK].map(x => x.id)).toEqual([b]);
+  });
 });

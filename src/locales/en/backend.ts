@@ -97,9 +97,20 @@ export default {
   sendComments: {
     noAgent: "No running agent in this task to send to.",
     unreachable: "Could not reach {{name}}. Nothing was sent.",
+    exitedDuringSend: "{{name}} exited while receiving {{what}}, so it may not have arrived.",
     sent: "Sent {{what}} to {{name}}",
+    queued: "Queued {{what}} for {{name}}. It goes in when the agent is free.",
     commentsOne: "{{count}} comment",
     commentsOther: "{{count}} comments",
+  },
+
+  review: {
+    opened: "{{agent}} opened a review: {{title}}",
+    openedUntitled: "{{agent}} opened review {{id}}",
+    open: "Open",
+    postFailed: "Could not save to review {{id}}: {{error}}",
+    savedNoRecipient: "Saved to review {{id}}. It has no live agent tab: run termic present claim {{id}} from one to receive it.",
+    deliveryFailed: "Saved to review {{id}}, but {{name}} could not be reached.",
   },
 
   agentRace: {

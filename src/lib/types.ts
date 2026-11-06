@@ -1231,6 +1231,73 @@ export interface GitCompare {
   truncated: boolean;
 }
 
+/** An agent-presented review. Mirrors termic-proto's `Review`, which is also
+ *  the on-disk record; Rust is its only writer. The range is immutable. */
+export interface Review {
+  version: number;
+  /** `r<N>`, sequential per task. */
+  id: string;
+  task_id: string;
+  /** Composition member; "" is the host repo. */
+  dir_name: string;
+  /** Full shas. */
+  base: string;
+  head: string;
+  /** The refs as the agent typed them, for display. */
+  base_ref: string;
+  head_ref: string;
+  title: string | null;
+  /** The name the review's agent comments carry. */
+  author: string;
+  /** Agent tab the user's comments go to; null until claimed. */
+  recipient_tab: string | null;
+  created_at: string;
+  /** Bumped once per appended comment and per claim that moved something. */
+  seq: number;
+  /** Changed paths, relative to the member repo. */
+  files: string[];
+  files_truncated: boolean;
+  threads: ReviewThread[];
+}
+
+export interface ReviewThread {
+  /** `r<N>-t<M>`. */
+  id: string;
+  file: string;
+  /** Head-side lines, 1-based inclusive; null for a file-level thread. */
+  start_line: number | null;
+  end_line: number | null;
+  /** "" at file level. */
+  quote: string;
+  comments: ReviewThreadComment[];
+}
+
+/** Named apart from store/reviewComments' `ReviewComment` (a local draft). */
+export interface ReviewThreadComment {
+  seq: number;
+  by: "agent" | "user";
+  /** "" for the user, shown as "You". */
+  author: string;
+  body: string;
+  at: string;
+}
+
+/** A reply when `thread_id` is set, otherwise a new thread on `file`
+ *  (file-level when `start_line` is null). */
+export interface ReviewPostItem {
+  thread_id: string | null;
+  file: string | null;
+  start_line: number | null;
+  end_line: number | null;
+  quote: string | null;
+  body: string;
+}
+
+export interface ReviewPostResult {
+  review: Review;
+  posted: { thread_id: string; seq: number; new_thread: boolean }[];
+}
+
 export interface GitRepo {
   name: string;
   branch: string;
@@ -1825,8 +1892,10 @@ export interface DiffTab extends BaseTab {
    *  `base:<sha>` diffs that commit against the WORKING TREE — the Compare
    *  tab (GH #208). Its right side is the live file, so unlike `commit:` it
    *  keeps the review affordances (viewed marks, inline comments).
+   *  `review:<id>` diffs an agent-presented review's base against its head,
+   *  both committed blobs.
    *  Absent → HEAD→worktree (the full uncommitted delta). */
-  scope?: "unstaged" | "staged" | `commit:${string}` | `base:${string}`;
+  scope?: "unstaged" | "staged" | `commit:${string}` | `base:${string}` | `review:${string}`;
   /** Bumped to force an open diff to re-read from disk (GH #266). The pane
    *  deliberately does NOT live-update: the content shifting mid-review is
    *  worse than it being stale, so a change surfaces as a banner and the

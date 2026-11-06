@@ -176,7 +176,7 @@ export function usePreviewComments({ hostRef, scrollerRef, taskId, file, text, f
   // this file's comments only, element-wise compared: a comment on another
   // file of the task must not re-render the whole preview
   const comments = useReviewComments(useShallow(s =>
-    taskId && file ? (s.byTask[taskId] ?? []).filter(c => c.file === file && c.startLine != null) : []));
+    taskId && file ? (s.byTask[taskId] ?? []).filter(c => c.file === file && c.startLine != null && !c.reviewId) : []));
   const [draft, setDraft] = useState<PreviewDraft | null>(null);
   const [pill, setPill] = useState<{ top: number; left: number; startLine: number; endLine: number } | null>(null);
   useEffect(() => { setDraft(null); setPill(null); }, [taskId, file]);
@@ -208,7 +208,7 @@ export function usePreviewComments({ hostRef, scrollerRef, taskId, file, text, f
         key: "draft", from: draft as ReviewComment | PreviewDraft, startLine: draft.startLine, endLine: draft.endLine,
         quote: draft.quote, mark: false,
         build: () => buildComposer(draft, { taskId, file, source: "editor" }, {
-          onClose: (sent) => { setDraft(null); if (!sent) focusPane(); },
+          onClose: () => { setDraft(null); focusPane(); },
         }),
       }] : []),
     ].sort((a, b) => a.endLine - b.endLine);

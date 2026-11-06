@@ -9,7 +9,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   Project, ProjectMember, Task, CreateTaskArgs, CreateMultiArgs, CreateMultiMember, Settings, DiscoveredRepo,
   ImportableWorktree, CliInfo, ChangeFile, Changes, GitStatus, CheckoutResult, UpdateMode, UpdateResult, UpdateInfo, UpdateAllItem, FileEntry, Agent, RepoConfig,
-  SandboxMode, TaskDiffSummary, TaskDiffStat, DesktopIntegration, CliInstallStatus, McpStatus, BranchContext, PrPickList, PrScope, BlameFile, GitCommit, GitCompare, GitFile, GitLogPage, GitRef,
+  SandboxMode, TaskDiffSummary, TaskDiffStat, DesktopIntegration, CliInstallStatus, McpStatus, BranchContext, PrPickList, PrScope, BlameFile, GitCommit, GitCompare, GitFile, GitLogPage, GitRef, Review, ReviewPostItem, ReviewPostResult, DiffTab,
   ForgeCliStatus, ForgeProvider, PeerStatus, PeerGrant, PairingView, PairModeView, PrLookup, MemberPrLookup, PrComment, IssueLookup, IssueScope, AgentHookStatus, HookPlan,
   ProfileView, ProfilesView, ProfileDeletePreview, AgentAccountsView, ExternalAppInfo,
   SyncStatus, SyncConnectInfo, SyncChange, SyncPrefsSnapshot, SyncRunResult,
@@ -738,7 +738,7 @@ export type DiffSides = {
 export const taskFileDiffSides = (
   id: string,
   path: string,
-  scope?: "unstaged" | "staged" | `commit:${string}` | `base:${string}`,
+  scope?: DiffTab["scope"],
 ) => invoke<DiffSides>("task_file_diff_sides", { id, path, scope: scope ?? null });
 export const taskFileRead = (id: string, path: string) => invoke<string>("task_file_read", { id, path });
 /** Read a text file by ABSOLUTE path, outside any task (GH #240). Backs the
@@ -948,6 +948,13 @@ export const taskGitBranches = (id: string, dirName: string) =>
  *  the default) over a literal tip-to-tree diff. */
 export const taskGitCompare = (id: string, dirName: string, base: string, mergeBase: boolean) =>
   invoke<GitCompare>("task_git_compare", { id, dirName, base, mergeBase });
+/** A review's committed `base..head` (full shas): no untracked rows, `fp` "". */
+export const taskGitRange = (id: string, dirName: string, base: string, head: string) =>
+  invoke<GitCompare>("task_git_range", { id, dirName, base, head });
+export const reviewList = (taskId: string) => invoke<Review[]>("review_list", { taskId });
+/** Does not push `review_changed`: apply the returned review yourself. */
+export const reviewPost = (taskId: string, reviewId: string, items: ReviewPostItem[]) =>
+  invoke<ReviewPostResult>("review_post", { taskId, reviewId, items });
 /** Local branch names for a project's repo, before any task exists. Feeds the
  *  New Task dialog's auto-numbering of the proposed branch (issue #129). */
 export const projectGitBranches = (projectId: string) =>

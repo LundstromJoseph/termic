@@ -177,7 +177,9 @@ batch of work with `group --name`; prompt another task's agent (`send`) and \
 read what it produced (`logs`, `result`); retitle your own task \
 (`rename`); label your own tab with what you are working on, shown on \
 the task's sidebar row (`prop ticket ABC-1`); put a coloured status badge \
-under your task's name (`badge set ci passing --color good`); and keep notes, plans, findings, logs and reports the user \
+under your task's name (`badge set ci passing --color good`); show the user \
+a commit range as a review and discuss it in comment threads (`present new \
+main..HEAD`, `present comment`, `present reply`); and keep notes, plans, findings, logs and reports the user \
 should READ in a scratchpad (`scratchpad new`, `scratchpad write`), a tab \
 in your task that updates live and stays out of git: use one instead of \
 dropping temporary .md files into the repo, and tidy up after yourself with \
@@ -1265,6 +1267,11 @@ disabled, 6 refused, 8 connection lost."
     #[command(subcommand, name = "badge", subcommand_required = true)]
     Badge(BadgeCmd),
 
+    /// Present a commit range to the user as a review and talk it through
+    /// in comment threads.
+    #[command(subcommand, name = "present", subcommand_required = true)]
+    Present(PresentCmd),
+
     /// Show, rename or recolour your task's sidebar group, or move a task
     /// into another group or out of one.
     #[command(
@@ -1661,6 +1668,134 @@ pub enum BadgeCmd {
     List {
         #[command(flatten)]
         target: BadgeTarget,
+    },
+}
+
+const PRESENT_AFTER_HELP: &str = "A review shows the user a commit range (`present new main..HEAD`) in \
+the task's Git tab, without taking focus, and holds comment threads on its \
+new side. Comment on a line or range of lines with `present comment r1 --file \
+src/a.rs --line 12-14 -m \"...\"`, or on a whole file without --line. The \
+user's comments ARRIVE in your terminal as one message naming each thread \
+(`r1-t3`): answer each with `present reply r1-t3 -m \"...\"`, not in the \
+terminal. `present show r1 --since <seq>` prints only what came after that seq. \
+`present claim r1` from another agent tab sends the user's next comments \
+there instead.
+
+The range never moves: after an amend, rebase or new commit, open a new \
+review for the next round. Revs are anything git resolves to a commit \
+(main, HEAD~3, a sha); A..B shows what B adds since it branched from A, and \
+three dots are refused. -m - reads the comment from stdin. Without --task, \
+the task is yours ($TERMIC_TASK_ID), then the current directory; without \
+--task, --tab defaults to your own tab ($TERMIC_TAB_ID). A sandboxed \
+(caged) task cannot use this CLI, so it cannot present.
+
+With --output-format json, `new` and `show` print {\"task_id\", \"task\", \
+\"review\"}; `claim` prints the same with the review's `list` row as \
+\"review\"; `comment` and `reply` print {\"task_id\", \"review_id\", \
+\"thread_id\", \"seq\", \"new_thread\"}; `list` prints {\"task_id\", \"task\", \
+\"reviews\"}.
+
+Exit codes: 0 ok, 1 error (unknown task, review or thread; a range, line, \
+file or comment the review refuses; a tab that is not an agent tab of the \
+task), 4 app not running, 5 CLI disabled, 6 refused, 8 connection lost, \
+12 peer unreachable.";
+
+/// Which task a present verb acts on.
+#[derive(clap::Args, Debug, Clone, Default)]
+pub struct PresentTarget {
+    /// Task name, task id, or qualified project/name. Default: your own
+    /// task ($TERMIC_TASK_ID), then the current directory.
+    #[arg(long, value_name = "TASK")]
+    pub task: Option<String>,
+    /// Project name, to disambiguate. Requires --task.
+    #[arg(long, requires = "task")]
+    pub project: Option<String>,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum PresentCmd {
+    /// Open a review of a commit range in the task's Git tab.
+    #[command(after_help = PRESENT_AFTER_HELP)]
+    New {
+        /// The range, A..B (e.g. main..HEAD).
+        range: String,
+        /// A one-line title for the review.
+        #[arg(long, value_name = "TITLE")]
+        title: Option<String>,
+        /// The name your comments carry. Default: your agent's name.
+        #[arg(long, value_name = "NAME")]
+        author: Option<String>,
+        /// The member repo of a multi-repo task the range is in. Default:
+        /// the one holding the current directory, else the task's own repo.
+        #[arg(long, value_name = "REPO")]
+        repo: Option<String>,
+        /// The agent tab the user's comments go to (id, index or title).
+        /// Default without --task: your own tab ($TERMIC_TAB_ID).
+        #[arg(long, value_name = "TAB")]
+        tab: Option<String>,
+        #[command(flatten)]
+        target: PresentTarget,
+    },
+    /// Open a comment thread on a file of a review.
+    #[command(after_help = PRESENT_AFTER_HELP)]
+    Comment {
+        /// The review id (r1).
+        review: String,
+        /// The file, repo-relative, as the review lists it.
+        #[arg(long, value_name = "PATH")]
+        file: String,
+        /// A new-side line or range (12 or 12-14). Omitted: the whole file.
+        #[arg(long, value_name = "N[-M]")]
+        line: Option<String>,
+        /// The comment. `-` reads stdin.
+        #[arg(short = 'm', long, value_name = "TEXT")]
+        message: String,
+        #[command(flatten)]
+        target: PresentTarget,
+    },
+    /// Reply in a review thread.
+    #[command(after_help = PRESENT_AFTER_HELP)]
+    Reply {
+        /// The thread id (r1-t3).
+        thread: String,
+        /// The reply. `-` reads stdin.
+        #[arg(short = 'm', long, value_name = "TEXT")]
+        message: String,
+        #[command(flatten)]
+        target: PresentTarget,
+    },
+    /// Print a review with its threads.
+    #[command(after_help = PRESENT_AFTER_HELP)]
+    Show {
+        /// The review id (r1).
+        review: String,
+        /// Only comments after this seq, in the threads that have one.
+        #[arg(long, value_name = "SEQ")]
+        since: Option<u64>,
+        #[command(flatten)]
+        target: PresentTarget,
+    },
+    /// List the task's reviews.
+    #[command(after_help = PRESENT_AFTER_HELP)]
+    List {
+        #[command(flatten)]
+        target: PresentTarget,
+    },
+    /// Send the user's comments on a review to another agent tab.
+    #[command(after_help = PRESENT_AFTER_HELP)]
+    Claim {
+        /// The review id (r1).
+        review: String,
+        /// The agent tab to take the review over (id, index or title).
+        /// Default without --task: your own tab ($TERMIC_TAB_ID).
+        #[arg(long, value_name = "TAB")]
+        tab: Option<String>,
+        /// The name your comments carry from now on. Default: that tab's
+        /// agent name.
+        #[arg(long, value_name = "NAME")]
+        author: Option<String>,
+        #[command(flatten)]
+        target: PresentTarget,
     },
 }
 
@@ -2089,6 +2224,27 @@ fn pre_connect_guard(cmd: &Cmd) -> Result<(), CliError> {
             return Err(CliError::new(exit_code::ERROR, why));
         }
     }
+    if let Cmd::Present(p) = cmd {
+        let body = |m: &str| (m != "-").then(|| proto::review_body_problem(m)).flatten();
+        let problem = match p {
+            PresentCmd::New { range, title, author, .. } => proto::review_range_problem(range)
+                .or_else(|| title.as_deref().and_then(proto::review_title_problem))
+                .or_else(|| author.as_deref().and_then(proto::review_author_problem)),
+            PresentCmd::Comment { review, line, message, .. } => proto::review_id_problem(review)
+                .or_else(|| line.as_deref().and_then(|l| proto::parse_line_range(l).err()))
+                .or_else(|| body(message)),
+            PresentCmd::Reply { thread, message, .. } => {
+                proto::review_thread_id_problem(thread).or_else(|| body(message))
+            }
+            PresentCmd::Show { review, .. } => proto::review_id_problem(review),
+            PresentCmd::List { .. } => None,
+            PresentCmd::Claim { review, author, .. } => proto::review_id_problem(review)
+                .or_else(|| author.as_deref().and_then(proto::review_author_problem)),
+        };
+        if let Some(why) = problem {
+            return Err(CliError::new(exit_code::ERROR, why));
+        }
+    }
     // A title a selector could never reach fails here, before a usage
     // mistake can auto-launch the app. Uniqueness needs the live strip and
     // is the webview's call.
@@ -2173,9 +2329,16 @@ outside.",
     // Pad text, from stdin before the socket for the same reason. `pad write`
     // with no -c reads stdin; an explicit literal is taken as given.
     let pad_content = match &cli.cmd {
-        Cmd::Pad(PadCmd::New { content: Some(c), .. }) => Some(resolve_pad_content(c)?),
+        Cmd::Pad(PadCmd::New { content: Some(c), .. }) => Some(resolve_pad_content(c, "pad text")?),
         Cmd::Pad(PadCmd::Write { content, .. }) => {
-            Some(resolve_pad_content(content.as_deref().unwrap_or("-"))?)
+            Some(resolve_pad_content(content.as_deref().unwrap_or("-"), "pad text")?)
+        }
+        Cmd::Present(PresentCmd::Comment { message, .. } | PresentCmd::Reply { message, .. }) => {
+            let text = resolve_pad_content(message, "comment")?;
+            if let Some(why) = proto::review_body_problem(&text) {
+                return Err(CliError::new(exit_code::ERROR, why));
+            }
+            Some(text)
         }
         _ => None,
     };
@@ -2547,6 +2710,7 @@ outside.",
         Cmd::Project(p) => execute_project(&mut conn, &token, format, p, &paths),
         Cmd::Pad(p) => execute_pad(&mut conn, &token, format, p, pad_content),
         Cmd::Badge(b) => execute_badge(&mut conn, &token, format, b),
+        Cmd::Present(p) => execute_present(&mut conn, &token, format, p, pad_content),
         Cmd::Schedule(s) => execute_schedule(&mut conn, &token, format, s, &paths, prompt),
         Cmd::Peer(p) => execute_peer(&mut conn, &token, format, p, &paths),
         // The Phase 0 read verbs: one request, one reply.
@@ -3063,9 +3227,9 @@ fn execute_quit(
     Ok(Output::ok(final_stdout(format, &output::quit_text(&q), &q)))
 }
 
-/// Pad text from a literal or `-` (stdin), bounded like a prompt. Empty is
-/// allowed: clearing a pad is a legitimate write.
-fn resolve_pad_content(c: &str) -> Result<String, CliError> {
+/// Pad or comment text (`what`) from a literal or `-` (stdin), bounded like
+/// a prompt. Empty is allowed: clearing a pad is a legitimate write.
+fn resolve_pad_content(c: &str, what: &str) -> Result<String, CliError> {
     if c != "-" {
         prompt_size_ok(c)?;
         return Ok(c.to_string());
@@ -3075,15 +3239,15 @@ fn resolve_pad_content(c: &str) -> Result<String, CliError> {
         .lock()
         .take(PROMPT_MAX_BYTES as u64 + 1)
         .read_to_end(&mut buf)
-        .map_err(|e| CliError::new(exit_code::ERROR, format!("could not read the pad text from stdin ({e})")))?;
+        .map_err(|e| CliError::new(exit_code::ERROR, format!("could not read the {what} from stdin ({e})")))?;
     if buf.len() > PROMPT_MAX_BYTES {
         return Err(CliError::new(
             exit_code::ERROR,
-            format!("the pad text is too large (limit {} KB)", PROMPT_MAX_BYTES / 1024),
+            format!("the {what} is too large (limit {} KB)", PROMPT_MAX_BYTES / 1024),
         ));
     }
     let text = String::from_utf8(buf)
-        .map_err(|_| CliError::new(exit_code::ERROR, "the pad text on stdin is not UTF-8"))?;
+        .map_err(|_| CliError::new(exit_code::ERROR, format!("the {what} on stdin is not UTF-8")))?;
     prompt_size_ok(&text)?;
     Ok(text)
 }
@@ -3236,6 +3400,99 @@ fn execute_badge(
         BadgeCmd::List { .. } => output::badges_text(&d),
     };
     Ok(Output::ok(final_stdout(format, &text, &d)))
+}
+
+/// `--tab`, else your own tab, but only when the task is your own too:
+/// $TERMIC_TAB_ID is a tab of $TERMIC_TASK_ID, never of a `--task` one.
+fn present_tab(tab: &Option<String>, target: &PresentTarget, own_tab: Option<String>) -> Option<String> {
+    tab.clone().or_else(|| target.task.is_none().then_some(own_tab).flatten())
+}
+
+fn execute_present(
+    conn: &mut client::Conn,
+    token: &str,
+    format: OutputFormat,
+    cmd: &PresentCmd,
+    body: Option<String>,
+) -> Result<Output, CliError> {
+    let cwd = std::env::current_dir().ok().map(|p| p.to_string_lossy().into_owned());
+    let task_of = |t: &PresentTarget| t.task.clone().or_else(|| own_env("TERMIC_TASK_ID"));
+    let body = || body.clone().expect("comment text resolved before connecting");
+    let wire = match cmd {
+        PresentCmd::New { range, title, author, repo, tab, target } => proto::Command::PresentNew {
+            task: task_of(target),
+            project: target.project.clone(),
+            range: range.clone(),
+            title: title.clone(),
+            author: author.clone(),
+            repo: repo.clone(),
+            tab: present_tab(tab, target, own_env("TERMIC_TAB_ID")),
+            cwd,
+        },
+        PresentCmd::Comment { review, file, line, target, .. } => {
+            let lines = line.as_deref().map(proto::parse_line_range).transpose().map_err(|e| CliError::new(exit_code::ERROR, e))?;
+            proto::Command::PresentComment {
+                task: task_of(target),
+                project: target.project.clone(),
+                review: review.clone(),
+                file: file.clone(),
+                start_line: lines.map(|l| l.0),
+                end_line: lines.map(|l| l.1),
+                body: body(),
+                cwd,
+            }
+        }
+        PresentCmd::Reply { thread, target, .. } => proto::Command::PresentReply {
+            task: task_of(target),
+            project: target.project.clone(),
+            thread: thread.clone(),
+            body: body(),
+            cwd,
+        },
+        PresentCmd::Show { review, since, target } => proto::Command::PresentShow {
+            task: task_of(target),
+            project: target.project.clone(),
+            review: review.clone(),
+            since: *since,
+            cwd,
+        },
+        PresentCmd::List { target } => {
+            proto::Command::PresentList { task: task_of(target), project: target.project.clone(), cwd }
+        }
+        PresentCmd::Claim { review, tab, author, target } => proto::Command::PresentClaim {
+            task: task_of(target),
+            project: target.project.clone(),
+            review: review.clone(),
+            tab: present_tab(tab, target, own_env("TERMIC_TAB_ID")),
+            author: author.clone(),
+            cwd,
+        },
+    };
+    let data = client::request(conn, wire, token)?;
+    let unexpected = || CliError::new(exit_code::ERROR, "unexpected reply to present");
+    let stdout = match (cmd, data) {
+        (PresentCmd::New { .. }, proto::ReplyData::Review(d)) => {
+            final_stdout(format, &output::review_opened_text(&d.review), &d)
+        }
+        (PresentCmd::Show { .. }, proto::ReplyData::Review(d)) => final_stdout(format, &output::review_text(&d.review), &d),
+        (PresentCmd::Claim { .. }, proto::ReplyData::ReviewClaim(d)) => {
+            let r = &d.review;
+            let text = format!(
+                "Review {} now sends the user's comments to tab {}; your comments carry the name {}.",
+                r.id,
+                r.recipient_tab.as_deref().unwrap_or("?"),
+                r.author
+            );
+            final_stdout(format, &text, &d)
+        }
+        (PresentCmd::Comment { .. } | PresentCmd::Reply { .. }, proto::ReplyData::ReviewWrite(d)) => {
+            let verb = if d.new_thread { "Opened thread" } else { "Replied in" };
+            final_stdout(format, &format!("{verb} {} (seq {}).", d.thread_id, d.seq), &d)
+        }
+        (PresentCmd::List { .. }, proto::ReplyData::Reviews(d)) => final_stdout(format, &output::reviews_text(&d), &d),
+        _ => return Err(unexpected()),
+    };
+    Ok(Output::ok(stdout))
 }
 
 fn execute_peer(
@@ -4200,6 +4457,73 @@ mod tests {
     }
 
     #[test]
+    fn present_subcommands_parse_their_positionals_and_flags() {
+        let parse = |args: &[&str]| Cli::try_parse_from(args).expect("parses").cmd;
+
+        let new = parse(&["termic", "present", "new", "main..HEAD", "--title", "T", "--author", "A", "--repo", "api", "--tab", "t1"]);
+        let comment = parse(&["termic", "present", "comment", "r1", "--file", "a.rs", "--line", "3-4", "-m", "why"]);
+        let reply = parse(&["termic", "present", "reply", "r1-t2", "--message", "done", "--task", "x", "--project", "web"]);
+        let show = parse(&["termic", "present", "show", "r1", "--since", "4"]);
+        let list = parse(&["termic", "present", "list"]);
+        let claim = parse(&["termic", "present", "claim", "r1", "--author", "Codex"]);
+
+        assert!(matches!(&new, Cmd::Present(PresentCmd::New { range, title: Some(t), author: Some(a), repo: Some(r), tab: Some(tab), .. })
+            if range == "main..HEAD" && t == "T" && a == "A" && r == "api" && tab == "t1"));
+        assert!(matches!(&comment, Cmd::Present(PresentCmd::Comment { review, file, line: Some(l), message, .. })
+            if review == "r1" && file == "a.rs" && l == "3-4" && message == "why"));
+        assert!(matches!(&reply, Cmd::Present(PresentCmd::Reply { thread, message, target })
+            if thread == "r1-t2" && message == "done" && target.project.as_deref() == Some("web")));
+        assert!(matches!(&show, Cmd::Present(PresentCmd::Show { since: Some(4), .. })));
+        assert!(matches!(&list, Cmd::Present(PresentCmd::List { .. })));
+        assert!(matches!(&claim, Cmd::Present(PresentCmd::Claim { tab: None, author: Some(a), .. }) if a == "Codex"));
+        assert!(Cli::try_parse_from(["termic", "present", "comment", "r1", "-m", "x"]).is_err(), "--file is required");
+        assert!(Cli::try_parse_from(["termic", "present"]).is_err(), "a subcommand is required");
+    }
+
+    #[test]
+    fn present_tab_defaults_to_your_own_tab_only_when_no_task_is_named() {
+        let own = || Some("own-tab".to_string());
+        let target = |task: Option<&str>| PresentTarget { task: task.map(str::to_string), project: None };
+
+        let own_task = present_tab(&None, &target(None), own());
+        let other_task = present_tab(&None, &target(Some("b")), own());
+        let explicit = present_tab(&Some("t2".into()), &target(Some("b")), own());
+
+        assert_eq!(own_task.as_deref(), Some("own-tab"));
+        assert_eq!(other_task, None);
+        assert_eq!(explicit.as_deref(), Some("t2"));
+    }
+
+    #[test]
+    fn present_guard_refuses_a_bad_range_id_line_thread_or_comment_before_connecting_but_leaves_stdin_alone() {
+        let guard = |args: &[&str]| pre_connect_guard(&Cli::try_parse_from(args).expect("parses").cmd);
+
+        let refused = [
+            &["termic", "present", "new", "main...HEAD"][..],
+            &["termic", "present", "new", "main..HEAD", "--author", " "][..],
+            &["termic", "present", "comment", "1", "--file", "a", "-m", "x"][..],
+            &["termic", "present", "comment", "r1", "--file", "a", "--line", "4-2", "-m", "x"][..],
+            &["termic", "present", "comment", "r1", "--file", "a", "-m", "  "][..],
+            &["termic", "present", "reply", "r1", "-m", "x"][..],
+            &["termic", "present", "show", "t1"][..],
+            &["termic", "present", "claim", "r0"][..],
+        ];
+        let allowed = [
+            &["termic", "present", "new", "HEAD~2..HEAD", "--title", "T"][..],
+            &["termic", "present", "comment", "r1", "--file", "a", "--line", "2", "-m", "-"][..],
+            &["termic", "present", "reply", "r1-t1", "-m", "-"][..],
+            &["termic", "present", "list"][..],
+        ];
+
+        for args in refused {
+            assert_eq!(guard(args).unwrap_err().code, exit_code::ERROR, "{args:?}");
+        }
+        for args in allowed {
+            assert!(guard(args).is_ok(), "{args:?}");
+        }
+    }
+
+    #[test]
     fn badge_without_a_subcommand_or_with_project_but_no_task_fails_to_parse() {
         let bare = Cli::try_parse_from(["termic", "badge"]);
         let project_only = Cli::try_parse_from(["termic", "badge", "list", "--project", "web"]);
@@ -4835,6 +5159,8 @@ mod tests {
             "scratchpad list", "scratchpad new", "scratchpad write", "scratchpad read",
             "scratchpad rm", "scratchpad clear",
             "badge set", "badge rm", "badge list",
+            "present new", "present comment", "present reply", "present show", "present list",
+            "present claim",
             "schedule list", "schedule show", "schedule set", "schedule run", "schedule delete",
         ] {
             assert!(names.contains(&expected), "missing {expected} in {names:?}");

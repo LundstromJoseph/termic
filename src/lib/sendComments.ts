@@ -7,9 +7,8 @@
 // written, what the user is told" should not have two implementations that
 // drift apart.
 
-import { deliverMessage } from "./agentSend";
-import { isTerminalCli, tabLabel } from "./agents";
-import { focusTerminalTab } from "./tabFocus";
+import { PtyExitedDuringDelivery, queueOrDeliver } from "./agentDelivery";
+import { isTerminalCli, tabLabel, workDoneCapable } from "./agents";
 import { composeCommentsMessage, type ReviewComment } from "@/store/reviewComments";
 import { useApp } from "@/store/app";
 import { useUI } from "@/store/ui";
@@ -42,11 +41,15 @@ export function pickAgentTarget(taskId: string, tabId?: string | null): Terminal
 }
 
 /**
- * Write `comments` into an agent as ONE message and surface it.
+ * Hand `comments` to an agent as ONE message, through its prompt queue: a
+ * mid-turn agent (or one holding the user's draft) gets it when the turn
+ * ends. Never switches tab or takes focus: the user stays where they were
+ * reviewing.
  *
- * Resolves true once the bytes are in the PTY. The caller decides what that
- * means for its own state (the bar clears the queue; the composer never
- * queued in the first place), which is why nothing here touches the store.
+ * Resolves true once the message is in the PTY or in the agent's queue. The
+ * caller decides what that means for its own state (the bar clears its
+ * pending list; the composer never queued in the first place), which is why
+ * nothing here touches the comment store.
  */
 export async function sendCommentsToAgent(
   taskId: string,
@@ -60,20 +63,19 @@ export async function sendCommentsToAgent(
     return false;
   }
   const name = tabLabel(target);
+  const what = opts.label ?? i18n.t(comments.length === 1 ? "backend:sendComments.commentsOne" : "backend:sendComments.commentsOther", { count: comments.length });
+  let mode: Awaited<ReturnType<typeof queueOrDeliver>>;
   try {
-    await deliverMessage(target.ptyId, composeCommentsMessage(comments));
-  } catch {
-    useUI.getState().pushToast(i18n.t("backend:sendComments.unreachable", { name }), "error");
+    mode = await queueOrDeliver(taskId, target, composeCommentsMessage(comments), { capable: workDoneCapable(target.cli) });
+  } catch (e) {
+    // The write may have landed before the PTY died, so do not claim nothing
+    // was sent. Still false: the bar keeps the batch, because an agent that
+    // exited mid-message most likely never acted on it.
+    const key = e instanceof PtyExitedDuringDelivery ? "backend:sendComments.exitedDuringSend" : "backend:sendComments.unreachable";
+    useUI.getState().pushToast(i18n.t(key, { name, what }), "error");
     return false;
   }
-  // Arm work-done detection exactly as a keyboard Enter would: delivery writes
-  // straight to the PTY, bypassing term.onData.
-  useApp.getState().patchTab(taskId, target.id, { lastInputAt: Date.now() });
-  // Surface the agent we just fed and drop focus into it, so the user can keep
-  // steering immediately.
-  useApp.getState().setActiveTabId(taskId, target.id);
-  focusTerminalTab(target.id);
-  const what = opts.label ?? i18n.t(comments.length === 1 ? "backend:sendComments.commentsOne" : "backend:sendComments.commentsOther", { count: comments.length });
-  useUI.getState().pushToast(i18n.t("backend:sendComments.sent", { what, name }), "success");
+  const key = mode === "delivered" ? "backend:sendComments.sent" : "backend:sendComments.queued";
+  useUI.getState().pushToast(i18n.t(key, { what, name }), "success");
   return true;
 }

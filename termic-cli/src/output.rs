@@ -702,6 +702,99 @@ pub fn badges_text(d: &termic_proto::BadgesData) -> String {
     d.badges.iter().map(|b| format!("{}: {} ({})", b.key, b.text, b.color)).collect::<Vec<_>>().join("\n")
 }
 
+fn short(sha: &str) -> &str {
+    &sha[..sha.len().min(7)]
+}
+
+/// `present new`: the id, the range and how to comment on it.
+pub fn review_opened_text(r: &termic_proto::Review) -> String {
+    let files = format!("{}{}", r.files.len(), if r.files_truncated { "+" } else { "" });
+    let mut out = format!(
+        "Opened review {} ({}..{}, {files} files) in the Git tab.\n\
+         Comment with: \"$TERMIC_CLI\" present comment {} --file <path> [--line N[-M]] -m \"...\"",
+        r.id,
+        short(&r.base),
+        short(&r.head),
+        r.id
+    );
+    if r.recipient_tab.is_none() {
+        out.push_str(&format!(
+            "\nNo recipient tab: the user's comments wait until `termic present claim {}`.",
+            r.id
+        ));
+    }
+    out
+}
+
+/// `present show`: a header and the commentable files, then each thread
+/// with its quoted lines and its comments (with the seq `--since` takes),
+/// the user's shown as "You".
+pub fn review_text(r: &termic_proto::Review) -> String {
+    let title = r.title.as_deref().map(|t| format!(" \"{t}\"")).unwrap_or_default();
+    let tab = match &r.recipient_tab {
+        Some(t) => format!("recipient tab {t}"),
+        None => "no recipient tab".into(),
+    };
+    let mut out = format!(
+        "Review {}{title}: {}..{} ({}..{}) by {}, {tab}, seq {}",
+        r.id,
+        r.base_ref,
+        r.head_ref,
+        short(&r.base),
+        short(&r.head),
+        r.author,
+        r.seq
+    );
+    out.push_str("\nFiles:");
+    for f in &r.files {
+        out.push_str(&format!("\n  {f}"));
+    }
+    if r.files_truncated {
+        out.push_str("\n  (more not listed)");
+    }
+    if r.threads.is_empty() {
+        out.push_str("\nNo comments.");
+    }
+    for t in &r.threads {
+        let loc = match (t.start_line, t.end_line) {
+            (Some(s), Some(e)) if s != e => format!("{}:{s}-{e}", t.file),
+            (Some(s), _) => format!("{}:{s}", t.file),
+            _ => t.file.clone(),
+        };
+        out.push_str(&format!("\n\n{} {loc}", t.id));
+        for line in t.quote.lines() {
+            out.push_str(&format!("\n> {line}"));
+        }
+        for c in &t.comments {
+            let who = match c.by {
+                termic_proto::ReviewBy::User => "You",
+                termic_proto::ReviewBy::Agent => c.author.as_str(),
+            };
+            out.push_str(&format!("\n{who} (seq {}): {}", c.seq, c.body.replace('\n', "\n  ")));
+        }
+    }
+    out
+}
+
+/// `present list`: one line per review.
+pub fn reviews_text(d: &termic_proto::ReviewsData) -> String {
+    if d.reviews.is_empty() {
+        return "No reviews.".into();
+    }
+    d.reviews
+        .iter()
+        .map(|r| {
+            let title = r.title.as_deref().map(|t| format!(" \"{t}\"")).unwrap_or_default();
+            let tab = r.recipient_tab.as_deref().map(|t| format!("tab {t}")).unwrap_or_else(|| "no tab".into());
+            format!(
+                "{}{title} {}..{} by {}: {} threads, {} comments, seq {}, {tab}",
+                r.id, r.base_ref, r.head_ref, r.author, r.threads, r.comments, r.seq
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// `tab --tab X --title Y`: what the tab is called now. `reset` is the
 /// `--title ""` form, where the title printed is the automatic one.
 pub fn tab_rename_text(t: &TabData, reset: bool) -> String {
@@ -958,6 +1051,134 @@ mod tests {
 
         assert_eq!(empty, "No badges.");
         assert_eq!(two, "ci: passing (good)\nreview: waiting on bob (#3b82f6)");
+    }
+
+    fn review(threads: Vec<termic_proto::ReviewThread>, tab: Option<&str>) -> termic_proto::Review {
+        termic_proto::Review {
+            version: 1,
+            id: "r1".into(),
+            task_id: "w1".into(),
+            dir_name: String::new(),
+            base: "aaaaaaa1111".into(),
+            head: "bbbbbbb2222".into(),
+            base_ref: "main".into(),
+            head_ref: "HEAD".into(),
+            title: Some("Login fix".into()),
+            author: "claude".into(),
+            recipient_tab: tab.map(str::to_string),
+            created_at: String::new(),
+            seq: 3,
+            files: vec!["a.rs".into(), "b.rs".into()],
+            files_truncated: false,
+            threads,
+        }
+    }
+
+    fn comment(seq: u64, by: termic_proto::ReviewBy, author: &str, body: &str) -> termic_proto::ReviewComment {
+        termic_proto::ReviewComment { seq, by, author: author.into(), body: body.into(), at: String::new() }
+    }
+
+    #[test]
+    fn review_opened_text_names_the_range_and_how_to_comment_and_warns_when_no_tab_receives_replies() {
+        let with_tab = review_opened_text(&review(Vec::new(), Some("t1")));
+        let without = review_opened_text(&review(Vec::new(), None));
+
+        assert_eq!(
+            with_tab,
+            "Opened review r1 (aaaaaaa..bbbbbbb, 2 files) in the Git tab.\n\
+             Comment with: \"$TERMIC_CLI\" present comment r1 --file <path> [--line N[-M]] -m \"...\""
+        );
+        assert_eq!(without, format!("{with_tab}\nNo recipient tab: the user's comments wait until `termic present claim r1`."));
+    }
+
+    #[test]
+    fn review_text_golden_lists_files_quotes_line_threads_gives_each_comment_its_seq_shows_the_user_as_you_and_indents_multiline_bodies() {
+        use termic_proto::{ReviewBy, ReviewThread};
+        let threads = vec![
+            ReviewThread {
+                id: "r1-t1".into(),
+                file: "a.rs".into(),
+                start_line: Some(3),
+                end_line: Some(4),
+                quote: "let a = 1;\nlet b = 2;".into(),
+                comments: vec![comment(1, ReviewBy::Agent, "claude", "why two?"), comment(3, ReviewBy::User, "", "one\ntwo")],
+            },
+            ReviewThread {
+                id: "r1-t2".into(),
+                file: "b.rs".into(),
+                start_line: Some(9),
+                end_line: Some(9),
+                quote: "x".into(),
+                comments: vec![comment(2, ReviewBy::Agent, "claude", "line")],
+            },
+            ReviewThread {
+                id: "r1-t3".into(),
+                file: "b.rs".into(),
+                start_line: None,
+                end_line: None,
+                quote: String::new(),
+                comments: vec![comment(4, ReviewBy::Agent, "claude", "generated")],
+            },
+        ];
+
+        let text = review_text(&review(threads, Some("t1")));
+        let empty = review_text(&termic_proto::Review {
+            title: None,
+            files_truncated: true,
+            ..review(Vec::new(), None)
+        });
+
+        assert_eq!(
+            text,
+            "Review r1 \"Login fix\": main..HEAD (aaaaaaa..bbbbbbb) by claude, recipient tab t1, seq 3\n\
+             Files:\n  a.rs\n  b.rs\n\
+             \n\
+             r1-t1 a.rs:3-4\n\
+             > let a = 1;\n\
+             > let b = 2;\n\
+             claude (seq 1): why two?\n\
+             You (seq 3): one\n  two\n\
+             \n\
+             r1-t2 b.rs:9\n\
+             > x\n\
+             claude (seq 2): line\n\
+             \n\
+             r1-t3 b.rs\n\
+             claude (seq 4): generated"
+        );
+        assert_eq!(
+            empty,
+            "Review r1: main..HEAD (aaaaaaa..bbbbbbb) by claude, no recipient tab, seq 3\n\
+             Files:\n  a.rs\n  b.rs\n  (more not listed)\n\
+             No comments."
+        );
+    }
+
+    #[test]
+    fn reviews_text_says_no_reviews_when_empty_and_one_line_per_review_otherwise() {
+        let row = |id: &str, title: Option<&str>, tab: Option<&str>| termic_proto::ReviewSummary {
+            id: id.into(),
+            title: title.map(str::to_string),
+            base_ref: "main".into(),
+            head_ref: "HEAD".into(),
+            author: "claude".into(),
+            recipient_tab: tab.map(str::to_string),
+            threads: 2,
+            comments: 3,
+            seq: 3,
+        };
+        let mut d = termic_proto::ReviewsData { task_id: "w1".into(), task: "web/x".into(), reviews: Vec::new() };
+        let empty = reviews_text(&d);
+        d.reviews = vec![row("r1", Some("Login fix"), Some("t1")), row("r2", None, None)];
+
+        let two = reviews_text(&d);
+
+        assert_eq!(empty, "No reviews.");
+        assert_eq!(
+            two,
+            "r1 \"Login fix\" main..HEAD by claude: 2 threads, 3 comments, seq 3, tab t1\n\
+             r2 main..HEAD by claude: 2 threads, 3 comments, seq 3, no tab"
+        );
     }
 
     #[test]

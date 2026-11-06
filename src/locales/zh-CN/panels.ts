@@ -44,6 +44,7 @@ export default {
     markViewedAdvance: "标记为已查看，然后跳到下一个未查看的文件",
     viewed: "已查看",
     comparingWithParent: "正在将 {{sha}} 与其父提交比较",
+    reviewChipTip: "来自智能体的评审 {{id}}",
   },
 
   binaryDiff: {
@@ -380,6 +381,18 @@ export default {
     comparing: "正在比较…",
     noMatch: "没有匹配该筛选条件的已更改文件。",
     nothingDiffers: "与 {{base}} 没有差异。",
+    review: {
+      reviews: "评审",
+      untitled: "评审 {{id}}",
+      pickTip: "切换评审，或返回分支对比",
+      back: "返回分支对比",
+      by: "来自 {{author}}",
+      empty: "此评审的范围没有改动任何文件。",
+      threadOne: "1 个评审讨论",
+      threadMany: "{{count}} 个评审讨论",
+      awaitingOne: "1 个讨论等待你回复",
+      awaitingMany: "{{count}} 个讨论等待你回复",
+    },
   },
 
   pr: {
@@ -467,6 +480,8 @@ export default {
     wholeFile: "整个文件",
     lines: "第 {{start}}–{{end}} 行",
     line: "第 {{start}} 行",
+    replyTo: "回复 {{thread}}",
+    sendsToReviews: "发送给各评审的智能体",
   },
 
   reviewExt: {
@@ -486,6 +501,10 @@ export default {
     commentOnLine: "＋ 评论第 {{line}} 行",
     sendSelection: "发送选中内容给智能体",
     commentThisLine: "评论此行",
+    you: "你",
+    reply: "回复 {{thread}} · {{loc}}",
+    pendingReply: "待发送回复 {{thread}} · {{loc}}",
+    replyAction: "回复",
   },
 
   blame: {

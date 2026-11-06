@@ -782,7 +782,7 @@ fn rpc_response(server: &McpServer, req: &HttpRequest) -> (u16, Vec<u8>) {
 /// (`agent_overview!` in termic-cli/src/lib.rs): keep the two in step. The
 /// point is the first sentence: an agent that does not realise it is running
 /// INSIDE a Termic task never thinks to start siblings or report back.
-const MCP_INSTRUCTIONS: &str = "Termic runs coding agents side by side, each in its own task (a git worktree, or the project's main checkout, with its own terminal), listed in the app's sidebar. If your environment has TERMIC_TASK_ID, you are one of those agents, running INSIDE a Termic task right now, and these tools drive the app around you. From there you can: launch new tasks with their own agents (task_new; in your project they join your task's group in the sidebar, in another they are linked to your task instead; you name the group for the batch of work with task_group); prompt another task's agent (task_send; it queues behind a busy agent's turn, and now=true skips that queue for a message that cannot wait) and read what it produced (task_log, task_result); open another agent tab in a task (task_tab); retitle your own task (task_rename); label your tab with what you are working on, shown on the task's sidebar row (task_prop, e.g. ticket=ABC-1; pass your TERMIC_TAB_ID as tab); put a coloured status badge under your task's name (task_badge_set, e.g. key=ci text=passing color=good); and keep notes, plans, findings, logs and reports the user should READ in scratchpads (scratchpad_new, scratchpad_write): a tab in your task that updates live and stays out of git, so use one instead of dropping temporary .md files into the repo. A multi-repo project holds several repos, possibly many (project_list shows each project's type and members): task_new worktrees only the members you name in members (none without it). Coordinate by prompting each other rather than blocking: end a prompt with how the other agent should report back to you (a task_send to your task id), and ask for that report every time it finishes or gets stuck, follow-up work included, until a human tells it to stop. Sign every prompt you send another agent, first line and last: [message from agent:<your agent> task:<your task name> id:<your TERMIC_TASK_ID>] ... -- agent:<your agent> task:<your task name> id:<your TERMIC_TASK_ID>, with the values written out (there is no shell here to fill them in; TERMIC_TASK holds your task name). A prompt that arrives WITH that header came from another agent, not the user: the id is where to reply. Report back there every time you finish or get stuck, follow-up work included, and stop only when a human tells you to. When Termic set this client up, it tells the server which task you run in, so task_rename, task_group, task_tab, task_prop, task_badge_set, task_badge_remove and task_badge_list default to your own task, exactly like the CLI; name other tasks explicitly. If this machine is paired with others on its network (peer_list), task_new, task_send, task_wait, task_result and task_list take peer:<machine> to run THERE, and peer_call runs any other tool there: put peer:<this machine's name> in your signature and ask for the reply as a task_send with peer:<this machine> back to your task id; a prompt whose header carries peer:<machine> came from that machine, so answer it, or ask it for help when stuck, with task_send peer:<machine> to the id in that header. Without TERMIC_TASK_ID you are driving Termic from outside it.";
+const MCP_INSTRUCTIONS: &str = "Termic runs coding agents side by side, each in its own task (a git worktree, or the project's main checkout, with its own terminal), listed in the app's sidebar. If your environment has TERMIC_TASK_ID, you are one of those agents, running INSIDE a Termic task right now, and these tools drive the app around you. From there you can: launch new tasks with their own agents (task_new; in your project they join your task's group in the sidebar, in another they are linked to your task instead; you name the group for the batch of work with task_group); prompt another task's agent (task_send; it queues behind a busy agent's turn, and now=true skips that queue for a message that cannot wait) and read what it produced (task_log, task_result); open another agent tab in a task (task_tab); retitle your own task (task_rename); label your tab with what you are working on, shown on the task's sidebar row (task_prop, e.g. ticket=ABC-1; pass your TERMIC_TAB_ID as tab); put a coloured status badge under your task's name (task_badge_set, e.g. key=ci text=passing color=good); show the user a commit range as a review and discuss it in comment threads (present_new with range=main..HEAD, present_comment, present_reply; pass your TERMIC_TAB_ID as tab to present_new and present_claim, and answer the user's review comments with present_reply, not in your terminal); and keep notes, plans, findings, logs and reports the user should READ in scratchpads (scratchpad_new, scratchpad_write): a tab in your task that updates live and stays out of git, so use one instead of dropping temporary .md files into the repo. A multi-repo project holds several repos, possibly many (project_list shows each project's type and members): task_new worktrees only the members you name in members (none without it). Coordinate by prompting each other rather than blocking: end a prompt with how the other agent should report back to you (a task_send to your task id), and ask for that report every time it finishes or gets stuck, follow-up work included, until a human tells it to stop. Sign every prompt you send another agent, first line and last: [message from agent:<your agent> task:<your task name> id:<your TERMIC_TASK_ID>] ... -- agent:<your agent> task:<your task name> id:<your TERMIC_TASK_ID>, with the values written out (there is no shell here to fill them in; TERMIC_TASK holds your task name). A prompt that arrives WITH that header came from another agent, not the user: the id is where to reply. Report back there every time you finish or get stuck, follow-up work included, and stop only when a human tells you to. When Termic set this client up, it tells the server which task you run in, so task_rename, task_group, task_tab, task_prop, task_badge_set, task_badge_remove, task_badge_list and the present_* tools default to your own task, exactly like the CLI; name other tasks explicitly. If this machine is paired with others on its network (peer_list), task_new, task_send, task_wait, task_result and task_list take peer:<machine> to run THERE, and peer_call runs any other tool there: put peer:<this machine's name> in your signature and ask for the reply as a task_send with peer:<this machine> back to your task id; a prompt whose header carries peer:<machine> came from that machine, so answer it, or ask it for help when stuck, with task_send peer:<machine> to the id in that header. Without TERMIC_TASK_ID you are driving Termic from outside it.";
 
 /// UnsupportedProtocolVersionError. The `supported` list has to be
 /// machine-readable in `data`: that is what a client retries from, and
@@ -1686,6 +1686,131 @@ const TOOLS: &[ToolDef] = &[
         build: |a| Ok(Command::BadgeList { task: arg_str(a, "task")?, project: arg_str(a, "project")?, cwd: None }),
     },
     ToolDef {
+        name: "present_new",
+        cli_verb: "present new",
+        description: "Show the user a commit range as a review in the Git tab; returns its id. The user's comments arrive in the tab's terminal; answer with present_reply. New round, new review.",
+        params: &[
+            P_PAD_TASK,
+            P_PROJECT,
+            ParamDef { name: "range", json_type: "string", required: true, description: "A..B, e.g. main..HEAD.", cli_flag: Some("range") },
+            ParamDef { name: "title", json_type: "string", required: false, description: "One line.", cli_flag: Some("--title") },
+            ParamDef { name: "author", json_type: "string", required: false, description: "Your comments' name.", cli_flag: Some("--author") },
+            ParamDef { name: "repo", json_type: "string", required: false, description: "Member repo.", cli_flag: Some("--repo") },
+            ParamDef { name: "tab", json_type: "string", required: false, description: "Your TERMIC_TAB_ID.", cli_flag: Some("--tab") },
+        ],
+        destructive: false,
+        read_only: false,
+        build: |a| Ok(Command::PresentNew {
+            task: arg_str(a, "task")?,
+            project: arg_str(a, "project")?,
+            range: need_str(a, "range")?,
+            title: arg_str(a, "title")?,
+            author: arg_str(a, "author")?,
+            repo: arg_str(a, "repo")?,
+            tab: arg_str(a, "tab")?,
+            cwd: None,
+        }),
+    },
+    ToolDef {
+        name: "present_comment",
+        cli_verb: "present comment",
+        description: "Comment on new-side lines of a review file, or the whole file.",
+        params: &[
+            P_PAD_TASK,
+            P_PROJECT,
+            ParamDef { name: "review", json_type: "string", required: true, description: "r1", cli_flag: Some("review") },
+            ParamDef { name: "file", json_type: "string", required: true, description: "Repo-relative path.", cli_flag: Some("--file") },
+            ParamDef { name: "line", json_type: "string", required: false, description: "12 or 12-14.", cli_flag: Some("--line") },
+            ParamDef { name: "body", json_type: "string", required: true, description: "The comment.", cli_flag: Some("--message") },
+        ],
+        destructive: false,
+        read_only: false,
+        build: |a| {
+            let lines = arg_str(a, "line")?.map(|l| termic_proto::parse_line_range(&l)).transpose()?;
+            Ok(Command::PresentComment {
+                task: arg_str(a, "task")?,
+                project: arg_str(a, "project")?,
+                review: need_str(a, "review")?,
+                file: need_str(a, "file")?,
+                start_line: lines.map(|l| l.0),
+                end_line: lines.map(|l| l.1),
+                body: need_str(a, "body")?,
+                cwd: None,
+            })
+        },
+    },
+    ToolDef {
+        name: "present_reply",
+        cli_verb: "present reply",
+        description: "Reply in a review thread.",
+        params: &[
+            P_PAD_TASK,
+            P_PROJECT,
+            ParamDef { name: "thread", json_type: "string", required: true, description: "r1-t3", cli_flag: Some("thread") },
+            ParamDef { name: "body", json_type: "string", required: true, description: "The reply.", cli_flag: Some("--message") },
+        ],
+        destructive: false,
+        read_only: false,
+        build: |a| Ok(Command::PresentReply {
+            task: arg_str(a, "task")?,
+            project: arg_str(a, "project")?,
+            thread: need_str(a, "thread")?,
+            body: need_str(a, "body")?,
+            cwd: None,
+        }),
+    },
+    ToolDef {
+        name: "present_show",
+        cli_verb: "present show",
+        description: "A review's threads and comments.",
+        params: &[
+            P_PAD_TASK,
+            P_PROJECT,
+            ParamDef { name: "review", json_type: "string", required: true, description: "r1", cli_flag: Some("review") },
+            ParamDef { name: "since", json_type: "integer", required: false, description: "Only later comments.", cli_flag: Some("--since") },
+        ],
+        destructive: false,
+        read_only: true,
+        build: |a| Ok(Command::PresentShow {
+            task: arg_str(a, "task")?,
+            project: arg_str(a, "project")?,
+            review: need_str(a, "review")?,
+            since: arg_u64(a, "since")?,
+            cwd: None,
+        }),
+    },
+    ToolDef {
+        name: "present_list",
+        cli_verb: "present list",
+        description: "The task's reviews.",
+        params: &[P_PAD_TASK, P_PROJECT],
+        destructive: false,
+        read_only: true,
+        build: |a| Ok(Command::PresentList { task: arg_str(a, "task")?, project: arg_str(a, "project")?, cwd: None }),
+    },
+    ToolDef {
+        name: "present_claim",
+        cli_verb: "present claim",
+        description: "Send a review's next user comments to this agent tab.",
+        params: &[
+            P_PAD_TASK,
+            P_PROJECT,
+            ParamDef { name: "review", json_type: "string", required: true, description: "r1", cli_flag: Some("review") },
+            ParamDef { name: "tab", json_type: "string", required: true, description: "Your TERMIC_TAB_ID.", cli_flag: Some("--tab") },
+            ParamDef { name: "author", json_type: "string", required: false, description: "Your comments' name.", cli_flag: Some("--author") },
+        ],
+        destructive: false,
+        read_only: false,
+        build: |a| Ok(Command::PresentClaim {
+            task: arg_str(a, "task")?,
+            project: arg_str(a, "project")?,
+            review: need_str(a, "review")?,
+            tab: Some(need_str(a, "tab")?),
+            author: arg_str(a, "author")?,
+            cwd: None,
+        }),
+    },
+    ToolDef {
         name: "task_agents",
         cli_verb: "agents",
         description: "List the agent CLIs this app can run: the ids task_new and task_tab accept, with whether each is installed and usable, and each agent's named accounts (what task_new's account takes) with the default. Without this a caller has to guess an agent id and read the refusal.",
@@ -2134,6 +2259,7 @@ fn peer_call_command(args: &Args) -> Result<(Command, String), String> {
 const SELF_DEFAULT_TOOLS: &[&str] = &[
     "task_rename", "task_group", "task_tab", "task_prop",
     "task_badge_set", "task_badge_remove", "task_badge_list",
+    "present_new", "present_comment", "present_reply", "present_show", "present_list", "present_claim",
     "scratchpad_new", "scratchpad_write", "scratchpad_read", "scratchpad_list",
     "scratchpad_remove", "scratchpad_clear",
     "schedule_show", "schedule_set", "schedule_run", "schedule_delete",
@@ -4061,7 +4187,12 @@ mod tests {
         // 29814: task_badge_set / task_badge_remove / task_badge_list, parity
         // with `termic badge set|rm|list`. Three tools, not one, because each
         // verb is its own CLI subcommand; a clause each, limits by name only.
-        const RECORDED: usize = 29814;
+        // 33200: present_new / comment / reply / show / list / claim, parity
+        // with `termic present`. Six tools because each is a CLI subcommand;
+        // descriptions are a clause, and about 1.7 KB of it is the task and
+        // project params every one repeats. Measured, not rounded: the
+        // size happens to land on 33200 exactly.
+        const RECORDED: usize = 33200;
         assert!(
             size <= RECORDED,
             "serialized tools/list grew to {size} bytes (recorded {RECORDED}); grow it consciously"
@@ -4251,6 +4382,41 @@ mod tests {
         assert_eq!(tool_entry(tool("task_badge_set"))["annotations"]["destructiveHint"], false);
         assert_eq!(tool_entry(tool("task_badge_remove"))["annotations"]["destructiveHint"], false);
         assert_eq!(tool_entry(tool("task_badge_list"))["annotations"]["readOnlyHint"], true);
+    }
+
+    #[test]
+    fn present_tools_build_their_wire_commands_with_the_callers_task_and_parse_line_ranges() {
+        let tool = |n: &str| TOOLS.iter().find(|t| t.name == n).unwrap();
+        let call = |n: &str, v: serde_json::Value| build_call(tool(n), v.as_object().unwrap(), Some("me"));
+
+        let new = call("present_new", serde_json::json!({ "range": "main..HEAD", "tab": "tab-1", "title": "T" })).unwrap();
+        let ranged = call("present_comment", serde_json::json!({ "review": "r1", "file": "a.rs", "line": "12-14", "body": "b" })).unwrap();
+        let single = call("present_comment", serde_json::json!({ "review": "r1", "file": "a.rs", "line": "7", "body": "b" })).unwrap();
+        let file_level = call("present_comment", serde_json::json!({ "review": "r1", "file": "a.rs", "body": "b" })).unwrap();
+        let bad_line = call("present_comment", serde_json::json!({ "review": "r1", "file": "a.rs", "line": "0", "body": "b" }));
+        let reply = call("present_reply", serde_json::json!({ "task": "other", "thread": "r1-t2", "body": "b" })).unwrap();
+        let show = call("present_show", serde_json::json!({ "review": "r1", "since": 4 })).unwrap();
+        let list = call("present_list", serde_json::json!({})).unwrap();
+        let claim = call("present_claim", serde_json::json!({ "review": "r1", "tab": "tab-2" })).unwrap();
+        let claim_no_tab = call("present_claim", serde_json::json!({ "review": "r1" }));
+
+        assert!(matches!(&new, Command::PresentNew { task: Some(t), range, tab: Some(tab), title: Some(ti), author: None, repo: None, cwd: None, .. }
+            if t == "me" && range == "main..HEAD" && tab == "tab-1" && ti == "T"));
+        assert!(matches!(&ranged, Command::PresentComment { start_line: Some(12), end_line: Some(14), .. }));
+        assert!(matches!(&single, Command::PresentComment { start_line: Some(7), end_line: Some(7), .. }));
+        assert!(matches!(&file_level, Command::PresentComment { task: Some(t), start_line: None, end_line: None, body, .. } if t == "me" && body == "b"));
+        assert!(bad_line.unwrap_err().contains("not a line"));
+        assert!(matches!(&reply, Command::PresentReply { task: Some(t), thread, .. } if t == "other" && thread == "r1-t2"), "an explicit task wins");
+        assert!(matches!(&show, Command::PresentShow { since: Some(4), .. }));
+        assert!(matches!(&list, Command::PresentList { task: Some(t), .. } if t == "me"));
+        assert!(matches!(&claim, Command::PresentClaim { tab: Some(tab), author: None, .. } if tab == "tab-2"));
+        assert!(claim_no_tab.unwrap_err().contains("tab"));
+        for n in ["present_show", "present_list"] {
+            assert_eq!(tool_entry(tool(n))["annotations"]["readOnlyHint"], true, "{n}");
+        }
+        for n in ["present_new", "present_comment", "present_reply", "present_claim"] {
+            assert_eq!(tool_entry(tool(n))["annotations"]["destructiveHint"], false, "{n}");
+        }
     }
 
     #[test]

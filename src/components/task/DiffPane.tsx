@@ -137,6 +137,9 @@ export function DiffPane({ task, tab }: { task: Task; tab: DiffTab }) {
   // file" is the compare list, not the staging panes, so the walk below forks
   // on this.
   const baseSha = tab.scope?.startsWith("base:") ? tab.scope.slice("base:".length) : null;
+  // An agent-presented review's diff: both sides are commits, like a History
+  // diff, so viewed marks and the stale probe are off. Its threads still show.
+  const reviewId = tab.scope?.startsWith("review:") ? tab.scope.slice("review:".length) : null;
   const hostRef = useRef<HTMLDivElement>(null);
   // The host div is the scroll container for both modes; its position
   // dies with the box when a hidden task/tab goes display:none in
@@ -263,7 +266,7 @@ export function DiffPane({ task, tab }: { task: Task; tab: DiffTab }) {
   useEffect(() => {
     // Nothing loaded yet, or this pane is showing a pair of committed blobs
     // (`commit:`), which cannot change under us.
-    if (!fpRef.current || commitSha) return;
+    if (!fpRef.current || commitSha || reviewId) return;
     let alive = true;
     taskFileDiffSides(task.id, tab.path, tab.scope)
       .then(next => { if (alive && next.fp !== fpRef.current) setStale(true); })
@@ -422,7 +425,9 @@ export function DiffPane({ task, tab }: { task: Task; tab: DiffTab }) {
       // agent is about to edit, and this diff's right side is a commit that
       // already happened (GH #199).
       const isCommitScope = !!tab.scope?.startsWith("commit:");
-      const commentExt = isCommitScope ? [] : reviewCommentsExtension(task.id, tab.path);
+      const commentExt = isCommitScope ? [] : reviewCommentsExtension(task.id, tab.path, undefined, reviewId ?? undefined);
+      // A review diff takes comments too: they join the review's threads.
+      const canComment = !isCommitScope;
 
       // GH #118: @codemirror/merge's default diffConfig caps the precise
       // diff at scanLimit 500 changed characters per scanned range; a big
@@ -442,7 +447,7 @@ export function DiffPane({ task, tab }: { task: Task; tab: DiffTab }) {
           collapseUnchanged: { margin: 3, minSize: 6 },
           diffConfig,
         });
-        setCommentable(!isCommitScope);
+        setCommentable(canComment);
       } else if (!sides.original_exists) {
         // A NEW file is shown as the file, not as a diff against nothing:
         // every line painted as an insertion is a wall of green that says
@@ -455,7 +460,7 @@ export function DiffPane({ task, tab }: { task: Task; tab: DiffTab }) {
           doc: sides.modified,
           extensions: [...baseExt, commentExt],
         });
-        setCommentable(!isCommitScope);
+        setCommentable(canComment);
       } else {
         editorRef.current = new EditorView({
           parent: hostRef.current,
@@ -474,7 +479,7 @@ export function DiffPane({ task, tab }: { task: Task; tab: DiffTab }) {
             }),
           ],
         });
-        setCommentable(!isCommitScope);
+        setCommentable(canComment);
       }
     }).catch(e => alive && setErr(String(e)));
     return () => {
@@ -557,6 +562,15 @@ export function DiffPane({ task, tab }: { task: Task; tab: DiffTab }) {
             {commitSha.slice(0, 7)}
           </span>
         )}
+        {reviewId && (
+          <span
+            data-testid="diff-review-chip"
+            title={tr("diff.reviewChipTip", { id: reviewId })}
+            className="ml-2 shrink-0 rounded bg-[var(--color-bg-3)] px-1.5 font-mono text-[11px] leading-[18px] text-[var(--color-fg-faint)]"
+          >
+            {reviewId}
+          </span>
+        )}
         <div className="ml-auto flex items-center gap-1">
           {/* Source ⇄ Preview, for a NEW markdown / HTML / SVG file only. */}
           {previewKind && (
@@ -628,7 +642,7 @@ export function DiffPane({ task, tab }: { task: Task; tab: DiffTab }) {
           }><FolderOpen className="h-4 w-4" /> {tr("open", { ns: "common" })}</Button>
           {/* Mark-as-viewed (GH #42): mirrors the Git panel row checkbox.
               Hidden for deletions (no working-tree file to fingerprint). */}
-          {fp !== "" && !commitSha && (
+          {fp !== "" && !commitSha && !reviewId && (
             <Button
               size="sm"
               variant="ghost"
