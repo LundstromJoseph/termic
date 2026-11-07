@@ -1233,7 +1233,7 @@ export interface GitCompare {
 
 /** An agent-presented review. Mirrors termic-proto's `Review`, which is also
  *  the on-disk record; Rust is its only writer. The top-level range and files
- *  mirror the latest round. */
+ *  mirror the latest iteration. */
 export interface Review {
   version: number;
   /** `r<N>`, sequential per task. */
@@ -1259,13 +1259,13 @@ export interface Review {
   files: string[];
   files_truncated: boolean;
   threads: ReviewThread[];
-  /** Round 1 first; Rust fills round 1 for a file written before rounds. */
-  rounds: ReviewRound[];
-  /** The view the user sees first: absent is base..latest, K is round K's head..latest. */
+  /** Iteration 1 first; Rust fills iteration 1 for a file written before iterations. */
+  iterations: ReviewIteration[];
+  /** The view the user sees first: absent is base..latest, K is iteration K's head..latest. */
   default_from?: number;
 }
 
-export interface ReviewRound {
+export interface ReviewIteration {
   base: string;
   head: string;
   base_ref: string;
@@ -1292,11 +1292,11 @@ export interface ReviewThread {
   comments: ReviewThreadComment[];
   /** Absent while the thread is open. */
   resolved?: ReviewThreadResolved;
-  /** The round it was opened on. */
-  round: number;
+  /** The iteration it was opened on. */
+  iteration: number;
   /** The anchor it was opened on; absent until re-anchoring first moved it. */
   origin?: ReviewAnchor;
-  /** The round whose changes outdated it; absent while live. */
+  /** The iteration whose changes outdated it; absent while live. */
   outdated?: number;
 }
 
@@ -1315,7 +1315,7 @@ export interface ReviewThreadComment {
   author: string;
   body: string;
   at: string;
-  round: number;
+  iteration: number;
 }
 
 /** A reply when `thread_id` is set, otherwise a new thread on `file`
@@ -1327,8 +1327,8 @@ export interface ReviewPostItem {
   end_line: number | null;
   quote: string | null;
   body: string;
-  /** The round a new thread was written on; Rust refuses it once stale. */
-  round?: number | null;
+  /** The iteration a new thread was written on; Rust refuses it once stale. */
+  iteration?: number | null;
 }
 
 export interface ReviewPostResult {

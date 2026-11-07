@@ -24,8 +24,8 @@ export async function reviewChangedHandler(params: unknown): Promise<null> {
   useReviews.getState().apply(taskId, review);
   if (p.reveal !== true) return null;
   reveal(taskId, review.id);
-  // Only `present update` reveals a review that has a second round.
-  const n = review.rounds.length;
+  // Only `present update` reveals a review that has a second iteration.
+  const n = review.iterations.length;
   const msg = n >= 2
     ? review.title
       ? i18n.t("backend:review.updated", { agent: review.author, title: review.title, n })

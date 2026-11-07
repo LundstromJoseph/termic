@@ -15,10 +15,10 @@ export interface PostedItem {
 
 export function composeReviewMessage(review: Review, posted: PostedItem[]): string {
   const title = review.title ? ` "${review.title}"` : "";
-  const round = review.rounds.length >= 2 ? ` round ${review.rounds.length}` : "";
+  const iteration = review.iterations.length >= 2 ? ` iteration ${review.iterations.length}` : "";
   const n = posted.length;
   const head =
-    `[Termic review ${review.id}${round}${title} ${review.base.slice(0, 7)}..${review.head.slice(0, 7)}] `
+    `[Termic review ${review.id}${iteration}${title} ${review.base.slice(0, 7)}..${review.head.slice(0, 7)}] `
     + `The user left ${n} ${n === 1 ? "comment" : "comments"}.\n`
     + `Answer each in its thread with "$TERMIC_CLI" present reply <thread> -m "...", not here. `
     + `Full review: "$TERMIC_CLI" present show ${review.id}.`;
@@ -27,7 +27,7 @@ export function composeReviewMessage(review: Review, posted: PostedItem[]): stri
     const { file, start_line: s, end_line: e } = thread.outdated ? threadAnchor(thread) : thread;
     const loc = s == null ? file : e != null && e !== s ? `${file}:${s}-${e}` : `${file}:${s}`;
     const note = newThread ? ", new thread"
-      : thread.outdated ? `, opened in round ${thread.round}, outdated in round ${thread.outdated}` : "";
+      : thread.outdated ? `, opened in iteration ${thread.iteration}, outdated in iteration ${thread.outdated}` : "";
     let block = `${loc} (thread ${thread.id}${note})`;
     if (thread.quote.trim()) block += `\n${fenceQuote(thread.quote)}`;
     return `${block}\n${comment.body}`;

@@ -107,8 +107,8 @@ export default {
   review: {
     opened: "{{agent}} opened a review: {{title}}",
     openedUntitled: "{{agent}} opened review {{id}}",
-    updated: "{{agent}} started round {{n}} of {{title}}",
-    updatedUntitled: "{{agent}} started round {{n}} of review {{id}}",
+    updated: "{{agent}} started iteration {{n}} of {{title}}",
+    updatedUntitled: "{{agent}} started iteration {{n}} of review {{id}}",
     open: "Open",
     postFailed: "Could not save to review {{id}}: {{error}}",
     savedNoRecipient: "Saved to review {{id}}. It has no live agent tab: run termic present claim {{id}} from one to receive it.",

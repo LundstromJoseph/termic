@@ -103,8 +103,8 @@ export default {
   review: {
     opened: "{{agent}} 发起了评审：{{title}}",
     openedUntitled: "{{agent}} 发起了评审 {{id}}",
-    updated: "{{agent}} 开始了 {{title}} 的第 {{n}} 轮",
-    updatedUntitled: "{{agent}} 开始了评审 {{id}} 的第 {{n}} 轮",
+    updated: "{{agent}} 开始了 {{title}} 的第 {{n}} 次迭代",
+    updatedUntitled: "{{agent}} 开始了评审 {{id}} 的第 {{n}} 次迭代",
     open: "打开",
     postFailed: "无法保存到评审 {{id}}：{{error}}",
     savedNoRecipient: "已保存到评审 {{id}}。它没有在线的智能体标签页：在某个智能体标签页中运行 termic present claim {{id}} 来接收。",

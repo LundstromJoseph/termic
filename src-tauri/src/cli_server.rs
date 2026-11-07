@@ -3512,7 +3512,7 @@ fn review_summary(r: proto::Review) -> proto::ReviewSummary {
         author: r.author,
         recipient_tab: r.recipient_tab,
         seq: r.seq,
-        rounds: r.rounds.len() as u32,
+        iterations: r.iterations.len() as u32,
     }
 }
 
@@ -3573,7 +3573,7 @@ fn present(
                 by: proto::ReviewBy::Agent,
                 author,
                 quote: None,
-                round: None,
+                iteration: None,
             };
             let (r, mut posted, _) = reviews::apply(t, review, vec![op])?;
             host.push_review(serde_json::json!({ "taskId": t.id, "review": r }));
@@ -3643,12 +3643,12 @@ fn present(
         Command::PresentUpdate { review, head, base, show, .. } => {
             let show = show.as_deref().map(proto::parse_review_show).transpose().map_err(PresentError::Bad)?;
             let (r, outdated) =
-                reviews::update(t, review, reviews::NewRound { head: head.clone(), base: base.clone(), show })?;
+                reviews::update(t, review, reviews::NewIteration { head: head.clone(), base: base.clone(), show })?;
             host.push_review(serde_json::json!({ "taskId": t.id, "review": r, "reveal": true }));
             Ok(ReplyData::ReviewUpdate(proto::ReviewUpdateData {
                 task_id: t.id.clone(),
                 task: name.into(),
-                round: r.rounds.len() as u32,
+                iteration: r.iterations.len() as u32,
                 files: r.files.len() as u32,
                 files_truncated: r.files_truncated,
                 default_from: r.default_from,
@@ -10490,7 +10490,7 @@ mod tests {
     }
 
     #[test]
-    fn present_update_replies_the_new_round_with_its_outdated_threads_and_pushes_once_with_reveal() {
+    fn present_update_replies_the_new_iteration_with_its_outdated_threads_and_pushes_once_with_reveal() {
         let repo = present_repo();
         let p = repo.path();
         crate::test_support::with_scratch_data_dir(|_| {
@@ -10507,19 +10507,19 @@ mod tests {
             assert!(reply.ok, "{:?}", reply.error);
             let Some(ReplyData::ReviewUpdate(d)) = reply.data else { panic!("expected an update") };
             assert_eq!((d.task_id.as_str(), d.task.as_str(), d.review_id.as_str()), ("w9", "web/rev", "r1"));
-            assert_eq!((d.round, d.files, d.files_truncated, d.default_from), (2, 2, false, Some(1)));
+            assert_eq!((d.iteration, d.files, d.files_truncated, d.default_from), (2, 2, false, Some(1)));
             assert_eq!((d.base_ref.as_str(), d.head_ref.as_str()), ("base", "HEAD"));
             assert_eq!(d.outdated, vec![proto::ReviewOutdated {
                 thread_id: "r1-t1".into(),
                 file: "a.txt".into(),
                 start_line: Some(2),
                 end_line: Some(2),
-                round: 1,
+                iteration: 1,
             }]);
             let pushes = review_pushes(&host);
             assert_eq!(pushes.len(), before + 1);
             assert_eq!(pushes.last().unwrap()["reveal"], true);
-            assert_eq!(pushes.last().unwrap()["review"]["rounds"].as_array().unwrap().len(), 2);
+            assert_eq!(pushes.last().unwrap()["review"]["iterations"].as_array().unwrap().len(), 2);
         });
     }
 
@@ -10537,12 +10537,12 @@ mod tests {
             assert_eq!(unknown, (ErrorCode::NotFound, "no such review r7".into()));
             assert_eq!(bad_show.0, ErrorCode::BadRequest);
             assert!(bad_show.1.contains("is not a view"), "{}", bad_show.1);
-            assert_eq!(same, (ErrorCode::BadRequest, "round 1 of r1 is already base..main".into()));
+            assert_eq!(same, (ErrorCode::BadRequest, "iteration 1 of r1 is already base..main".into()));
         });
     }
 
     #[test]
-    fn present_list_counts_each_reviews_rounds() {
+    fn present_list_counts_each_reviews_iterations() {
         let repo = present_repo();
         let p = repo.path();
         crate::test_support::with_scratch_data_dir(|_| {
@@ -10555,7 +10555,7 @@ mod tests {
             let reply = handle(&req(Command::PresentList { task: Some("w9".into()), project: None, cwd: None }, Some("tok")), &host);
 
             let Some(ReplyData::Reviews(d)) = reply.data else { panic!("expected reviews") };
-            assert_eq!(d.reviews[0].rounds, 2);
+            assert_eq!(d.reviews[0].iterations, 2);
         });
     }
 

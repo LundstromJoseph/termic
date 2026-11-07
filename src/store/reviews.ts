@@ -19,13 +19,13 @@ export interface ReviewsState {
   /** The review Compare shows for a task; null or absent is branch compare. */
   shown: Record<string, string | null>;
   /** The viewer's From/To pick per review, for this session only, with the
-   *  round count it was made at: a new round drops it (`effectiveView`). */
-  view: Record<string, ReviewView & { rounds: number }>;
+   *  iteration count it was made at: a new iteration drops it (`effectiveView`). */
+  view: Record<string, ReviewView & { iterations: number }>;
   apply: (taskId: string, review: Review) => void;
   setList: (taskId: string, reviews: Review[]) => void;
   ensureLoaded: (taskId: string) => void;
   setShown: (taskId: string, reviewId: string | null) => void;
-  setView: (taskId: string, reviewId: string, from: number | null, to: number | null, rounds: number) => void;
+  setView: (taskId: string, reviewId: string, from: number | null, to: number | null, iterations: number) => void;
 }
 
 type Data = Pick<ReviewsState, "byKey" | "idsByTask" | "awaiting">;
@@ -81,10 +81,10 @@ export const useReviews = create<ReviewsState>((set, get) => ({
   },
   setShown: (taskId, reviewId) => set(s =>
     (s.shown[taskId] ?? null) === reviewId ? s : { shown: { ...s.shown, [taskId]: reviewId } }),
-  setView: (taskId, reviewId, from, to, rounds) => set(s => {
+  setView: (taskId, reviewId, from, to, iterations) => set(s => {
     const k = reviewKey(taskId, reviewId);
     const o = s.view[k];
-    return o && o.from === from && o.to === to && o.rounds === rounds ? s : { view: { ...s.view, [k]: { from, to, rounds } } };
+    return o && o.from === from && o.to === to && o.iterations === iterations ? s : { view: { ...s.view, [k]: { from, to, iterations } } };
   }),
 }));
 

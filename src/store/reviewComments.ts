@@ -40,10 +40,10 @@ export interface ReviewComment {
   /** Set when the comment was written in a `review:<id>` diff: it is posted
    *  to that review and goes to the review's agent, not the bar's pick. */
   reviewId?: string;
-  /** The round of `reviewId` the comment was written on. A new thread held
+  /** The iteration of `reviewId` the comment was written on. A new thread held
    *  across a `present update` is refused, so it never lands old line
    *  numbers on the new head. */
-  reviewRound?: number;
+  reviewIteration?: number;
   /** A reply to this thread of `reviewId`; absent opens a new thread. */
   threadId?: string;
 }

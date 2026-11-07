@@ -24,15 +24,15 @@ function locLabel(start: number | null, end: number | null, file: string): strin
 /** Where a comment goes: the task, its file, and the surface that made it
  *  (decides how the batch is worded to the agent, see composeCommentsMessage).
  *  `reviewId` when the file is a `review:` diff: the comment joins that review,
- *  written on its round `reviewRound`. `drawRound` is the round whose head the
- *  view shows, which differs from `reviewRound` on a pinned older round. */
+ *  written on its iteration `reviewIteration`. `drawIteration` is the iteration whose head the
+ *  view shows, which differs from `reviewIteration` on a pinned older iteration. */
 export interface CommentTarget {
   taskId: string;
   file: string;
   source: "diff" | "editor";
   reviewId?: string;
-  reviewRound?: number;
-  drawRound?: number;
+  reviewIteration?: number;
+  drawIteration?: number;
 }
 
 /** A comment being written. `id` is set when it edits a queued one, and
@@ -253,7 +253,7 @@ export function buildThreadCard(thread: ReviewThread, expanded: boolean, host: {
   }
   if (thread.outdated) {
     const chip = el("span", "tc-thread-chip tc-thread-chip-outdated", t("outdatedIn", { n: thread.outdated }));
-    chip.title = t("outdatedTip", { round: thread.round });
+    chip.title = t("outdatedTip", { iteration: thread.iteration });
     lead.appendChild(chip);
   }
   head.appendChild(lead);

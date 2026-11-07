@@ -86,7 +86,7 @@ mod docker;
 mod agent_dirs;
 mod profiles;
 mod reviews;
-mod review_rounds;
+mod review_iterations;
 mod schedules;
 mod sudo_touchid;
 mod caffeinate;
@@ -14150,7 +14150,7 @@ fn git_log_page(
     // never be read as one of the flags above.
     let picked = if all_branches { Vec::new() } else { allowed_refs(cwd, refs) };
     if all_branches {
-        // Review round refs pin heads an amend or rebase left behind; they
+        // Review iteration refs pin heads an amend or rebase left behind; they
         // are not branches. `--exclude` only applies to the `--all` after it.
         args.push("--exclude=refs/termic/*");
         args.push("--all");
@@ -14850,8 +14850,8 @@ fn commits_present(cwd: &Path, shas: &[&str]) -> Result<(), String> {
     Ok(())
 }
 
-/// A review view's file list for Compare. `mode` is "plain" for one round's
-/// range, "replay" for round K -> N with K's change replayed onto N's base
+/// A review view's file list for Compare. `mode` is "plain" for one iteration's
+/// range, "replay" for iteration K -> N with K's change replayed onto N's base
 /// (`upstream` lists the rows that fell back to the plain diff on a
 /// conflict), and "fallback" when this git cannot replay at all.
 #[derive(Serialize)]
@@ -14861,27 +14861,27 @@ struct ReviewRange {
     upstream: Vec<String>,
 }
 
-/// Round `to` of `r` (the latest when None), or from round `from`'s head to it.
+/// Iteration `to` of `r` (the latest when None), or from iteration `from`'s head to it.
 fn review_range(cwd: &Path, r: &termic_proto::Review, from: Option<u32>, to: Option<u32>) -> Result<ReviewRange, String> {
-    let n = review_rounds::round(r, to)?;
-    let k = from.map(|f| review_rounds::from_round(r, f, to)).transpose()?;
+    let n = review_iterations::iteration(r, to)?;
+    let k = from.map(|f| review_iterations::from_iteration(r, f, to)).transpose()?;
     let Some(k) = k else {
         return Ok(ReviewRange { compare: git_range(cwd, &n.base, &n.head)?, mode: "plain", upstream: Vec::new() });
     };
     commits_present(cwd, &[&k.base, &k.head, &n.base, &n.head])?;
-    interdiff_range(cwd, k, n, review_rounds::replay(cwd, &k.base, &k.head, &n.base))
+    interdiff_range(cwd, k, n, review_iterations::replay(cwd, &k.base, &k.head, &n.base))
 }
 
-/// Round K -> N's rows given the replay of K onto N's base.
-fn interdiff_range(cwd: &Path, k: &termic_proto::ReviewRound, n: &termic_proto::ReviewRound, replay: review_rounds::Replay) -> Result<ReviewRange, String> {
+/// Iteration K -> N's rows given the replay of K onto N's base.
+fn interdiff_range(cwd: &Path, k: &termic_proto::ReviewIteration, n: &termic_proto::ReviewIteration, replay: review_iterations::Replay) -> Result<ReviewRange, String> {
     let plain = || tracked_diff_files(cwd, &[&k.head, &n.head], false);
     let (files, mode, upstream) = match replay {
-        review_rounds::Replay::Clean { left, conflicted } => {
+        review_iterations::Replay::Clean { left, conflicted } => {
             let mut files: Vec<GitFile> =
                 tracked_diff_files(cwd, &[&left, &n.head], false).into_iter().filter(|f| !conflicted.contains(&f.path)).collect();
             let mut fell_back: std::collections::HashMap<String, GitFile> =
                 plain().into_iter().filter(|f| conflicted.contains(&f.path)).map(|f| (f.path.clone(), f)).collect();
-            // A resolution that kept round K's content has no K.head..N.head
+            // A resolution that kept iteration K's content has no K.head..N.head
             // row but still dropped upstream's side, so it is listed at 0/0:
             // as deleted when K's deletion won over upstream's edit.
             // merge-tree names a conflict outside the project as `../`.
@@ -14898,8 +14898,8 @@ fn interdiff_range(cwd: &Path, k: &termic_proto::ReviewRound, n: &termic_proto::
             }));
             (files, "replay", upstream)
         }
-        // Upstream's own files at least stay out: only what either round touched.
-        review_rounds::Replay::Unavailable => {
+        // Upstream's own files at least stay out: only what either iteration touched.
+        review_iterations::Replay::Unavailable => {
             let mut touched = std::collections::HashSet::new();
             for (a, b) in [(&k.base, &k.head), (&n.base, &n.head)] {
                 let names = git(&["--no-pager", "diff", "--name-only", "-z", "--relative", a, b], cwd).map_err(|e| e.to_string())?;
@@ -17385,10 +17385,10 @@ fn task_file_diff_sides_for_task(w: &Task, path: &str, scope: Option<&str>) -> R
     //   "unstaged"  → index vs working tree  (what `git diff` shows)
     //   "commit:SHA"→ SHA^ vs SHA            (History tab, issue #199)
     //   "base:SHA"  → SHA vs working tree    (History › Compare, issue #208)
-    //   "review:ID" → the review's latest round, base vs head (agent-
-    //                 presented reviews); "review:ID:to:N" → round N's;
+    //   "review:ID" → the review's latest iteration, base vs head (agent-
+    //                 presented reviews); "review:ID:to:N" → iteration N's;
     //                 "review:ID[:to:N]" with ":from:K" after the id →
-    //                 round K replayed onto N's base vs N's head
+    //                 iteration K replayed onto N's base vs N's head
     //   None       → HEAD vs working tree   (full uncommitted delta; the
     //                 pre-#122 behavior, kept for callers with no pane)
     //
@@ -17430,10 +17430,10 @@ fn task_file_diff_sides_for_task(w: &Task, path: &str, scope: Option<&str>) -> R
     let base_sha = scope.and_then(|s| s.strip_prefix("base:")).filter(|s| is_commit_ish(s));
     let review = match scope.and_then(|s| s.strip_prefix("review:")) {
         Some(rest) => {
-            let (rid, from, to) = review_rounds::parse_scope(rest)?;
+            let (rid, from, to) = review_iterations::parse_scope(rest)?;
             let r = reviews::load(w, rid).map_err(|e| e.to_string())?;
-            let rd = review_rounds::round(&r, to)?;
-            let kd = from.map(|k| review_rounds::from_round(&r, k, to)).transpose()?;
+            let rd = review_iterations::iteration(&r, to)?;
+            let kd = from.map(|k| review_iterations::from_iteration(&r, k, to)).transpose()?;
             if cwd != repo_cwd(w, &r.dir_name)? {
                 return Err(format!("{path} is not in review {rid}'s repo"));
             }
@@ -17441,8 +17441,8 @@ fn task_file_diff_sides_for_task(w: &Task, path: &str, scope: Option<&str>) -> R
             // conflicted on, whose tree blob holds markers: that one is K's head.
             let left = match kd {
                 None => rd.base.clone(),
-                Some(k) => match review_rounds::replay(&cwd, &k.base, &k.head, &rd.base) {
-                    review_rounds::Replay::Clean { left, conflicted } if !conflicted.contains(&rel_path) => left,
+                Some(k) => match review_iterations::replay(&cwd, &k.base, &k.head, &rd.base) {
+                    review_iterations::Replay::Clean { left, conflicted } if !conflicted.contains(&rel_path) => left,
                     _ => k.head.clone(),
                 },
             };
@@ -35671,7 +35671,7 @@ filename f.rs
     }
 
     #[test]
-    fn review_scoped_diff_sides_with_to_read_that_rounds_blobs_and_refuse_a_round_the_review_lacks() {
+    fn review_scoped_diff_sides_with_to_read_that_iterations_blobs_and_refuse_an_iteration_the_review_lacks() {
         let dir = tempdir().unwrap();
         let repo = dir.path().to_path_buf();
         let main = compare_fixture(&repo);
@@ -35685,25 +35685,25 @@ filename f.rs
                 dir_name: String::new(),
             })
             .unwrap();
-            git_commit_file(&repo, "committed.txt", "c2\n", "round 2");
-            reviews::update(&task, "r1", reviews::NewRound { head: "HEAD".into(), base: None, show: None }).unwrap();
+            git_commit_file(&repo, "committed.txt", "c2\n", "iteration 2");
+            reviews::update(&task, "r1", reviews::NewIteration { head: "HEAD".into(), base: None, show: None }).unwrap();
 
-            let round1 = task_file_diff_sides_for_task(&task, "committed.txt", Some("review:r1:to:1")).unwrap();
+            let iteration1 = task_file_diff_sides_for_task(&task, "committed.txt", Some("review:r1:to:1")).unwrap();
             let latest = task_file_diff_sides_for_task(&task, "committed.txt", Some("review:r1")).unwrap();
             let missing = task_file_diff_sides_for_task(&task, "committed.txt", Some("review:r1:to:3"));
 
-            assert_eq!(round1.modified, "c\n");
+            assert_eq!(iteration1.modified, "c\n");
             assert_eq!(latest.modified, "c2\n");
-            assert_eq!(missing.err().as_deref(), Some("review r1 has no round 3"));
+            assert_eq!(missing.err().as_deref(), Some("review r1 has no iteration 3"));
         });
     }
 
-    /// Round 1 is main..topic: a.txt line 2 and c.txt edited. main then moves
+    /// Iteration 1 is main..topic: a.txt line 2 and c.txt edited. main then moves
     /// on: up.txt added, a.txt line 5 and c.txt edited (c.txt conflicts with
-    /// the author's). Round 2 is the rebase onto the new main with c.txt
+    /// the author's). Iteration 2 is the rebase onto the new main with c.txt
     /// resolved to `resolution` and a second author change to a.txt line 6.
     /// Returns the task.
-    /// `resolution` is round 2's c.txt; None means round 1 deleted c.txt and
+    /// `resolution` is iteration 2's c.txt; None means iteration 1 deleted c.txt and
     /// the rebase kept the deletion over upstream's edit.
     fn rebased_review_fixture(repo: &Path, resolution: Option<&str>) -> Task {
         git_init_with_commit(repo);
@@ -35728,7 +35728,7 @@ filename f.rs
             }
         };
         fs::write(repo.join("a.txt"), lines(&[(2, "A2")])).unwrap();
-        commit_c(resolution.map(|_| "c author\n"), "round 1");
+        commit_c(resolution.map(|_| "c author\n"), "iteration 1");
         let task = Task { id: "t1".into(), ..task_at(repo) };
         reviews::create(&task, reviews::NewReview {
             range: format!("{main}..topic"),
@@ -35744,8 +35744,8 @@ filename f.rs
         git_commit_file(repo, "c.txt", "c upstream\n", "upstream");
         git_run(repo, &["checkout", "-q", "-B", "topic"]);
         fs::write(repo.join("a.txt"), lines(&[(2, "A2"), (5, "U5"), (6, "A6")])).unwrap();
-        commit_c(resolution, "round 2");
-        reviews::update(&task, "r1", reviews::NewRound { head: "HEAD".into(), base: None, show: None }).unwrap();
+        commit_c(resolution, "iteration 2");
+        reviews::update(&task, "r1", reviews::NewIteration { head: "HEAD".into(), base: None, show: None }).unwrap();
         task
     }
 
@@ -35754,7 +35754,7 @@ filename f.rs
     }
 
     #[test]
-    fn review_range_from_round_1_after_a_rebase_lists_only_the_authors_changes_and_flags_the_conflicted_file() {
+    fn review_range_from_iteration_1_after_a_rebase_lists_only_the_authors_changes_and_flags_the_conflicted_file() {
         let dir = tempdir().unwrap();
         crate::test_support::with_scratch_data_dir(|_| {
             let task = rebased_review_fixture(dir.path(), Some("c resolved\n"));
@@ -35763,18 +35763,18 @@ filename f.rs
             let full = review_range(dir.path(), &r, None, None).unwrap();
             let interdiff = review_range(dir.path(), &r, Some(1), None).unwrap();
 
-            // Round 2 against its own base: both files, upstream's lines not in it.
+            // Iteration 2 against its own base: both files, upstream's lines not in it.
             assert_eq!((full.mode, range_rows(&full)), ("plain", vec![("a.txt", Some(2), Some(2)), ("c.txt", Some(1), Some(1))]));
             // up.txt and a.txt's upstream line 5 are gone; a.txt is the one new author line.
             assert_eq!(interdiff.mode, "replay");
             assert_eq!(range_rows(&interdiff), vec![("a.txt", Some(1), Some(1)), ("c.txt", Some(1), Some(1))]);
             assert_eq!(interdiff.upstream, vec!["c.txt"]);
-            assert_eq!(interdiff.compare.base_sha, r.rounds[0].head);
+            assert_eq!(interdiff.compare.base_sha, r.iterations[0].head);
         });
     }
 
     #[test]
-    fn review_range_from_round_1_lists_a_conflicted_file_resolved_back_to_round_1s_content_at_zero_churn() {
+    fn review_range_from_iteration_1_lists_a_conflicted_file_resolved_back_to_iteration_1s_content_at_zero_churn() {
         let dir = tempdir().unwrap();
         crate::test_support::with_scratch_data_dir(|_| {
             let task = rebased_review_fixture(dir.path(), Some("c author\n"));
@@ -35789,7 +35789,7 @@ filename f.rs
     }
 
     #[test]
-    fn review_range_from_round_1_lists_a_conflicted_file_whose_deletion_won_over_upstreams_edit_as_deleted() {
+    fn review_range_from_iteration_1_lists_a_conflicted_file_whose_deletion_won_over_upstreams_edit_as_deleted() {
         let dir = tempdir().unwrap();
         crate::test_support::with_scratch_data_dir(|_| {
             let task = rebased_review_fixture(dir.path(), None);
@@ -35804,13 +35804,13 @@ filename f.rs
     }
 
     #[test]
-    fn review_range_without_a_replay_lists_the_plain_head_to_head_rows_of_files_either_round_touched() {
+    fn review_range_without_a_replay_lists_the_plain_head_to_head_rows_of_files_either_iteration_touched() {
         let dir = tempdir().unwrap();
         crate::test_support::with_scratch_data_dir(|_| {
             let task = rebased_review_fixture(dir.path(), Some("c resolved\n"));
             let r = reviews::load(&task, "r1").unwrap();
 
-            let range = interdiff_range(dir.path(), &r.rounds[0], &r.rounds[1], review_rounds::Replay::Unavailable).unwrap();
+            let range = interdiff_range(dir.path(), &r.iterations[0], &r.iterations[1], review_iterations::Replay::Unavailable).unwrap();
 
             // up.txt is upstream's alone; a.txt keeps upstream's line 5 (+2 -2).
             assert_eq!((range.mode, range_rows(&range)), ("fallback", vec![("a.txt", Some(2), Some(2)), ("c.txt", Some(1), Some(1))]));
@@ -35819,7 +35819,7 @@ filename f.rs
     }
 
     #[test]
-    fn review_range_refuses_a_from_round_not_before_the_to_round() {
+    fn review_range_refuses_a_from_iteration_not_before_the_to_iteration() {
         let dir = tempdir().unwrap();
         crate::test_support::with_scratch_data_dir(|_| {
             let task = rebased_review_fixture(dir.path(), Some("c resolved\n"));
@@ -35828,13 +35828,13 @@ filename f.rs
             let same = review_range(dir.path(), &r, Some(2), Some(2));
             let latest = review_range(dir.path(), &r, Some(2), None);
 
-            assert_eq!(same.err().as_deref(), Some("round 2 of r1 is not before round 2"));
+            assert_eq!(same.err().as_deref(), Some("iteration 2 of r1 is not before iteration 2"));
             assert!(latest.is_err());
         });
     }
 
     #[test]
-    fn review_scoped_diff_sides_with_from_read_the_replayed_tree_or_round_ks_head_for_a_conflicted_file() {
+    fn review_scoped_diff_sides_with_from_read_the_replayed_tree_or_iteration_ks_head_for_a_conflicted_file() {
         let dir = tempdir().unwrap();
         crate::test_support::with_scratch_data_dir(|_| {
             let task = rebased_review_fixture(dir.path(), Some("c resolved\n"));
@@ -35843,7 +35843,7 @@ filename f.rs
             let c = task_file_diff_sides_for_task(&task, "c.txt", Some("review:r1:from:1")).unwrap();
             let bad = task_file_diff_sides_for_task(&task, "a.txt", Some("review:r1:from:2:to:2"));
 
-            assert_eq!(a.original, "a1\nA2\na3\na4\nU5\na6\n", "round 1's change on round 2's base");
+            assert_eq!(a.original, "a1\nA2\na3\na4\nU5\na6\n", "iteration 1's change on iteration 2's base");
             assert_eq!(a.modified, "a1\nA2\na3\na4\nU5\nA6\n");
             assert_eq!((c.original.as_str(), c.modified.as_str()), ("c author\n", "c resolved\n"));
             assert!(bad.is_err());
@@ -36176,7 +36176,7 @@ filename f.rs
     }
 
     #[test]
-    fn git_log_page_all_branches_leaves_out_commits_only_a_review_round_ref_reaches() {
+    fn git_log_page_all_branches_leaves_out_commits_only_a_review_iteration_ref_reaches() {
         let dir = tempdir().unwrap();
         let repo = dir.path().to_path_buf();
         repo_with_side_branch(&repo);

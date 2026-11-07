@@ -43,8 +43,8 @@ function unified() {
 
 function thread(id: string, start: number | null, end: number | null = start, resolved = false): ReviewThread {
   return {
-    id, file: "f.txt", start_line: start, end_line: end, quote: "", round: 1,
-    comments: [{ seq: 1, by: "agent", author: "claude", body: "b", at: "", round: 1 }],
+    id, file: "f.txt", start_line: start, end_line: end, quote: "", iteration: 1,
+    comments: [{ seq: 1, by: "agent", author: "claude", body: "b", at: "", iteration: 1 }],
     ...(resolved ? { resolved: { by: "agent" as const, author: "claude", at: "" } } : {}),
   };
 }
@@ -122,7 +122,7 @@ describe("revealThread on a resolved thread's card", () => {
     const review: Review = {
       version: 1, id: "r1", task_id: TASK, dir_name: "", base: "a", head: "b", base_ref: "main",
       head_ref: "HEAD", title: null, author: "claude", recipient_tab: null, created_at: "", seq: 1,
-      files: [FILE], files_truncated: false, threads: [th], rounds: [],
+      files: [FILE], files_truncated: false, threads: [th], iterations: [],
     };
     useReviews.getState().apply(TASK, review);
     const view = new EditorView({

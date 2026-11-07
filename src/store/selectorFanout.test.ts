@@ -334,9 +334,9 @@ describe("selector fan-out budget (bear trap 5)", () => {
     return {
       version: 1, id: "r1", task_id: taskId, dir_name: "", base: "a", head: "b", base_ref: "main",
       head_ref: "HEAD", title: null, author: "claude", recipient_tab: "tab-1", created_at: "", seq,
-      files: [], files_truncated: false, rounds: [],
-      threads: seq === 0 ? [] : [{ id: "r1-t1", file: "a.ts", start_line: null, end_line: null, quote: "", round: 1,
-        comments: [{ seq, by: "agent", author: "claude", body: "b", at: "", round: 1 }] }],
+      files: [], files_truncated: false, iterations: [],
+      threads: seq === 0 ? [] : [{ id: "r1-t1", file: "a.ts", start_line: null, end_line: null, quote: "", iteration: 1,
+        comments: [{ seq, by: "agent", author: "claude", body: "b", at: "", iteration: 1 }] }],
     };
   }
 

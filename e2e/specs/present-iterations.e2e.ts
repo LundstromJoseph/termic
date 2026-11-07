@@ -29,15 +29,15 @@ async function clickIn(selector: string): Promise<void> {
 
 const numbered = (n: number) => Array.from({ length: n }, (_, i) => `line ${i + 1}`);
 
-// Review rounds: `present update` after a new commit re-anchors threads and
+// Review iterations: `present update` after a new commit re-anchors threads and
 // outdates the ones whose lines changed (docs/ui.md "Agent-presented reviews").
-describe("review rounds", () => {
+describe("review iterations", () => {
   let taskId!: string;
   let cwd = "";
   let reviewId = "";
   let tShifted = "", tChanged = "", tFile = "";
   const stamp = Date.now();
-  const FILE = "rounds.txt";
+  const FILE = "iterations.txt";
 
   /** The visible review diff's thread cards: id, the code line just above the
    *  card (what it is pinned under), and its outdated chip. */
@@ -71,7 +71,7 @@ describe("review rounds", () => {
   before(async () => {
     await waitForAppShell();
     await requireTermicApi();
-    taskId = await createWorktreeTask("e2e-rounds", `e2e-rounds-${stamp}`);
+    taskId = await createWorktreeTask("e2e-iterations", `e2e-iterations-${stamp}`);
     await waitForAgentReady(taskId);
     const { path: p, tab } = await browser.execute((id) => {
       const s = window.__termic!.useApp.getState();
@@ -80,9 +80,9 @@ describe("review rounds", () => {
     cwd = p;
     writeFileSync(path.join(cwd, FILE), numbered(12).join("\n") + "\n");
     execGit(`git -C "${cwd}" add ${FILE}`);
-    execGit(`git -C "${cwd}" commit -q -m "rounds 1 ${stamp}"`);
+    execGit(`git -C "${cwd}" commit -q -m "iterations 1 ${stamp}"`);
 
-    const r = await cliRpc({ cmd: "present_new", task: taskId, range: "main..HEAD", title: "Rounds", tab });
+    const r = await cliRpc({ cmd: "present_new", task: taskId, range: "main..HEAD", title: "Iterations", tab });
     expect(r.ok).toBe(true);
     reviewId = r.data.review.id;
     const comment = async (body: string, lines?: [number, number]) => {
@@ -102,12 +102,12 @@ describe("review rounds", () => {
     if (taskId) await archiveTask(taskId);
   });
 
-  it("starts round 2: a shifted thread follows its line, a changed one goes outdated and is reported", async () => {
+  it("starts iteration 2: a shifted thread follows its line, a changed one goes outdated and is reported", async () => {
     await ensureActiveTask(taskId);
     await openRightTab("Git");
     await clickIn(`[data-testid="compare-file-row"][data-path="${FILE}"]`);
     await browser.waitUntil(async () => (await cards()).length === 3, {
-      timeout: 15_000, timeoutMsg: "round 1's three threads never drew in the open diff",
+      timeout: 15_000, timeoutMsg: "iteration 1's three threads never drew in the open diff",
     });
     await flushEditorMeasure();
     expect((await cards()).find(c => c.id === tShifted)?.under).toBe("line 10");
@@ -116,35 +116,35 @@ describe("review rounds", () => {
     const next = numbered(12);
     next[3] = "line four, rewritten";
     writeFileSync(path.join(cwd, FILE), ["top 1", "top 2", ...next].join("\n") + "\n");
-    execGit(`git -C "${cwd}" commit -qam "rounds 2 ${stamp}"`);
+    execGit(`git -C "${cwd}" commit -qam "iterations 2 ${stamp}"`);
     const r = await cliRpc({ cmd: "present_update", task: taskId, review: reviewId, head: "HEAD" });
 
     expect(r.ok).toBe(true);
-    expect(r.data.round).toBe(2);
-    expect(r.data.outdated.map((o: any) => [o.thread_id, o.start_line, o.end_line, o.round])).toEqual([[tChanged, 3, 4, 1]]);
+    expect(r.data.iteration).toBe(2);
+    expect(r.data.outdated.map((o: any) => [o.thread_id, o.start_line, o.end_line, o.iteration])).toEqual([[tChanged, 3, 4, 1]]);
     const stored = await show();
     const shifted = stored.threads.find((t: any) => t.id === tShifted);
     expect([shifted.start_line, shifted.origin?.start_line]).toEqual([12, 10]);
-    // The open diff follows the latest round: it rebuilt on the new head, the
+    // The open diff follows the latest iteration: it rebuilt on the new head, the
     // moved card sits under the same code, and the outdated one is gone.
     await browser.waitUntil(async () => {
       await flushEditorMeasure();
       const cs = await cards();
       return cs.length === 2 && cs.find(c => c.id === tShifted)?.under === "line 10";
-    }, { timeout: 15_000, timeoutMsg: "the open diff never redrew round 2's threads" });
+    }, { timeout: 15_000, timeoutMsg: "the open diff never redrew iteration 2's threads" });
     expect((await cards()).map(c => c.id).sort()).toEqual([tFile, tShifted].sort());
-    // Compare re-reads the range for the new round, so the row comes back a moment later.
+    // Compare re-reads the range for the new iteration, so the row comes back a moment later.
     const bar = () => browser.execute((f) => ({
       count: (document.querySelector(`[data-testid="compare-file-row"][data-path="${f}"] [data-testid="compare-thread-count"]`) as HTMLElement | null)?.innerText ?? null,
-      round: (document.querySelector('[data-testid="compare-review-round"]') as HTMLElement | null)?.innerText ?? null,
+      iteration: (document.querySelector('[data-testid="compare-review-iteration"]') as HTMLElement | null)?.innerText ?? null,
     }), FILE);
     await browser.waitUntil(async () => (await bar()).count !== null, {
-      timeout: 10_000, timeoutMsg: "the file row never came back after the new round",
+      timeout: 10_000, timeoutMsg: "the file row never came back after the new iteration",
     });
-    expect(await bar()).toEqual({ count: "2", round: "Round 2" });
+    expect(await bar()).toEqual({ count: "2", iteration: "Iteration 2" });
   });
 
-  it("lists an outdated thread with its snippet and opens the round it was made on", async () => {
+  it("lists an outdated thread with its snippet and opens the iteration it was made on", async () => {
     const row = `[data-testid="compare-thread-row"][data-thread="${tChanged}"]`;
     await waitVisible(row);
     const listed = await browser.execute((sel) => {
@@ -160,18 +160,18 @@ describe("review rounds", () => {
     await clickIn(row);
 
     await browser.waitUntil(async () => (await activeScope()) === `review:${reviewId}:to:1`, {
-      timeout: 10_000, timeoutMsg: "the outdated thread did not open round 1",
+      timeout: 10_000, timeoutMsg: "the outdated thread did not open iteration 1",
     });
     await browser.waitUntil(async () => (await cards()).some(c => c.id === tChanged), {
-      timeout: 15_000, timeoutMsg: "round 1's diff never drew the outdated thread",
+      timeout: 15_000, timeoutMsg: "iteration 1's diff never drew the outdated thread",
     });
     await flushEditorMeasure();
     const card = (await cards()).find(c => c.id === tChanged)!;
-    expect(card).toEqual({ id: tChanged, under: "line 4", chip: "Outdated in round 2" });
+    expect(card).toEqual({ id: tChanged, under: "line 4", chip: "Outdated in iteration 2" });
     const chipText = await browser.execute((tid) =>
       ([...document.querySelectorAll(`[data-task-id="${tid}"] [data-testid="diff-review-chip"]`)]
         .find(e => (e as HTMLElement).offsetParent !== null) as HTMLElement | undefined)?.innerText ?? null, taskId);
-    expect(chipText).toBe(`${reviewId} · Round 1`);
+    expect(chipText).toBe(`${reviewId} · Iteration 1`);
 
     // Reply-only: a standing selection offers no new thread.
     const selected = await browser.execute((tid) => {
@@ -184,9 +184,9 @@ describe("review rounds", () => {
     await flushEditorMeasure();
     expect(selected).toBe(true);
     expect(await browser.execute(() => document.querySelector(".tc-add-comment-btn") !== null)).toBe(false);
-    await snap("present-rounds-outdated.png");
+    await snap("present-iterations-outdated.png");
 
-    // A reply from the card still lands, stamped with the latest round.
+    // A reply from the card still lands, stamped with the latest iteration.
     await browser.execute((tid, th) => {
       const pane = [...document.querySelectorAll(`[data-task-id="${tid}"] [data-testid="diff-pane"]`)]
         .find(e => (e as HTMLElement).offsetParent !== null)!;
@@ -201,20 +201,20 @@ describe("review rounds", () => {
     await browser.waitUntil(async () => {
       const th = (await show()).threads.find((t: any) => t.id === tChanged);
       return th.comments.length === 2;
-    }, { timeout: 10_000, timeoutMsg: "the reply from round 1's view never reached the review" });
+    }, { timeout: 10_000, timeoutMsg: "the reply from iteration 1's view never reached the review" });
     const last = (await show()).threads.find((t: any) => t.id === tChanged).comments[1];
-    expect([last.by, last.round, last.body]).toEqual(["user", 2, `still relevant ${stamp}`]);
+    expect([last.by, last.iteration, last.body]).toEqual(["user", 2, `still relevant ${stamp}`]);
   });
 
   it("refuses an update with the same range", async () => {
     const r = await cliRpc({ cmd: "present_update", task: taskId, review: reviewId, head: "HEAD" });
 
     expect(r.ok).toBe(false);
-    expect(r.error.message).toContain(`round 2 of ${reviewId} is already`);
-    expect((await show()).rounds).toHaveLength(2);
+    expect(r.error.message).toContain(`iteration 2 of ${reviewId} is already`);
+    expect((await show()).iterations).toHaveLength(2);
   });
 
-  it("holds a new round's rebuild while a composer is open, then queues its draft as stale", async () => {
+  it("holds a new iteration's rebuild while a composer is open, then queues its draft as stale", async () => {
     /** The visible diff's line count, and whether it draws a draft card. */
     const pane = () => browser.execute((tid) => {
       const p = [...document.querySelectorAll(`[data-task-id="${tid}"] [data-testid="diff-pane"]`)]
@@ -224,10 +224,10 @@ describe("review rounds", () => {
     }, taskId) as Promise<{ lines: number | null; draft: boolean }>;
     await clickIn(`[data-testid="compare-file-row"][data-path="${FILE}"]`);
     await browser.waitUntil(async () => (await activeScope()) === `review:${reviewId}`, {
-      timeout: 10_000, timeoutMsg: "the row did not open the latest round",
+      timeout: 10_000, timeoutMsg: "the row did not open the latest iteration",
     });
     await browser.waitUntil(async () => (await cards()).length === 2, {
-      timeout: 15_000, timeoutMsg: "round 2's diff never built",
+      timeout: 15_000, timeoutMsg: "iteration 2's diff never built",
     });
     const before = (await pane()).lines!;
     await browser.execute((tid) => {
@@ -245,19 +245,19 @@ describe("review rounds", () => {
       (document.querySelector(".tc-comment-composer .tc-comment-textarea") as HTMLTextAreaElement).value = body;
     }, typed);
 
-    // One more line in at the top, so round 3 moves the shifted thread again.
+    // One more line in at the top, so iteration 3 moves the shifted thread again.
     const next = numbered(12);
     next[3] = "line four, rewritten";
     writeFileSync(path.join(cwd, FILE), ["top 1", "top 2", "top 3", ...next].join("\n") + "\n");
-    execGit(`git -C "${cwd}" commit -qam "rounds 3 ${stamp}"`);
+    execGit(`git -C "${cwd}" commit -qam "iterations 3 ${stamp}"`);
     const r = await cliRpc({ cmd: "present_update", task: taskId, review: reviewId, head: "HEAD" });
     expect(r.ok).toBe(true);
     await browser.waitUntil(async () => browser.execute(() =>
-      (document.querySelector('[data-testid="compare-review-round"]') as HTMLElement | null)?.innerText === "Round 3"),
-    { timeout: 10_000, timeoutMsg: "the webview never saw round 3" });
+      (document.querySelector('[data-testid="compare-review-iteration"]') as HTMLElement | null)?.innerText === "Iteration 3"),
+    { timeout: 10_000, timeoutMsg: "the webview never saw iteration 3" });
 
-    // The store is on round 3; the open view is still round 2's, text, cards
-    // and all: round 3's anchors would pin the moved card a line too low.
+    // The store is on iteration 3; the open view is still iteration 2's, text, cards
+    // and all: iteration 3's anchors would pin the moved card a line too low.
     await flushEditorMeasure();
     expect((await pane()).lines).toBe(before);
     expect((await cards()).find(c => c.id === tShifted)?.under).toBe("line 10");
@@ -267,7 +267,7 @@ describe("review rounds", () => {
     await browser.execute(() => (document.querySelector(".tc-comment-composer .tc-btn-queue") as HTMLElement).click());
 
     await browser.waitUntil(async () => (await pane()).lines === before + 1, {
-      timeout: 15_000, timeoutMsg: "closing the composer did not rebuild on round 3",
+      timeout: 15_000, timeoutMsg: "closing the composer did not rebuild on iteration 3",
     });
     await flushEditorMeasure();
     expect((await pane()).draft).toBe(false);
@@ -276,7 +276,7 @@ describe("review rounds", () => {
     await waitVisible('[data-state="stale"]');
     const row = await browser.execute(() => (document.querySelector('[data-state="stale"]') as HTMLElement).innerText);
     expect(row).toContain(typed);
-    expect(row).toContain("Written on round 2");
+    expect(row).toContain("Written on iteration 2");
     expect(await browser.execute(() =>
       (document.querySelector('[data-testid="review-comments-send"]') as HTMLButtonElement).disabled)).toBe(true);
     await browser.execute(() =>
@@ -284,9 +284,9 @@ describe("review rounds", () => {
   });
 });
 
-// The From/To picker after a rebase: "Round 1 -> 2" replays round 1's change
-// onto round 2's base, so upstream's commit stays out of the list.
-describe("review rounds picker", () => {
+// The From/To picker after a rebase: "Iteration 1 -> 2" replays iteration 1's change
+// onto iteration 2's base, so upstream's commit stays out of the list.
+describe("review iterations picker", () => {
   let taskId!: string;
   let cwd = "";
   let reviewId = "";
@@ -302,9 +302,9 @@ describe("review rounds picker", () => {
   const waitRows = (want: string[], msg: string) =>
     browser.waitUntil(async () => JSON.stringify(await rows()) === JSON.stringify(want), { timeout: 10_000, timeoutMsg: msg });
 
-  /** The From chip that is pressed, "base" or a round number. */
+  /** The From chip that is pressed, "base" or an iteration number. */
   const pressedFrom = () => browser.execute(() =>
-    document.querySelector('[data-testid="compare-round-from"][aria-pressed="true"]')?.getAttribute("data-from") ?? null);
+    document.querySelector('[data-testid="compare-iteration-from"][aria-pressed="true"]')?.getAttribute("data-from") ?? null);
 
   const authorCommit = (content: string, msg: string) => {
     writeFileSync(path.join(cwd, FILE), content);
@@ -330,7 +330,7 @@ describe("review rounds picker", () => {
     cwd = p;
     // The branch the task "rebases onto", at the task's start.
     execGit(`git -C "${cwd}" branch ${UP}`);
-    authorCommit("one\ntwo\nthree\n", "picker round 1");
+    authorCommit("one\ntwo\nthree\n", "picker iteration 1");
     const r = await cliRpc({ cmd: "present_new", task: taskId, range: `${UP}..HEAD`, title: "Picker", tab });
     expect(r.ok).toBe(true);
     reviewId = r.data.review.id;
@@ -341,7 +341,7 @@ describe("review rounds picker", () => {
     if (taskId) await archiveTask(taskId);
   });
 
-  it("Round 1 -> 2 is one click and lists only the author's changes after a rebase", async () => {
+  it("Iteration 1 -> 2 is one click and lists only the author's changes after a rebase", async () => {
     await ensureActiveTask(taskId);
     await openRightTab("Git");
     await waitVisible(`[data-testid="compare-panel"][data-review="${reviewId}"]`);
@@ -353,75 +353,75 @@ describe("review rounds picker", () => {
     execGit(`git -C "${tmp}" commit -q -m "upstream ${stamp}"`);
     execGit(`git -C "${cwd}" worktree remove --force "${tmp}"`);
     execGit(`git -C "${cwd}" rebase -q ${UP}`);
-    authorCommit("one\nTWO\nthree\n", "picker round 2");
+    authorCommit("one\nTWO\nthree\n", "picker iteration 2");
 
     const d = await update();
 
-    expect(d.round).toBe(2);
-    await waitVisible('[data-testid="compare-rounds"]');
+    expect(d.iteration).toBe(2);
+    await waitVisible('[data-testid="compare-iterations"]');
     expect(await pressedFrom()).toBe("base");
-    await waitRows([`${FILE} A`], "round 2 against its base did not list only the author's file");
+    await waitRows([`${FILE} A`], "iteration 2 against its base did not list only the author's file");
 
-    await clickIn('[data-testid="compare-round-from"][data-from="1"]');
+    await clickIn('[data-testid="compare-iteration-from"][data-from="1"]');
 
-    // A plain round 1 head..round 2 head would list upstream.txt as added too.
-    await waitRows([`${FILE} M`], "Round 1 -> 2 did not list only the author's second change");
+    // A plain iteration 1 head..iteration 2 head would list upstream.txt as added too.
+    await waitRows([`${FILE} M`], "Iteration 1 -> 2 did not list only the author's second change");
     expect(await browser.execute(() => (document.querySelector('[data-testid="compare-summary"]') as HTMLElement).innerText))
       .toContain("+1");
     expect(await browser.execute(() => document.querySelector('[data-testid="compare-review-fallback"]') === null)).toBe(true);
-    await snap("present-rounds-picker.png");
+    await snap("present-iterations-picker.png");
 
     await clickIn(`[data-testid="compare-file-row"][data-path="${FILE}"]`);
     await browser.waitUntil(async () => {
       const chip = await browser.execute((tid) =>
         ([...document.querySelectorAll(`[data-task-id="${tid}"] [data-testid="diff-review-chip"]`)]
           .find(e => (e as HTMLElement).offsetParent !== null) as HTMLElement | undefined)?.innerText ?? null, taskId);
-      return chip === `${reviewId} · Round 1 → 2`;
-    }, { timeout: 10_000, timeoutMsg: "the file did not open as the Round 1 -> 2 diff" });
+      return chip === `${reviewId} · Iteration 1 → 2`;
+    }, { timeout: 10_000, timeoutMsg: "the file did not open as the Iteration 1 -> 2 diff" });
 
-    await clickIn('[data-testid="compare-round-from"][data-from="base"]');
+    await clickIn('[data-testid="compare-iteration-from"][data-from="base"]');
 
-    await waitRows([`${FILE} A`], "Base did not bring back round 2 against its base");
+    await waitRows([`${FILE} A`], "Base did not bring back iteration 2 against its base");
   });
 
-  it("--show sets the first view, the picker overrides it, a new round resets it", async () => {
-    authorCommit("one\nTWO\nthree\nfour\n", "picker round 3");
+  it("--show sets the first view, the picker overrides it, a new iteration resets it", async () => {
+    authorCommit("one\nTWO\nthree\nfour\n", "picker iteration 3");
 
     const d = await update({ show: "1" });
 
-    expect([d.round, d.default_from]).toEqual([3, 1]);
+    expect([d.iteration, d.default_from]).toEqual([3, 1]);
     await browser.waitUntil(async () => (await pressedFrom()) === "1",
-      { timeout: 10_000, timeoutMsg: "--show 1 did not make Round 1 the first view" });
+      { timeout: 10_000, timeoutMsg: "--show 1 did not make Iteration 1 the first view" });
 
-    await clickIn('[data-testid="compare-round-from"][data-from="base"]');
+    await clickIn('[data-testid="compare-iteration-from"][data-from="base"]');
 
     await browser.waitUntil(async () => (await pressedFrom()) === "base",
       { timeout: 10_000, timeoutMsg: "Base did not override the agent's default" });
     const r = await cliRpc({ cmd: "present_show", task: taskId, review: reviewId });
     expect(r.data.review.default_from).toBe(1);
 
-    authorCommit("one\nTWO\nthree\nfour\nfive\n", "picker round 4");
+    authorCommit("one\nTWO\nthree\nfour\nfive\n", "picker iteration 4");
     await update();
 
     await browser.waitUntil(async () => (await pressedFrom()) === "1",
-      { timeout: 10_000, timeoutMsg: "a new round did not drop the viewer's pick for the default" });
+      { timeout: 10_000, timeoutMsg: "a new iteration did not drop the viewer's pick for the default" });
   });
 
-  it("the To dropdown keeps a From below the picked round and resets one at or past it to Base", async () => {
+  it("the To dropdown keeps a From below the picked iteration and resets one at or past it to Base", async () => {
     // Radix opens on pointerdown, so a bare .click() isn't enough.
-    const pickTo = async (round: number) => {
+    const pickTo = async (iteration: number) => {
       await browser.execute(() => {
-        const el = document.querySelector('[data-testid="compare-round-to"]') as HTMLElement;
+        const el = document.querySelector('[data-testid="compare-iteration-to"]') as HTMLElement;
         const opts = { bubbles: true, pointerType: "mouse", button: 0 } as PointerEventInit;
         el.dispatchEvent(new PointerEvent("pointerdown", opts));
         el.dispatchEvent(new PointerEvent("pointerup", opts));
         el.click();
       });
-      await waitVisible(`[data-testid="compare-round-to-item"][data-to="${round}"]`);
-      await clickIn(`[data-testid="compare-round-to-item"][data-to="${round}"]`);
+      await waitVisible(`[data-testid="compare-iteration-to-item"][data-to="${iteration}"]`);
+      await clickIn(`[data-testid="compare-iteration-to-item"][data-to="${iteration}"]`);
     };
     const shownTo = () => browser.execute(() =>
-      document.querySelector('[data-testid="compare-round-to"]')?.getAttribute("data-to") ?? null);
+      document.querySelector('[data-testid="compare-iteration-to"]')?.getAttribute("data-to") ?? null);
     /** Rows can be the previous view's until the new range lands, so wait on
      *  the shown range's own from/to (the tail of its key). */
     const waitRange = (fromTo: string, msg: string) => browser.waitUntil(async () => browser.execute((ft) =>
@@ -431,16 +431,16 @@ describe("review rounds picker", () => {
     await pickTo(2);
 
     await browser.waitUntil(async () => (await shownTo()) === "2" && (await pressedFrom()) === "1",
-      { timeout: 10_000, timeoutMsg: "To round 2 did not keep From round 1" });
-    await waitRange("/1/2", "the Round 1 -> 2 range never landed");
-    await waitRows([`${FILE} M`], "Round 1 -> 2 was not listed after picking To round 2");
+      { timeout: 10_000, timeoutMsg: "To iteration 2 did not keep From iteration 1" });
+    await waitRange("/1/2", "the Iteration 1 -> 2 range never landed");
+    await waitRows([`${FILE} M`], "Iteration 1 -> 2 was not listed after picking To iteration 2");
 
     await pickTo(1);
 
     await browser.waitUntil(async () => (await shownTo()) === "1" && (await pressedFrom()) === "base",
-      { timeout: 10_000, timeoutMsg: "To round 1 did not reset From round 1 to Base" });
-    // Round 1 against its own base, from before the rebase.
-    await waitRange("//1", "the round 1 range never landed");
-    await waitRows([`${FILE} A`], "round 1 against its base was not listed");
+      { timeout: 10_000, timeoutMsg: "To iteration 1 did not reset From iteration 1 to Base" });
+    // Iteration 1 against its own base, from before the rebase.
+    await waitRange("//1", "the iteration 1 range never landed");
+    await waitRows([`${FILE} A`], "iteration 1 against its base was not listed");
   });
 });

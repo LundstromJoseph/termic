@@ -31,13 +31,13 @@
 // edited. That is what makes this the surface for reviewing a whole feature.
 //
 // Review mode: while the reviews store `shown`s one of the task's
-// agent-presented reviews, the panel lists its latest round's `base..head`
+// agent-presented reviews, the panel lists its latest iteration's `base..head`
 // range instead (docs/ui.md "Agent-presented reviews"). The bar names the
 // review, rows open `review:<id>` diffs and carry thread counts, and nothing
 // is fingerprinted, so there are no viewed marks. The branch compare's state
 // survives untouched underneath for "Back to branch compare". A review with
-// two or more rounds adds a From/To bar: which round to show, from its base
-// or from an earlier round's change (replayed onto its base, Rust side).
+// two or more iterations adds a From/To bar: which iteration to show, from its base
+// or from an earlier iteration's change (replayed onto its base, Rust side).
 
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -149,10 +149,10 @@ export function ComparePanel({ task, repoDir, search, viewMode, reloadToken, onO
   const rv = useMemo(() => review ? effectiveView(review, pick) : null, [review, pick]);
   const viewFrom = rv?.from ?? null;
   const viewTo = rv?.to ?? null;
-  const reviewKey = review ? `${task.id}/${review.id}/${review.rounds.length}/${viewFrom ?? ""}/${viewTo ?? ""}` : null;
-  /** The shown review's file list, keyed by task/review/round/view. A round's
+  const reviewKey = review ? `${task.id}/${review.id}/${review.iterations.length}/${viewFrom ?? ""}/${viewTo ?? ""}` : null;
+  /** The shown review's file list, keyed by task/review/iteration/view. An iteration's
    *  range never changes, so it is read on a view change and never on reloadToken.
-   *  `k` and `n` are the rounds it was read for: kept rows keep their own labels
+   *  `k` and `n` are the iterations it was read for: kept rows keep their own labels
    *  while the picker already names the next view. */
   const [range, setRange] = useState<{
     key: string; k: number | null; n: number;
@@ -191,14 +191,14 @@ export function ComparePanel({ task, repoDir, search, viewMode, reloadToken, onO
     setSelected(null);
     if (!review || !reviewKey || (range?.key === reviewKey && !range.err)) return;
     let alive = true;
-    const rounds = { key: reviewKey, k: viewFrom, n: viewTo ?? review.rounds.length };
+    const iterations = { key: reviewKey, k: viewFrom, n: viewTo ?? review.iterations.length };
     taskReviewRange(task.id, review.id, viewFrom, viewTo)
       .then(r => {
-        if (alive) setRange({ ...rounds, cmp: r.compare, err: null, fallback: r.mode === "fallback", upstream: new Set(r.upstream) });
+        if (alive) setRange({ ...iterations, cmp: r.compare, err: null, fallback: r.mode === "fallback", upstream: new Set(r.upstream) });
       })
-      .catch(e => { if (alive) setRange({ ...rounds, cmp: null, err: String(e), fallback: false, upstream: new Set() }); });
+      .catch(e => { if (alive) setRange({ ...iterations, cmp: null, err: String(e), fallback: false, upstream: new Set() }); });
     return () => { alive = false; };
-    // A new seq in the same round is a new comment, not a new range.
+    // A new seq in the same iteration is a new comment, not a new range.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reviewKey]);
 
@@ -214,9 +214,9 @@ export function ComparePanel({ task, repoDir, search, viewMode, reloadToken, onO
     if (!review) return null;
     const m = new Map<string, number>();
     // The threads drawn in each file's diff (threadsInView): on the latest
-    // round the live ones, on an older one those opened on it, where opened.
+    // iteration the live ones, on an older one those opened on it, where opened.
     for (const th of review.threads) {
-      if (th.resolved || (viewTo == null ? th.outdated : th.round !== viewTo)) continue;
+      if (th.resolved || (viewTo == null ? th.outdated : th.iteration !== viewTo)) continue;
       const file = viewTo == null ? th.file : threadAnchor(th).file;
       m.set(file, (m.get(file) ?? 0) + 1);
     }
@@ -280,13 +280,13 @@ export function ComparePanel({ task, repoDir, search, viewMode, reloadToken, onO
   }, [view.cmp, dir, review, viewFrom, viewTo, openReviewDiff, onOpenDiff]);
 
   // An outdated thread's lines are gone from the latest head: it opens on the
-  // round it was made on, where they still are. A live thread is on the latest
-  // round, so it keeps the picked From only while the view shows that round.
+  // iteration it was made on, where they still are. A live thread is on the latest
+  // iteration, so it keeps the picked From only while the view shows that iteration.
   const openThread = useCallback((th: ReviewThread) => {
     if (!review) return;
     const file = th.outdated ? threadAnchor(th).file : th.file;
     setSelected(file);
-    if (th.outdated) openReviewDiff(review, file, null, th.round, th.id);
+    if (th.outdated) openReviewDiff(review, file, null, th.iteration, th.id);
     else openReviewDiff(review, file, viewTo == null ? viewFrom : null, null, th.id);
   }, [review, viewFrom, viewTo, openReviewDiff]);
 
@@ -331,10 +331,10 @@ export function ComparePanel({ task, repoDir, search, viewMode, reloadToken, onO
           same 32px it was. */}
       {review ? (<>
         <ReviewBar task={task} review={review} reviewIds={reviewIds} />
-        {review.rounds.length >= 2 && (
-          <ReviewRoundsBar
+        {review.iterations.length >= 2 && (
+          <ReviewIterationsBar
             review={review} from={viewFrom} to={viewTo}
-            onPick={(from, to) => useReviews.getState().setView(task.id, review.id, from, to, review.rounds.length)}
+            onPick={(from, to) => useReviews.getState().setView(task.id, review.id, from, to, review.iterations.length)}
           />
         )}
       </>) : (
@@ -557,9 +557,9 @@ function ReviewBar({ task, review, reviewIds }: { task: Task; review: Review; re
         <ArrowRight className="h-3 w-3 shrink-0 text-[var(--color-fg-faint)]" />
         <span className="truncate" title={review.head.slice(0, 7)}>{review.head_ref}</span>
       </span>
-      {review.rounds.length >= 2 && (
-        <span data-testid="compare-review-round" className="shrink-0 rounded bg-[var(--color-bg-3)] px-1.5 text-[10.5px] text-[var(--color-fg-dim)]">
-          {t("compare.review.round", { n: review.rounds.length })}
+      {review.iterations.length >= 2 && (
+        <span data-testid="compare-review-iteration" className="shrink-0 rounded bg-[var(--color-bg-3)] px-1.5 text-[10.5px] text-[var(--color-fg-dim)]">
+          {t("compare.review.iteration", { n: review.iterations.length })}
         </span>
       )}
       <span className="ml-auto shrink-0 text-[var(--color-fg-faint)]" data-testid="compare-review-author">
@@ -569,40 +569,40 @@ function ReviewBar({ task, review, reviewIds }: { task: Task; review: Review; re
   );
 }
 
-/** Which rounds the review list and its diffs show. From chips: the to-round's
- *  base, or an earlier round's change, one click each; To: any round. */
-function ReviewRoundsBar({ review, from, to, onPick }: {
+/** Which iterations the review list and its diffs show. From chips: the to-iteration's
+ *  base, or an earlier iteration's change, one click each; To: any iteration. */
+function ReviewIterationsBar({ review, from, to, onPick }: {
   review: Review;
   from: number | null;
   to: number | null;
   onPick: (from: number | null, to: number | null) => void;
 }) {
   const { t } = useTranslation("panels");
-  const n = review.rounds.length;
+  const n = review.iterations.length;
   const end = to ?? n;
-  const chip = (round: number | null) => (
+  const chip = (iteration: number | null) => (
     <button
-      key={round ?? "base"}
+      key={iteration ?? "base"}
       type="button"
-      data-testid="compare-round-from"
-      data-from={round ?? "base"}
-      aria-pressed={from === round}
-      title={round == null
-        ? t("compare.review.baseTip", { n: end, base: review.rounds[end - 1].base_ref })
-        : t("compare.review.fromTip", { k: round, n: end })}
-      onClick={() => onPick(round, to)}
+      data-testid="compare-iteration-from"
+      data-from={iteration ?? "base"}
+      aria-pressed={from === iteration}
+      title={iteration == null
+        ? t("compare.review.baseTip", { n: end, base: review.iterations[end - 1].base_ref })
+        : t("compare.review.fromTip", { k: iteration, n: end })}
+      onClick={() => onPick(iteration, to)}
       className={cn(
         "h-5 shrink-0 rounded px-1.5",
-        from === round
+        from === iteration
           ? "bg-[var(--color-sel)] text-[var(--color-fg)]"
           : "text-[var(--color-fg-dim)] hover:bg-[var(--color-hover)] hover:text-[var(--color-fg)]",
       )}
     >
-      {round == null ? t("compare.review.base") : t("compare.review.round", { n: round })}
+      {iteration == null ? t("compare.review.base") : t("compare.review.iteration", { n: iteration })}
     </button>
   );
   return (
-    <div data-testid="compare-rounds" className="flex min-h-7 shrink-0 flex-wrap items-center gap-1 border-b border-[var(--color-border-soft)] px-2 py-1 text-[11px]">
+    <div data-testid="compare-iterations" className="flex min-h-7 shrink-0 flex-wrap items-center gap-1 border-b border-[var(--color-border-soft)] px-2 py-1 text-[11px]">
       <span className="shrink-0 text-[var(--color-fg-faint)]">{t("compare.review.from")}</span>
       {chip(null)}
       {Array.from({ length: end - 1 }, (_, i) => chip(i + 1))}
@@ -610,26 +610,26 @@ function ReviewRoundsBar({ review, from, to, onPick }: {
       <DropdownRoot>
         <DropdownTrigger asChild>
           <button
-            data-testid="compare-round-to"
+            data-testid="compare-iteration-to"
             data-to={end}
             title={t("compare.review.toTip")}
             className="flex h-5 shrink-0 items-center gap-1 rounded border border-[var(--color-border)] bg-[var(--color-bg)] px-1.5 text-[var(--color-fg)] hover:border-[var(--color-accent-soft)]"
           >
-            {t("compare.review.round", { n: end })}
+            {t("compare.review.iteration", { n: end })}
             <ChevronDown className="h-3 w-3 shrink-0 text-[var(--color-fg-faint)]" />
           </button>
         </DropdownTrigger>
         <DropdownMenu align="start">
-          {review.rounds.map((_, i) => (
+          {review.iterations.map((_, i) => (
             <DropdownItem
               key={i}
-              data-testid="compare-round-to-item"
+              data-testid="compare-iteration-to-item"
               data-to={i + 1}
               onSelect={() => { const v = pickTo(from, i + 1, n); onPick(v.from, v.to); }}
               className="items-center"
             >
               <Check className={cn("h-3.5 w-3.5 shrink-0", i + 1 !== end && "opacity-0")} />
-              <span className="text-[12px]">{t("compare.review.round", { n: i + 1 })}</span>
+              <span className="text-[12px]">{t("compare.review.iteration", { n: i + 1 })}</span>
             </DropdownItem>
           ))}
         </DropdownMenu>
@@ -768,7 +768,7 @@ function Row({ row, taskId, root, repoDir, threads, upstream, selected, onOpen, 
   repoDir: string;
   /** Review mode: the file's thread count, shown in place of draft comments. */
   threads?: number;
-  /** Round K -> N: the replay conflicted here, so the diff includes upstream changes. */
+  /** Iteration K -> N: the replay conflicted here, so the diff includes upstream changes. */
   upstream?: { k: number; n: number };
   selected: boolean;
   onOpen: (path: string) => void;

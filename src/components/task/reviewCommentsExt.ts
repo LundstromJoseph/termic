@@ -60,7 +60,7 @@ interface CommentData {
 export interface ReviewSurface {
   /** "pill" = labelled button over the selection (diff). "gutter" = a bare
    *  icon on the selection's first line (editor). "none" = no new comments
-   *  (an older round of a review, which takes replies only). */
+   *  (an older iteration of a review, which takes replies only). */
   selection: "pill" | "gutter" | "none";
   /** Per-line "＋ comment" button that follows the mouse. Diff only. */
   hoverGutter: boolean;
@@ -275,7 +275,7 @@ class ThreadCardWidget extends WidgetType {
   constructor(readonly thread: ReviewThread, readonly expanded: boolean, readonly ctx: CommentTarget) { super(); }
 
   // A thread changes by growing (comments are appended, never edited), by
-  // being resolved or reopened, by moving or going outdated in a new round
+  // being resolved or reopened, by moving or going outdated in a new iteration
   // (the card shows its lines), or by the user expanding or collapsing it.
   eq(other: ThreadCardWidget) {
     const a = other.thread, b = this.thread;
@@ -408,14 +408,14 @@ function commentTooltips(state: EditorState, surface: ReviewSurface): readonly T
 // ── Store subscription plugin ────────────────────────────────────────────────
 
 /** A review diff holds only that review's drafts, a plain diff only plain ones.
- *  A new-thread draft written on another round than the one drawn is left out:
- *  its lines belong to that round's head. */
+ *  A new-thread draft written on another iteration than the one drawn is left out:
+ *  its lines belong to that iteration's head. */
 function commentsForFile(ctx: CommentTarget): ReviewComment[] {
   const all = useReviewComments.getState().byTask[ctx.taskId] ?? [];
-  const otherRound = (c: ReviewComment) =>
-    !c.threadId && c.reviewRound != null && ctx.drawRound != null && c.reviewRound !== ctx.drawRound;
+  const otherIteration = (c: ReviewComment) =>
+    !c.threadId && c.reviewIteration != null && ctx.drawIteration != null && c.reviewIteration !== ctx.drawIteration;
   return all
-    .filter((c) => c.file === ctx.file && c.reviewId === ctx.reviewId && !otherRound(c))
+    .filter((c) => c.file === ctx.file && c.reviewId === ctx.reviewId && !otherIteration(c))
     .slice()
     // Sort by line, then by id as a stable tiebreaker so comments sharing a
     // line (or both file-level) keep a deterministic order — otherwise the
@@ -455,12 +455,12 @@ function storeSyncPlugin(ctx: CommentTarget) {
   });
 }
 
-/** The shown review's threads on `file` in round `to` (the latest when null),
+/** The shown review's threads on `file` in iteration `to` (the latest when null),
  *  kept in step with the reviews store. Same two guards as storeSyncPlugin.
- *  The signature carries what a card shows besides its comments: a new round
+ *  The signature carries what a card shows besides its comments: a new iteration
  *  moves lines or outdates a thread without adding a comment.
- *  A latest-following view built on round `built` skips the pushes of a newer
- *  round: their anchors belong to a head it does not show, and the host
+ *  A latest-following view built on iteration `built` skips the pushes of a newer
+ *  iteration: their anchors belong to a head it does not show, and the host
  *  rebuilds it (after any open composer closes). */
 function reviewSyncPlugin(taskId: string, reviewId: string, file: string, to: number | null, built: number) {
   return ViewPlugin.define((view): PluginValue => {
@@ -471,9 +471,9 @@ function reviewSyncPlugin(taskId: string, reviewId: string, file: string, to: nu
       if (destroyed) return;
       const review = selectReview(taskId, reviewId)(useReviews.getState());
       // Mounted before the store loaded: the host does not rebuild on that
-      // load, so the view shows the round the first push sees.
-      if (review && to == null && !shown) shown = review.rounds.length;
-      if (review && to == null && review.rounds.length !== shown) return;
+      // load, so the view shows the iteration the first push sees.
+      if (review && to == null && !shown) shown = review.iterations.length;
+      if (review && to == null && review.iterations.length !== shown) return;
       const threads = review ? threadsInView(review, file, to) : [];
       const sig = JSON.stringify(threads.map(t =>
         [t.id, t.comments.length, !!t.resolved, t.file, t.start_line, t.end_line, t.outdated ?? 0]));
@@ -716,17 +716,17 @@ function composerListener(onComposer: (open: boolean) => void): Extension {
  *  defaults to the diff pane's loud affordances; editors pass the quiet set.
  *  With `reviewId` (a `review:` diff) it also shows that review's threads, and
  *  every comment written here joins that review instead of the plain list.
- *  `view.to` is the round shown (null = latest) and `view.round` the review's
- *  latest round, which new threads are stamped with. `view.onComposer` hears
+ *  `view.to` is the iteration shown (null = latest) and `view.iteration` the review's
+ *  latest iteration, which new threads are stamped with. `view.onComposer` hears
  *  a composer open and close. */
 export function reviewCommentsExtension(
   taskId: string, file: string, surface: ReviewSurface = DIFF_SURFACE, reviewId?: string,
-  view: { to: number | null; round: number; onComposer?: (open: boolean) => void } = { to: null, round: 0 },
+  view: { to: number | null; iteration: number; onComposer?: (open: boolean) => void } = { to: null, iteration: 0 },
 ) {
   const ctx: CommentTarget = {
     taskId, file, source: surface.source,
     ...(reviewId ? { reviewId } : {}),
-    ...(reviewId && view.round ? { reviewRound: view.round, drawRound: view.to ?? view.round } : {}),
+    ...(reviewId && view.iteration ? { reviewIteration: view.iteration, drawIteration: view.to ?? view.iteration } : {}),
   };
 
   const decoField = StateField.define<DecorationSet>({
@@ -750,7 +750,7 @@ export function reviewCommentsExtension(
   });
 
   return [
-    ...(reviewId ? [reviewSyncPlugin(taskId, reviewId, file, view.to, view.round)] : []),
+    ...(reviewId ? [reviewSyncPlugin(taskId, reviewId, file, view.to, view.iteration)] : []),
     dataField,
     hoverLineField,
     decoField,

@@ -5,7 +5,7 @@ new|comment|reply|show|list|claim`, Compare review mode, thread cards,
 single and batch Send through the agent queue) shipped on the
 `review-improvements` branch, and resolve / unresolve (`present
 resolve|unresolve`, the Resolved chip, collapsed cards), the Compare
-thread list and rounds (`present update`, outdated threads, the From/To
+thread list and iterations (`present update`, outdated threads, the From/To
 picker with the replayed interdiff) on `present-v2`.
 This file lists what was deliberately left
 out of it, plus gaps found while building and smoke-testing it.

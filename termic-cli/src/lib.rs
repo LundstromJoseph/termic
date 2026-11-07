@@ -1684,11 +1684,11 @@ there instead. `present resolve r1-t3` marks a thread settled and \
 too, and neither verb sends the user anything.
 
 After an amend, rebase or new commit, `present update r1 --head HEAD` starts \
-the next round of the same review: threads whose lines did not change move \
+the next iteration of the same review: threads whose lines did not change move \
 with the code, the rest are marked outdated and listed in the reply. Without \
---base the round's base is the last round's base rev resolved again, so a \
+--base the iteration's base is the last iteration's base rev resolved again, so a \
 rebase onto a moved main needs nothing more; pass --base when it was \
-relative (HEAD~3). `--show 1` makes round 1 -> latest the view the user sees \
+relative (HEAD~3). `--show 1` makes iteration 1 -> latest the view the user sees \
 first, `--show full` the whole range. Revs are anything git resolves to a \
 commit (main, HEAD~3, a sha); A..B shows what B adds since it branched from \
 A, and three dots are refused. -m - reads the comment from stdin. Without --task, \
@@ -1702,7 +1702,7 @@ With --output-format json, `new` and `show` print {\"task_id\", \"task\", \
 \"thread_id\", \"seq\", \"new_thread\"}; `resolve` and `unresolve` print \
 {\"task_id\", \"review_id\", \"thread_id\", \"resolved\", \"changed\"}; `list` \
 prints {\"task_id\", \"task\", \"reviews\"}; `update` prints {\"task_id\", \
-\"task\", \"review_id\", \"round\", \"base\", \"head\", \"base_ref\", \
+\"task\", \"review_id\", \"iteration\", \"base\", \"head\", \"base_ref\", \
 \"head_ref\", \"files\", \"files_truncated\", \"default_from\", \"outdated\"}.
 
 Exit codes: 0 ok, 1 error (unknown task, review or thread; a range, line, \
@@ -1823,19 +1823,19 @@ pub enum PresentCmd {
         #[command(flatten)]
         target: PresentTarget,
     },
-    /// Start a review's next round after an amend, rebase or new commit.
+    /// Start a review's next iteration after an amend, rebase or new commit.
     #[command(after_help = PRESENT_AFTER_HELP)]
     Update {
         /// The review id (r1).
         review: String,
-        /// The new round's head (e.g. HEAD).
+        /// The new iteration's head (e.g. HEAD).
         #[arg(long, value_name = "REV")]
         head: String,
-        /// The new round's base. Default: the last round's base rev, resolved again.
+        /// The new iteration's base. Default: the last iteration's base rev, resolved again.
         #[arg(long, value_name = "REV")]
         base: Option<String>,
-        /// The view the user sees first: full, or a round number to show
-        /// what changed since that round.
+        /// The view the user sees first: full, or an iteration number to show
+        /// what changed since that iteration.
         #[arg(long, value_name = "full|N")]
         show: Option<String>,
         #[command(flatten)]

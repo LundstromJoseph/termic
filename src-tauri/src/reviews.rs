@@ -4,13 +4,13 @@
 //! thread or a Tauri command. Reads take no lock: `write_atomic` never
 //! exposes a torn file.
 //!
-//! A review has rounds. `present new` opens round 1; `present update` after
+//! A review has iterations. `present new` opens iteration 1; `present update` after
 //! an amend, rebase or new commit adds the next, and the top-level range and
-//! files mirror the latest. Each round's base and head are pinned by hidden
-//! refs (see `review_rounds`), so a rebased-away round stays readable. On an
+//! files mirror the latest. Each iteration's base and head are pinned by hidden
+//! refs (see `review_iterations`), so a rebased-away iteration stays readable. On an
 //! update, threads move from the old head to the new one: a line thread in
 //! an unchanged stretch shifts, renames follow, and anything else is marked
-//! outdated in that round and stays at its last live anchor.
+//! outdated in that iteration and stays at its last live anchor.
 //!
 //! The folder lives inside the task's scratch dir, so `delete_task_file`'s
 //! purge removes it and archiving leaves it alone, like the task's pads.
@@ -22,8 +22,8 @@ use std::path::{Path, PathBuf};
 use termic_proto::{
     review_author_problem, review_body_problem, review_id_problem, review_range_problem,
     review_thread_id_problem, review_title_problem, split_thread_id, Review, ReviewBy, ReviewComment,
-    ReviewOutdated, ReviewResolved, ReviewRound, ReviewThread,
-    REVIEW_COMMENTS_PER_THREAD_MAX, REVIEW_QUOTE_MAX, REVIEW_ROUNDS_MAX, REVIEW_THREADS_MAX,
+    ReviewOutdated, ReviewResolved, ReviewIteration, ReviewThread,
+    REVIEW_COMMENTS_PER_THREAD_MAX, REVIEW_QUOTE_MAX, REVIEW_ITERATIONS_MAX, REVIEW_THREADS_MAX,
 };
 
 use crate::Task;
@@ -39,9 +39,9 @@ pub(crate) struct NewReview {
     pub dir_name: String,
 }
 
-/// `present update`: the next round's head, and its base when not the last
-/// round's base_ref resolved again. `show` None keeps `default_from`.
-pub(crate) struct NewRound {
+/// `present update`: the next iteration's head, and its base when not the last
+/// iteration's base_ref resolved again. `show` None keeps `default_from`.
+pub(crate) struct NewIteration {
     pub head: String,
     pub base: Option<String>,
     pub show: Option<Option<u32>>,
@@ -50,7 +50,7 @@ pub(crate) struct NewRound {
 pub(crate) enum ReviewOp {
     /// Opens a thread. `lines` None is a file-level thread. `quote` Some is
     /// the text the UI already shows; None reads it from the head commit.
-    /// `round` Some is the round the user wrote it on, refused once stale.
+    /// `iteration` Some is the iteration the user wrote it on, refused once stale.
     Comment {
         file: String,
         lines: Option<(u32, u32)>,
@@ -58,7 +58,7 @@ pub(crate) enum ReviewOp {
         by: ReviewBy,
         author: String,
         quote: Option<String>,
-        round: Option<u32>,
+        iteration: Option<u32>,
     },
     Reply { thread_id: String, body: String, by: ReviewBy, author: String },
     Claim { tab: String, author: Option<String> },
@@ -101,9 +101,9 @@ pub(crate) struct ReviewPostItem {
     pub end_line: Option<u32>,
     pub quote: Option<String>,
     pub body: String,
-    /// The round the new thread was written on.
+    /// The iteration the new thread was written on.
     #[serde(default)]
-    pub round: Option<u32>,
+    pub iteration: Option<u32>,
 }
 
 #[derive(serde::Serialize)]
@@ -129,7 +129,7 @@ pub(crate) fn post(task: &Task, review_id: &str, items: Vec<ReviewPostItem>) -> 
                 by: ReviewBy::User,
                 author: String::new(),
                 quote: i.quote,
-                round: i.round,
+                iteration: i.iteration,
             }),
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -240,14 +240,14 @@ pub(crate) fn create(task: &Task, req: NewReview) -> Result<Review, ReviewError>
     // Numbered from file NAMES, so a corrupt r3.json still holds r3.
     let last = numbers(&dir).into_iter().max().unwrap_or(0);
     let id = format!("r{}", last + 1);
-    crate::review_rounds::pin(&cwd, &task.id, &id, 1, &base, &head).map_err(ReviewError::Git)?;
+    crate::review_iterations::pin(&cwd, &task.id, &id, 1, &base, &head).map_err(ReviewError::Git)?;
     let created_at = now();
     let review = Review {
         version: 1,
         id,
         task_id: task.id.clone(),
         dir_name: req.dir_name,
-        rounds: vec![ReviewRound {
+        iterations: vec![ReviewIteration {
             base: base.clone(),
             head: head.clone(),
             base_ref: base_ref.to_string(),
@@ -290,9 +290,9 @@ fn read(dir: &Path, id: &str) -> Result<Review, ReviewError> {
     };
     let mut review: Review =
         serde_json::from_str(&text).map_err(|e| ReviewError::Io(format!("{}: {e}", path.display())))?;
-    // Written before rounds: its one range is round 1.
-    if review.rounds.is_empty() {
-        review.rounds.push(ReviewRound {
+    // Written before iterations: its one range is iteration 1.
+    if review.iterations.is_empty() {
+        review.iterations.push(ReviewIteration {
             base: review.base.clone(),
             head: review.head.clone(),
             base_ref: review.base_ref.clone(),
@@ -306,7 +306,7 @@ fn read(dir: &Path, id: &str) -> Result<Review, ReviewError> {
         return Err(ReviewError::Io(format!("{} holds review {}", path.display(), review.id)));
     }
     // The stored shas reach git as revs, so a hand-edited file must not slip in a flag.
-    let mut shas = std::iter::once((&review.base, &review.head)).chain(review.rounds.iter().map(|r| (&r.base, &r.head)));
+    let mut shas = std::iter::once((&review.base, &review.head)).chain(review.iterations.iter().map(|r| (&r.base, &r.head)));
     if !shas.all(|(b, h)| crate::is_commit_ish(b) && crate::is_commit_ish(h)) {
         return Err(ReviewError::Io(format!("{}: review ranges must be commit shas", path.display())));
     }
@@ -340,25 +340,25 @@ pub(crate) fn apply(task: &Task, review_id: &str, ops: Vec<ReviewOp>) -> Result<
     }
     let dir = reviews_dir(task)?;
     // Quotes are read BEFORE the lock: a git process per comment must not
-    // hold up every other task's review writes. A round can start meanwhile,
+    // hold up every other task's review writes. An iteration can start meanwhile,
     // which the head check below catches.
     let (ops, quoted_at) = with_quotes(task, &read(&dir, review_id)?, ops)?;
     let _g = REVIEW_LOCK.lock();
     let stored = read(&dir, review_id)?;
-    let latest = stored.rounds.len() as u32;
+    let latest = stored.iterations.len() as u32;
     if quoted_at.is_some_and(|h| h != stored.head) {
         return Err(ReviewError::Invalid(format!(
-            "review {review_id} moved to round {latest} while this comment was posted; comment on the new round"
+            "review {review_id} moved to iteration {latest} while this comment was posted; comment on the new iteration"
         )));
     }
     let mut r = stored.clone();
     let mut posted = Vec::new();
     for op in ops {
         match op {
-            ReviewOp::Comment { file, lines, body, by, author, quote, round } => {
-                if let Some(k) = round.filter(|k| *k != latest) {
+            ReviewOp::Comment { file, lines, body, by, author, quote, iteration } => {
+                if let Some(k) = iteration.filter(|k| *k != latest) {
                     return Err(ReviewError::Invalid(format!(
-                        "this comment was written on round {k} of {review_id}, which is now on round {latest}; comment on the new diff"
+                        "this comment was written on iteration {k} of {review_id}, which is now on iteration {latest}; comment on the new diff"
                     )));
                 }
                 if let Some((start, end)) = lines {
@@ -385,7 +385,7 @@ pub(crate) fn apply(task: &Task, review_id: &str, ops: Vec<ReviewOp>) -> Result<
                     quote: quote.chars().take(REVIEW_QUOTE_MAX).collect(),
                     comments: vec![comment],
                     resolved: None,
-                    round: latest,
+                    iteration: latest,
                     origin: None,
                     outdated: None,
                 });
@@ -470,7 +470,7 @@ fn new_comment(r: &mut Review, by: ReviewBy, author: &str, body: &str) -> Result
         return Err(ReviewError::Invalid(p));
     }
     r.seq += 1;
-    Ok(ReviewComment { seq: r.seq, by, author: trimmed(author), body: trimmed(body), at: now(), round: r.rounds.len() as u32 })
+    Ok(ReviewComment { seq: r.seq, by, author: trimmed(author), body: trimmed(body), at: now(), iteration: r.iterations.len() as u32 })
 }
 
 /// Fills `quote` from the head commit on every line comment that has none,
@@ -482,7 +482,7 @@ fn with_quotes(task: &Task, r: &Review, ops: Vec<ReviewOp>) -> Result<(Vec<Revie
     let ops = ops
         .into_iter()
         .map(|op| match op {
-            ReviewOp::Comment { file, lines: Some((start, end)), body, by, author, quote: None, round }
+            ReviewOp::Comment { file, lines: Some((start, end)), body, by, author, quote: None, iteration }
                 if start >= 1 && start <= end && r.files.contains(&file) =>
             {
                 if !blobs.contains_key(&file) {
@@ -497,7 +497,7 @@ fn with_quotes(task: &Task, r: &Review, ops: Vec<ReviewOp>) -> Result<(Vec<Revie
                     )));
                 }
                 let quote = lines[start as usize - 1..end as usize].join("\n");
-                Ok(ReviewOp::Comment { file, lines: Some((start, end)), body, by, author, quote: Some(quote), round })
+                Ok(ReviewOp::Comment { file, lines: Some((start, end)), body, by, author, quote: Some(quote), iteration })
             }
             op => Ok(op),
         })
@@ -505,30 +505,30 @@ fn with_quotes(task: &Task, r: &Review, ops: Vec<ReviewOp>) -> Result<(Vec<Revie
     Ok((ops, (!blobs.is_empty()).then(|| r.head.clone())))
 }
 
-/// Starts the review's next round. Threads move to the new head or go
+/// Starts the review's next iteration. Threads move to the new head or go
 /// outdated; the reply lists the outdated ones where they were opened.
-pub(crate) fn update(task: &Task, review_id: &str, req: NewRound) -> Result<(Review, Vec<ReviewOutdated>), ReviewError> {
+pub(crate) fn update(task: &Task, review_id: &str, req: NewIteration) -> Result<(Review, Vec<ReviewOutdated>), ReviewError> {
     let next = prepare_update(task, review_id, req)?;
     finish_update(task, review_id, next)
 }
 
 /// What `update` resolves before taking the lock.
-struct NextRound {
+struct NextIteration {
     snap: Review,
     cwd: PathBuf,
-    req: NewRound,
+    req: NewIteration,
     base: String,
     head: String,
     base_ref: String,
     files: Vec<String>,
     files_truncated: bool,
-    moves: crate::review_rounds::Moves,
+    moves: crate::review_iterations::Moves,
 }
 
 /// Everything that runs git but the per-file diffs, outside the lock like
 /// quotes: revs, the file list, and the rename pass, which after a rebase
 /// spans all of upstream's churn.
-fn prepare_update(task: &Task, review_id: &str, req: NewRound) -> Result<NextRound, ReviewError> {
+fn prepare_update(task: &Task, review_id: &str, req: NewIteration) -> Result<NextIteration, ReviewError> {
     if let Some(p) = review_id_problem(review_id) {
         return Err(ReviewError::Invalid(p));
     }
@@ -541,28 +541,28 @@ fn prepare_update(task: &Task, review_id: &str, req: NewRound) -> Result<NextRou
     if files.is_empty() {
         return Err(ReviewError::Invalid(format!("nothing changed in {base_ref}..{}", req.head)));
     }
-    let last_head = &snap.rounds.last().expect("read fills round 1").head;
-    let moves = crate::review_rounds::moves(&cwd, last_head, &head).map_err(ReviewError::Git)?;
-    Ok(NextRound { snap, cwd, req, base, head, base_ref, files, files_truncated, moves })
+    let last_head = &snap.iterations.last().expect("read fills iteration 1").head;
+    let moves = crate::review_iterations::moves(&cwd, last_head, &head).map_err(ReviewError::Git)?;
+    Ok(NextIteration { snap, cwd, req, base, head, base_ref, files, files_truncated, moves })
 }
 
-fn finish_update(task: &Task, review_id: &str, next: NextRound) -> Result<(Review, Vec<ReviewOutdated>), ReviewError> {
-    let NextRound { snap, cwd, req, base, head, base_ref, files, files_truncated, moves } = next;
+fn finish_update(task: &Task, review_id: &str, next: NextIteration) -> Result<(Review, Vec<ReviewOutdated>), ReviewError> {
+    let NextIteration { snap, cwd, req, base, head, base_ref, files, files_truncated, moves } = next;
     let dir = reviews_dir(task)?;
     let _g = REVIEW_LOCK.lock();
     let stored = read(&dir, review_id)?;
-    let n = stored.rounds.len() + 1;
-    // Also what keeps `moves` valid: same round count, same last head.
-    if stored.rounds.len() != snap.rounds.len() {
-        return Err(ReviewError::Invalid(format!("review {review_id} moved to round {} meanwhile; update it again", n - 1)));
+    let n = stored.iterations.len() + 1;
+    // Also what keeps `moves` valid: same iteration count, same last head.
+    if stored.iterations.len() != snap.iterations.len() {
+        return Err(ReviewError::Invalid(format!("review {review_id} moved to iteration {} meanwhile; update it again", n - 1)));
     }
-    if n > REVIEW_ROUNDS_MAX {
-        return Err(ReviewError::Invalid(format!("review {review_id} already has {REVIEW_ROUNDS_MAX} rounds")));
+    if n > REVIEW_ITERATIONS_MAX {
+        return Err(ReviewError::Invalid(format!("review {review_id} already has {REVIEW_ITERATIONS_MAX} iterations")));
     }
-    let last = stored.rounds.last().expect("read fills round 1").clone();
+    let last = stored.iterations.last().expect("read fills iteration 1").clone();
     if (last.base.as_str(), last.head.as_str()) == (base.as_str(), head.as_str()) {
         return Err(ReviewError::Invalid(format!(
-            "round {} of {review_id} is already {}..{}",
+            "iteration {} of {review_id} is already {}..{}",
             n - 1,
             last.base_ref,
             last.head_ref
@@ -570,14 +570,14 @@ fn finish_update(task: &Task, review_id: &str, next: NextRound) -> Result<(Revie
     }
     if let Some(Some(k)) = req.show {
         if k as usize >= n {
-            return Err(ReviewError::Invalid(format!("round {k} is not before round {n}")));
+            return Err(ReviewError::Invalid(format!("iteration {k} is not before iteration {n}")));
         }
     }
-    use crate::review_rounds::{pin, pinned};
-    // A review opened before rounds has no refs; best effort, since its
+    use crate::review_iterations::{pin, pinned};
+    // A review opened before iterations has no refs; best effort, since its
     // commits may already be gone.
     if !pinned(&cwd, &task.id, review_id, 1) {
-        let first = &stored.rounds[0];
+        let first = &stored.iterations[0];
         let _ = pin(&cwd, &task.id, review_id, 1, &first.base, &first.head);
     }
     pin(&cwd, &task.id, review_id, n, &base, &head).map_err(ReviewError::Git)?;
@@ -587,8 +587,8 @@ fn finish_update(task: &Task, review_id: &str, next: NextRound) -> Result<(Revie
     // That is one `-U0` diff per changed file a line thread sits on, and
     // updates are rare.
     let in_range: HashSet<String> = files.iter().cloned().collect();
-    let outdated = crate::review_rounds::reanchor(&cwd, &last.head, &head, &moves, &mut r.threads, &in_range, n as u32);
-    r.rounds.push(ReviewRound {
+    let outdated = crate::review_iterations::reanchor(&cwd, &last.head, &head, &moves, &mut r.threads, &in_range, n as u32);
+    r.iterations.push(ReviewIteration {
         base: base.clone(),
         head: head.clone(),
         base_ref: base_ref.clone(),
@@ -615,7 +615,7 @@ pub(crate) fn drop_refs(task: &Task, projects: &[crate::Project]) {
         .map(|p| PathBuf::from(&p.root_path))
         .collect();
     repos.extend(task.composition.iter().filter(|m| !m.repo_path.is_empty()).map(|m| PathBuf::from(&m.repo_path)));
-    crate::review_rounds::drop_task_refs(&task.id, &repos);
+    crate::review_iterations::drop_task_refs(&task.id, &repos);
 }
 
 /// `file`'s lines as the head commit has it.
@@ -688,7 +688,7 @@ mod tests {
     }
 
     fn agent_comment(file: &str, lines: Option<(u32, u32)>, body: &str) -> ReviewOp {
-        ReviewOp::Comment { file: file.into(), lines, body: body.into(), by: ReviewBy::Agent, author: "claude".into(), quote: None, round: None }
+        ReviewOp::Comment { file: file.into(), lines, body: body.into(), by: ReviewBy::Agent, author: "claude".into(), quote: None, iteration: None }
     }
 
     fn user_reply(thread: &str, body: &str) -> ReviewOp {
@@ -886,7 +886,7 @@ mod tests {
                 by: ReviewBy::User,
                 author: String::new(),
                 quote: Some("q".into()),
-                round: None,
+                iteration: None,
             };
 
             let zero = apply(&t, "r1", vec![op((0, 1))]);
@@ -924,7 +924,7 @@ mod tests {
                 by: ReviewBy::User,
                 author: String::new(),
                 quote: Some("as shown".into()),
-                round: None,
+                iteration: None,
             };
 
             let (r, _, _) = apply(&t, "r1", vec![op]).unwrap();
@@ -979,7 +979,7 @@ mod tests {
                 end_line,
                 quote: quote.map(Into::into),
                 body: body.into(),
-                round: None,
+                iteration: None,
             };
 
             let res = post(&t, "r1", vec![
@@ -1012,7 +1012,7 @@ mod tests {
                 end_line,
                 quote: None,
                 body: "x".into(),
-                round: None,
+                iteration: None,
             };
             let no_file = post(&t, "r1", vec![item(Some("new.txt"), None), item(None, None)]);
             let end_only = post(&t, "r1", vec![item(Some("a.txt"), Some(2))]);
@@ -1062,7 +1062,7 @@ mod tests {
                 quote: String::new(),
                 comments: Vec::new(),
                 resolved: None,
-                round: 1,
+                iteration: 1,
                 origin: None,
                 outdated: None,
             };
@@ -1315,18 +1315,18 @@ mod tests {
     }
 
     #[test]
-    fn a_review_whose_round_head_is_flag_shaped_is_refused_before_git_sees_it() {
+    fn a_review_whose_iteration_head_is_flag_shaped_is_refused_before_git_sees_it() {
         let dir = repo();
         let t = task(dir.path());
         with_scratch_data_dir(|data| {
             new_review(&t);
             let file = data.join("scratch/t1/reviews/r1.json");
             let mut json: serde_json::Value = serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
-            json["rounds"][0]["head"] = "--output=/tmp/x".into();
+            json["iterations"][0]["head"] = "--output=/tmp/x".into();
             fs::write(&file, json.to_string()).unwrap();
 
             let loaded = load(&t, "r1");
-            let updated = update(&t, "r1", NewRound { head: "HEAD".into(), base: None, show: None });
+            let updated = update(&t, "r1", NewIteration { head: "HEAD".into(), base: None, show: None });
 
             assert!(matches!(loaded, Err(ReviewError::Io(ref m)) if m.contains("must be commit shas")), "{loaded:?}");
             assert!(matches!(updated, Err(ReviewError::Io(_))), "{updated:?}");
@@ -1400,7 +1400,7 @@ mod tests {
     /// ren2.txt and del.txt, and edits keep.txt. Review r1 is base..main with
     /// threads t1 code:10, t2 code:3-4, t3 del (file), t4 ren:2, t5 code:12
     /// (resolved), t6 keep (file), t7 ren2:1.
-    fn rounds_repo() -> tempfile::TempDir {
+    fn iterations_repo() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path();
         git(p, &["init", "-q", "-b", "main"]);
@@ -1419,7 +1419,7 @@ mod tests {
             fs::write(p.join(name), content).unwrap();
         }
         git(p, &["add", "."]);
-        git(p, &["commit", "-q", "-m", "round 1"]);
+        git(p, &["commit", "-q", "-m", "iteration 1"]);
         let t = task(p);
         create(&t, NewReview { range: "base..main".into(), title: None, author: "claude".into(), recipient_tab: None, dir_name: String::new() })
             .unwrap();
@@ -1440,7 +1440,7 @@ mod tests {
     /// Two lines in at the top of code.txt and its old line 4 changed;
     /// del.txt deleted; ren.txt renamed as is; ren2.txt renamed with its last
     /// line edited; keep.txt back to its base content.
-    fn round_two_commit(p: &Path) {
+    fn iteration_two_commit(p: &Path) {
         let mut code: Vec<String> = numbered(12, "code").lines().map(str::to_string).collect();
         code[3] = "changed".into();
         code.splice(0..0, ["new 1".to_string(), "new 2".to_string()]);
@@ -1450,11 +1450,11 @@ mod tests {
         git(p, &["rm", "-q", "del.txt"]);
         git(p, &["mv", "ren.txt", "moved.txt"]);
         git(p, &["mv", "ren2.txt", "moved2.txt"]);
-        git(p, &["commit", "-qam", "round 2"]);
+        git(p, &["commit", "-qam", "iteration 2"]);
     }
 
-    fn head_update() -> NewRound {
-        NewRound { head: "HEAD".into(), base: None, show: None }
+    fn head_update() -> NewIteration {
+        NewIteration { head: "HEAD".into(), base: None, show: None }
     }
 
     fn anchor(th: &ReviewThread) -> (&str, Option<u32>, Option<u32>) {
@@ -1464,9 +1464,9 @@ mod tests {
     #[test]
     fn update_moves_shifted_and_renamed_threads_and_outdates_changed_deleted_and_out_of_range_ones() {
         with_scratch_data_dir(|_| {
-            let dir = rounds_repo();
+            let dir = iterations_repo();
             let t = task(dir.path());
-            round_two_commit(dir.path());
+            iteration_two_commit(dir.path());
 
             let (r, outdated) = update(&t, "r1", head_update()).unwrap();
 
@@ -1487,25 +1487,25 @@ mod tests {
             assert_eq!(anchor(th(2)), ("code.txt", Some(3), Some(4)));
             let ids: Vec<&str> = outdated.iter().map(|o| o.thread_id.as_str()).collect();
             assert_eq!(ids, vec!["r1-t2", "r1-t3", "r1-t6"]);
-            assert_eq!(outdated[0], ReviewOutdated { thread_id: "r1-t2".into(), file: "code.txt".into(), start_line: Some(3), end_line: Some(4), round: 1 });
+            assert_eq!(outdated[0], ReviewOutdated { thread_id: "r1-t2".into(), file: "code.txt".into(), start_line: Some(3), end_line: Some(4), iteration: 1 });
             assert_eq!(load(&t, "r1").unwrap(), r);
         });
     }
 
     #[test]
-    fn update_appends_the_round_and_mirrors_it_at_the_top_level() {
+    fn update_appends_the_iteration_and_mirrors_it_at_the_top_level() {
         with_scratch_data_dir(|_| {
-            let dir = rounds_repo();
+            let dir = iterations_repo();
             let p = dir.path();
             let t = task(p);
             let before = load(&t, "r1").unwrap();
-            round_two_commit(p);
+            iteration_two_commit(p);
 
-            let (r, _) = update(&t, "r1", NewRound { head: "HEAD".into(), base: None, show: Some(Some(1)) }).unwrap();
+            let (r, _) = update(&t, "r1", NewIteration { head: "HEAD".into(), base: None, show: Some(Some(1)) }).unwrap();
 
-            assert_eq!(r.rounds.len(), 2);
-            assert_eq!(r.rounds[0], before.rounds[0]);
-            let r2 = &r.rounds[1];
+            assert_eq!(r.iterations.len(), 2);
+            assert_eq!(r.iterations[0], before.iterations[0]);
+            let r2 = &r.iterations[1];
             assert_eq!((r2.base.as_str(), r2.head.as_str()), (rev_parse(p, "base").as_str(), rev_parse(p, "HEAD").as_str()));
             assert_eq!((r2.base_ref.as_str(), r2.head_ref.as_str()), ("base", "HEAD"));
             assert_eq!((&r.base, &r.head, &r.base_ref, &r.head_ref), (&r2.base, &r2.head, &r2.base_ref, &r2.head_ref));
@@ -1516,12 +1516,12 @@ mod tests {
     }
 
     #[test]
-    fn an_outdated_thread_stays_outdated_in_its_round_and_is_not_reported_again() {
+    fn an_outdated_thread_stays_outdated_in_its_iteration_and_is_not_reported_again() {
         with_scratch_data_dir(|_| {
-            let dir = rounds_repo();
+            let dir = iterations_repo();
             let p = dir.path();
             let t = task(p);
-            round_two_commit(p);
+            iteration_two_commit(p);
             update(&t, "r1", head_update()).unwrap();
             commit(p, "code.txt", "rewritten\n");
 
@@ -1534,78 +1534,78 @@ mod tests {
     }
 
     #[test]
-    fn a_thread_moved_in_one_round_and_outdated_in_the_next_is_reported_where_it_was_opened() {
+    fn a_thread_moved_in_one_iteration_and_outdated_in_the_next_is_reported_where_it_was_opened() {
         with_scratch_data_dir(|_| {
-            let dir = rounds_repo();
+            let dir = iterations_repo();
             let p = dir.path();
             let t = task(p);
-            round_two_commit(p);
+            iteration_two_commit(p);
             update(&t, "r1", head_update()).unwrap();
             commit(p, "code.txt", "rewritten\n");
 
             let (_, outdated) = update(&t, "r1", head_update()).unwrap();
 
             let t1 = outdated.iter().find(|o| o.thread_id == "r1-t1").unwrap();
-            assert_eq!((t1.file.as_str(), t1.start_line, t1.end_line, t1.round), ("code.txt", Some(10), Some(10), 1));
+            assert_eq!((t1.file.as_str(), t1.start_line, t1.end_line, t1.iteration), ("code.txt", Some(10), Some(10), 1));
         });
     }
 
     #[test]
-    fn update_refuses_when_another_round_landed_between_its_snapshot_and_the_lock() {
+    fn update_refuses_when_another_iteration_landed_between_its_snapshot_and_the_lock() {
         with_scratch_data_dir(|_| {
-            let dir = rounds_repo();
+            let dir = iterations_repo();
             let p = dir.path();
             let t = task(p);
-            round_two_commit(p);
+            iteration_two_commit(p);
             let slow = prepare_update(&t, "r1", head_update()).unwrap();
             update(&t, "r1", head_update()).unwrap();
 
             let late = finish_update(&t, "r1", slow);
 
-            assert_eq!(late.unwrap_err(), ReviewError::Invalid("review r1 moved to round 2 meanwhile; update it again".into()));
-            assert_eq!(load(&t, "r1").unwrap().rounds.len(), 2);
+            assert_eq!(late.unwrap_err(), ReviewError::Invalid("review r1 moved to iteration 2 meanwhile; update it again".into()));
+            assert_eq!(load(&t, "r1").unwrap().iterations.len(), 2);
         });
     }
 
     #[test]
-    fn a_comment_after_an_update_is_stamped_with_the_new_round() {
+    fn a_comment_after_an_update_is_stamped_with_the_new_iteration() {
         with_scratch_data_dir(|_| {
-            let dir = rounds_repo();
+            let dir = iterations_repo();
             let t = task(dir.path());
-            round_two_commit(dir.path());
+            iteration_two_commit(dir.path());
             update(&t, "r1", head_update()).unwrap();
 
             let (r, _, _) = apply(&t, "r1", vec![agent_comment("code.txt", Some((1, 1)), "new"), user_reply("r1-t1", "ok")]).unwrap();
 
             let new = r.threads.last().unwrap();
-            assert_eq!((new.round, new.comments[0].round), (2, 2));
-            assert_eq!((r.threads[0].round, r.threads[0].comments[0].round, r.threads[0].comments[1].round), (1, 1, 2));
+            assert_eq!((new.iteration, new.comments[0].iteration), (2, 2));
+            assert_eq!((r.threads[0].iteration, r.threads[0].comments[0].iteration, r.threads[0].comments[1].iteration), (1, 1, 2));
         });
     }
 
     #[test]
-    fn update_refuses_the_same_range_a_show_not_before_the_new_round_and_an_empty_range() {
+    fn update_refuses_the_same_range_a_show_not_before_the_new_iteration_and_an_empty_range() {
         with_scratch_data_dir(|_| {
-            let dir = rounds_repo();
+            let dir = iterations_repo();
             let p = dir.path();
             let t = task(p);
 
             let same = update(&t, "r1", head_update());
-            round_two_commit(p);
-            let late_show = update(&t, "r1", NewRound { head: "HEAD".into(), base: None, show: Some(Some(2)) });
-            let empty = update(&t, "r1", NewRound { head: "HEAD".into(), base: Some("HEAD".into()), show: None });
+            iteration_two_commit(p);
+            let late_show = update(&t, "r1", NewIteration { head: "HEAD".into(), base: None, show: Some(Some(2)) });
+            let empty = update(&t, "r1", NewIteration { head: "HEAD".into(), base: Some("HEAD".into()), show: None });
 
-            assert_eq!(same.unwrap_err(), ReviewError::Invalid("round 1 of r1 is already base..main".into()));
-            assert_eq!(late_show.unwrap_err(), ReviewError::Invalid("round 2 is not before round 2".into()));
+            assert_eq!(same.unwrap_err(), ReviewError::Invalid("iteration 1 of r1 is already base..main".into()));
+            assert_eq!(late_show.unwrap_err(), ReviewError::Invalid("iteration 2 is not before iteration 2".into()));
             assert_eq!(empty.unwrap_err(), ReviewError::Invalid("nothing changed in HEAD..HEAD".into()));
-            assert_eq!(load(&t, "r1").unwrap().rounds.len(), 1);
+            assert_eq!(load(&t, "r1").unwrap().iterations.len(), 1);
         });
     }
 
     #[test]
     fn update_without_a_base_resolves_the_last_base_ref_again_so_a_rebase_takes_the_new_merge_base() {
         with_scratch_data_dir(|_| {
-            let dir = rounds_repo();
+            let dir = iterations_repo();
             let p = dir.path();
             let t = task(p);
             git(p, &["checkout", "-q", "base"]);
@@ -1615,7 +1615,7 @@ mod tests {
 
             let (r, _) = update(&t, "r1", head_update()).unwrap();
 
-            assert_eq!(r.base, rev_parse(p, "base"), "the moved base, not round 1's");
+            assert_eq!(r.base, rev_parse(p, "base"), "the moved base, not iteration 1's");
             assert!(!r.files.contains(&"upstream.txt".to_string()));
         });
     }
@@ -1625,7 +1625,7 @@ mod tests {
     }
 
     #[test]
-    fn create_and_update_pin_each_rounds_commits_so_an_amended_away_head_survives_gc() {
+    fn create_and_update_pin_each_iterations_commits_so_an_amended_away_head_survives_gc() {
         let dir = repo();
         let p = dir.path();
         let t = task(p);
@@ -1645,7 +1645,7 @@ mod tests {
     }
 
     #[test]
-    fn a_review_written_before_rounds_loads_as_one_round_and_its_first_update_pins_round_one() {
+    fn a_review_written_before_iterations_loads_as_one_iteration_and_its_first_update_pins_iteration_one() {
         let dir = repo();
         let p = dir.path();
         let t = task(p);
@@ -1655,33 +1655,33 @@ mod tests {
             git(p, &["update-ref", "-d", "refs/termic/reviews/t1/r1/1/base"]);
             let path = data.join("scratch/t1/reviews/r1.json");
             let mut json: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-            json.as_object_mut().unwrap().remove("rounds");
+            json.as_object_mut().unwrap().remove("iterations");
             fs::write(&path, json.to_string()).unwrap();
 
             let legacy = load(&t, "r1").unwrap();
-            commit(p, "new.txt", "round 2\n");
+            commit(p, "new.txt", "iteration 2\n");
             update(&t, "r1", head_update()).unwrap();
 
-            assert_eq!(legacy.rounds, r.rounds);
+            assert_eq!(legacy.iterations, r.iterations);
             assert_eq!(ref_sha(p, "refs/termic/reviews/t1/r1/1/head"), Some(r.head));
         });
     }
 
     #[test]
-    fn a_user_comment_written_on_an_older_round_is_refused_and_an_unstamped_one_or_a_reply_is_not() {
+    fn a_user_comment_written_on_an_older_iteration_is_refused_and_an_unstamped_one_or_a_reply_is_not() {
         with_scratch_data_dir(|_| {
-            let dir = rounds_repo();
+            let dir = iterations_repo();
             let t = task(dir.path());
-            round_two_commit(dir.path());
+            iteration_two_commit(dir.path());
             update(&t, "r1", head_update()).unwrap();
-            let item = |thread_id: Option<&str>, round| ReviewPostItem {
+            let item = |thread_id: Option<&str>, iteration| ReviewPostItem {
                 thread_id: thread_id.map(Into::into),
                 file: Some("code.txt".into()),
                 start_line: Some(1),
                 end_line: None,
                 quote: Some("new 1".into()),
                 body: "x".into(),
-                round,
+                iteration,
             };
 
             let stale = post(&t, "r1", vec![item(None, Some(1))]);
@@ -1691,10 +1691,10 @@ mod tests {
 
             assert_eq!(
                 stale.err(),
-                Some(ReviewError::Invalid("this comment was written on round 1 of r1, which is now on round 2; comment on the new diff".into()))
+                Some(ReviewError::Invalid("this comment was written on iteration 1 of r1, which is now on iteration 2; comment on the new diff".into()))
             );
             assert!(current.is_ok());
-            assert_eq!(unstamped.unwrap().review.threads.last().unwrap().round, 2, "no round is the latest");
+            assert_eq!(unstamped.unwrap().review.threads.last().unwrap().iteration, 2, "no iteration is the latest");
             assert!(reply.is_ok());
         });
     }
@@ -1709,7 +1709,7 @@ mod tests {
             new_review(&t1);
             new_review(&t2);
 
-            crate::review_rounds::drop_task_refs("t1", &[p.to_path_buf()]);
+            crate::review_iterations::drop_task_refs("t1", &[p.to_path_buf()]);
 
             assert_eq!(ref_sha(p, "refs/termic/reviews/t1/r1/1/head"), None);
             assert!(ref_sha(p, "refs/termic/reviews/t2/r1/1/head").is_some());
@@ -1717,7 +1717,7 @@ mod tests {
     }
 
     #[test]
-    fn deleting_a_task_for_good_removes_its_reviews_and_their_round_refs() {
+    fn deleting_a_task_for_good_removes_its_reviews_and_their_iteration_refs() {
         let dir = repo();
         let p = dir.path();
         let t = Task { project_id: "p1".into(), ..task(p) };

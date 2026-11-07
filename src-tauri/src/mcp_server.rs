@@ -1851,14 +1851,14 @@ const TOOLS: &[ToolDef] = &[
     ToolDef {
         name: "present_update",
         cli_verb: "present update",
-        description: "Start a review's next round; reports outdated threads.",
+        description: "Start a review's next iteration; reports outdated threads.",
         params: &[
             P_PAD_TASK,
             P_PROJECT,
             ParamDef { name: "review", json_type: "string", required: true, description: "r1", cli_flag: Some("review") },
             ParamDef { name: "head", json_type: "string", required: true, description: "New head rev.", cli_flag: Some("--head") },
             ParamDef { name: "base", json_type: "string", required: false, description: "New base rev.", cli_flag: Some("--base") },
-            ParamDef { name: "show", json_type: "string", required: false, description: "full or a round number.", cli_flag: Some("--show") },
+            ParamDef { name: "show", json_type: "string", required: false, description: "full or an iteration number.", cli_flag: Some("--show") },
         ],
         destructive: false,
         read_only: false,
@@ -4259,9 +4259,10 @@ mod tests {
         // present resolve|unresolve`. Two tools for two CLI verbs; the one
         // thread param and a clause each. Also lands on a round number.
         // 34737: present_update, parity with `termic present update`. Its
-        // head/base/show params are a few words each; the round model lives
+        // head/base/show params are a few words each; the iteration model lives
         // in `termic present --help`.
-        const RECORDED: usize = 34737;
+        // 34746: rounds renamed to iterations, which is the longer word.
+        const RECORDED: usize = 34746;
         assert!(
             size <= RECORDED,
             "serialized tools/list grew to {size} bytes (recorded {RECORDED}); grow it consciously"

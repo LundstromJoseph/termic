@@ -1,5 +1,5 @@
-//! Review rounds: the hidden refs that keep every round's commits readable
-//! after an amend or rebase, and re-anchoring threads from one round's head
+//! Review iterations: the hidden refs that keep every iteration's commits readable
+//! after an amend or rebase, and re-anchoring threads from one iteration's head
 //! to the next.
 //!
 //! Refs live at `refs/termic/reviews/<task_id>/<review_id>/<N>/{base,head}`.
@@ -11,13 +11,13 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{LazyLock, Mutex};
 
-use termic_proto::{Review, ReviewOutdated, ReviewRound, ReviewThread};
+use termic_proto::{Review, ReviewOutdated, ReviewIteration, ReviewThread};
 
 fn prefix(task_id: &str, review_id: &str) -> String {
     format!("refs/termic/reviews/{task_id}/{review_id}/")
 }
 
-/// Points round `n`'s two refs at `base` and `head`, in one transaction.
+/// Points iteration `n`'s two refs at `base` and `head`, in one transaction.
 pub(crate) fn pin(cwd: &Path, task_id: &str, review_id: &str, n: usize, base: &str, head: &str) -> Result<(), String> {
     let p = prefix(task_id, review_id);
     let input = format!("update {p}{n}/base {base}\nupdate {p}{n}/head {head}\n");
@@ -25,7 +25,7 @@ pub(crate) fn pin(cwd: &Path, task_id: &str, review_id: &str, n: usize, base: &s
     if out.status.success() {
         Ok(())
     } else {
-        Err(format!("pinning round {n} of {review_id} failed: {}", String::from_utf8_lossy(&out.stderr).trim()))
+        Err(format!("pinning iteration {n} of {review_id} failed: {}", String::from_utf8_lossy(&out.stderr).trim()))
     }
 }
 
@@ -58,25 +58,25 @@ pub(crate) fn drop_task_refs(task_id: &str, repos: &[PathBuf]) {
     }
 }
 
-/// Round `n` of `r`, the latest when None.
-pub(crate) fn round(r: &Review, n: Option<u32>) -> Result<&ReviewRound, String> {
+/// Iteration `n` of `r`, the latest when None.
+pub(crate) fn iteration(r: &Review, n: Option<u32>) -> Result<&ReviewIteration, String> {
     match n {
-        None => r.rounds.last().ok_or_else(|| format!("review {} has no rounds", r.id)),
+        None => r.iterations.last().ok_or_else(|| format!("review {} has no iterations", r.id)),
         Some(n) => (n as usize)
             .checked_sub(1)
-            .and_then(|i| r.rounds.get(i))
-            .ok_or_else(|| format!("review {} has no round {n}", r.id)),
+            .and_then(|i| r.iterations.get(i))
+            .ok_or_else(|| format!("review {} has no iteration {n}", r.id)),
     }
 }
 
-/// Round `from` of `r` as the left end of a view whose right end is round
-/// `to` (the latest when None). It must come before that round.
-pub(crate) fn from_round(r: &Review, from: u32, to: Option<u32>) -> Result<&ReviewRound, String> {
-    let n = to.unwrap_or(r.rounds.len() as u32);
+/// Iteration `from` of `r` as the left end of a view whose right end is iteration
+/// `to` (the latest when None). It must come before that iteration.
+pub(crate) fn from_iteration(r: &Review, from: u32, to: Option<u32>) -> Result<&ReviewIteration, String> {
+    let n = to.unwrap_or(r.iterations.len() as u32);
     if from == 0 || from >= n {
-        return Err(format!("round {from} of {} is not before round {n}", r.id));
+        return Err(format!("iteration {from} of {} is not before iteration {n}", r.id));
     }
-    round(r, Some(from))
+    iteration(r, Some(from))
 }
 
 /// A review diff scope after `review:`: `<id>[:from:<K>][:to:<N>]`.
@@ -108,12 +108,12 @@ pub(crate) fn parse_scope(rest: &str) -> Result<(&str, Option<u32>, Option<u32>)
     }
 }
 
-/// Round K's change replayed onto round N's base, the left side of a
-/// "Round K -> N" view, so a rebase between the two rounds does not show
+/// Iteration K's change replayed onto iteration N's base, the left side of a
+/// "Iteration K -> N" view, so a rebase between the two iterations does not show
 /// upstream's changes as the author's.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Replay {
-    /// `left` is the replayed tree, or K's head when both rounds share a base.
+    /// `left` is the replayed tree, or K's head when both iterations share a base.
     /// A `conflicted` path's tree side holds conflict markers, so its left
     /// side is K's head instead and its diff includes upstream changes.
     Clean { left: String, conflicted: HashSet<String> },
@@ -285,7 +285,7 @@ fn parse_moves(out: &str) -> Moves {
 
 /// Moves each live thread from `old_head` to `new_head` along `moves`:
 /// renames follow, line threads shift past changes above them, and a thread
-/// goes outdated in `round` when a change touches its lines, or its file is
+/// goes outdated in `iteration` when a change touches its lines, or its file is
 /// deleted, changes type, can't be diffed, or leaves the range. Returns the
 /// threads it outdated. Never touches `resolved`.
 pub(crate) fn reanchor(
@@ -295,7 +295,7 @@ pub(crate) fn reanchor(
     moves: &Moves,
     threads: &mut [ReviewThread],
     new_files: &HashSet<String>,
-    round: u32,
+    iteration: u32,
 ) -> Vec<ReviewOutdated> {
     let mut hunks: HashMap<String, Option<Vec<Hunk>>> = HashMap::new();
     let mut outdated = Vec::new();
@@ -342,9 +342,9 @@ pub(crate) fn reanchor(
                     file: at.file,
                     start_line: at.start_line,
                     end_line: at.end_line,
-                    round: th.round,
+                    iteration: th.iteration,
                 });
-                th.outdated = Some(round);
+                th.outdated = Some(iteration);
             }
         }
     }
@@ -397,7 +397,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_scope_reads_an_id_with_optional_from_and_to_rounds_in_that_order() {
+    fn parse_scope_reads_an_id_with_optional_from_and_to_iterations_in_that_order() {
         assert_eq!(parse_scope("r1"), Ok(("r1", None, None)));
         assert_eq!(parse_scope("r1:to:2"), Ok(("r1", None, Some(2))));
         assert_eq!(parse_scope("r1:from:1"), Ok(("r1", Some(1), None)));
@@ -434,7 +434,7 @@ mod tests {
     }
 
     #[test]
-    fn replay_with_the_same_base_on_both_rounds_is_round_ks_head_without_running_git() {
+    fn replay_with_the_same_base_on_both_iterations_is_iteration_ks_head_without_running_git() {
         // A cwd that does not exist: any git call would fail.
         let r = replay(Path::new("/nonexistent/termic-replay"), "base", "khead", "base");
 
@@ -470,7 +470,7 @@ mod tests {
     }
 
     #[test]
-    fn replay_writes_round_ks_change_onto_the_new_base_and_recomputes_a_memoized_tree_gc_pruned() {
+    fn replay_writes_iteration_ks_change_onto_the_new_base_and_recomputes_a_memoized_tree_gc_pruned() {
         let (dir, k_base, k_head, n_base) = replay_repo();
         let cwd = dir.path();
         let gone = "0123".repeat(10);
@@ -482,7 +482,7 @@ mod tests {
         let Replay::Clean { left, conflicted } = r else { panic!("expected a clean replay, got {r:?}") };
         assert_ne!(left, gone, "a memoized tree that is gone is recomputed");
         assert!(conflicted.is_empty());
-        assert_eq!(git(cwd, &["show", &format!("{left}:a.txt")]), "a2", "round K's change");
+        assert_eq!(git(cwd, &["show", &format!("{left}:a.txt")]), "a2", "iteration K's change");
         assert_eq!(git(cwd, &["show", &format!("{left}:up.txt")]), "up", "on the new base");
         assert_eq!(REPLAYS.lock().unwrap().get(&key).cloned().flatten().map(|v| v.0), Some(left));
     }
@@ -499,32 +499,32 @@ mod tests {
         assert_eq!(r, Replay::Unavailable);
     }
 
-    fn review_with_rounds(n: usize) -> Review {
-        let round = ReviewRound { base: "b".into(), head: "h".into(), base_ref: "b".into(), head_ref: "h".into(), at: String::new() };
+    fn review_with_iterations(n: usize) -> Review {
+        let iteration = ReviewIteration { base: "b".into(), head: "h".into(), base_ref: "b".into(), head_ref: "h".into(), at: String::new() };
         Review {
             version: 1, id: "r1".into(), task_id: "t1".into(), dir_name: String::new(), base: "b".into(), head: "h".into(),
             base_ref: "b".into(), head_ref: "h".into(), title: None, author: "claude".into(), recipient_tab: None,
             created_at: String::new(), seq: 0, files: vec![], files_truncated: false, threads: vec![],
-            rounds: vec![round; n], default_from: None,
+            iterations: vec![iteration; n], default_from: None,
         }
     }
 
     #[test]
-    fn from_round_takes_only_a_round_before_the_views_right_end() {
-        let r = review_with_rounds(3);
+    fn from_iteration_takes_only_an_iteration_before_the_views_right_end() {
+        let r = review_with_iterations(3);
 
-        assert!(from_round(&r, 1, None).is_ok());
-        assert!(from_round(&r, 2, None).is_ok());
-        assert!(from_round(&r, 1, Some(2)).is_ok());
-        assert_eq!(from_round(&r, 3, None).err().as_deref(), Some("round 3 of r1 is not before round 3"));
-        assert!(from_round(&r, 2, Some(2)).is_err());
-        assert!(from_round(&r, 0, None).is_err());
+        assert!(from_iteration(&r, 1, None).is_ok());
+        assert!(from_iteration(&r, 2, None).is_ok());
+        assert!(from_iteration(&r, 1, Some(2)).is_ok());
+        assert_eq!(from_iteration(&r, 3, None).err().as_deref(), Some("iteration 3 of r1 is not before iteration 3"));
+        assert!(from_iteration(&r, 2, Some(2)).is_err());
+        assert!(from_iteration(&r, 0, None).is_err());
     }
 
     fn thread(id: &str, file: &str, lines: Option<(u32, u32)>) -> ReviewThread {
         ReviewThread {
             id: id.into(), file: file.into(), start_line: lines.map(|l| l.0), end_line: lines.map(|l| l.1),
-            quote: String::new(), comments: vec![], resolved: None, round: 1, origin: None, outdated: None,
+            quote: String::new(), comments: vec![], resolved: None, iteration: 1, origin: None, outdated: None,
         }
     }
 
@@ -543,7 +543,7 @@ mod tests {
         // b.txt becomes a symlink in the index only, so no symlink support is needed.
         let blob = git(p, &["rev-parse", "HEAD:b.txt"]);
         git(p, &["update-index", "--cacheinfo", &format!("120000,{blob},b.txt")]);
-        git(p, &["commit", "-q", "-m", "round 2"]);
+        git(p, &["commit", "-q", "-m", "iteration 2"]);
         let new = git(p, &["rev-parse", "HEAD"]);
         let mut moves = moves(p, &old, &new).unwrap();
         // A path git cannot diff, as a submodule pointer would be.

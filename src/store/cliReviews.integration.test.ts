@@ -26,7 +26,7 @@ function review(seq: number, over: Partial<Review> = {}): Review {
   return {
     version: 1, id: "r1", task_id: "a", dir_name: "", base: "a", head: "b", base_ref: "main", head_ref: "HEAD",
     title: "Tidy the parser", author: "claude", recipient_tab: "tab-1", created_at: "", seq, files: ["a.ts"],
-    files_truncated: false, threads: [], rounds: [], ...over,
+    files_truncated: false, threads: [], iterations: [], ...over,
   };
 }
 
@@ -60,15 +60,15 @@ describe("reviewChangedHandler", () => {
     expect(useUI.getState().toasts[0].msg).toBe("claude opened review r1");
   });
 
-  it("says a review with a second round started that round, titled or not", async () => {
-    const round = { base: "a", head: "b", base_ref: "main", head_ref: "HEAD", at: "" };
+  it("says a review with a second iteration started that iteration, titled or not", async () => {
+    const iteration = { base: "a", head: "b", base_ref: "main", head_ref: "HEAD", at: "" };
 
-    await reviewChangedHandler({ taskId: "a", review: review(1, { rounds: [round, round] }), reveal: true });
-    await reviewChangedHandler({ taskId: "a", review: review(2, { title: null, rounds: [round, round] }), reveal: true });
+    await reviewChangedHandler({ taskId: "a", review: review(1, { iterations: [iteration, iteration] }), reveal: true });
+    await reviewChangedHandler({ taskId: "a", review: review(2, { title: null, iterations: [iteration, iteration] }), reveal: true });
 
     expect(useUI.getState().toasts.map(t => t.msg)).toEqual([
-      "claude started round 2 of Tidy the parser",
-      "claude started round 2 of review r1",
+      "claude started iteration 2 of Tidy the parser",
+      "claude started iteration 2 of review r1",
     ]);
   });
 

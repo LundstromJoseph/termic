@@ -210,7 +210,7 @@ export function ReviewCommentsBar({ taskId, compact = false, className }: {
                     </div>
                     {stale.has(c.id) && (
                       <div className="mt-1 text-[11px] leading-snug text-[var(--color-warn)]">
-                        {t("reviewBar.staleDraft", { round: c.reviewRound })}
+                        {t("reviewBar.staleDraft", { iteration: c.reviewIteration })}
                       </div>
                     )}
                   </div>

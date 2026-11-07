@@ -48,8 +48,8 @@ export default {
     viewed: "Viewed",
     comparingWithParent: "Comparing {{sha}} with its parent",
     reviewChipTip: "From the agent's review {{id}}",
-    reviewRound: "Round {{n}}",
-    reviewRounds: "Round {{k}} → {{n}}",
+    reviewIteration: "Iteration {{n}}",
+    reviewIterations: "Iteration {{k}} → {{n}}",
   },
 
   binaryDiff: {
@@ -401,15 +401,15 @@ export default {
       awaitingMany: "{{count}} threads await your reply",
       threads: "Threads",
       outdated: "Outdated",
-      round: "Round {{n}}",
+      iteration: "Iteration {{n}}",
       from: "From",
       base: "Base",
-      baseTip: "Round {{n}} against its base, {{base}}",
-      fromTip: "What changed from round {{k}} to round {{n}}",
-      toTip: "The round the diff shows",
+      baseTip: "Iteration {{n}} against its base, {{base}}",
+      fromTip: "What changed from iteration {{k}} to iteration {{n}}",
+      toTip: "The iteration the diff shows",
       upstream: "upstream",
-      upstreamTip: "This file conflicted when round {{k}} was replayed onto round {{n}}'s base, so its diff runs from round {{k}}'s head and includes upstream changes. An empty diff means the resolution dropped them.",
-      fallback: "Round {{k}} could not be replayed onto round {{n}}'s base, so the list includes upstream changes in the files either round touched.",
+      upstreamTip: "This file conflicted when iteration {{k}} was replayed onto iteration {{n}}'s base, so its diff runs from iteration {{k}}'s head and includes upstream changes. An empty diff means the resolution dropped them.",
+      fallback: "Iteration {{k}} could not be replayed onto iteration {{n}}'s base, so the list includes upstream changes in the files either iteration touched.",
     },
   },
 
@@ -500,7 +500,7 @@ export default {
     line: "line {{start}}",
     replyTo: "reply to {{thread}}",
     sendsToReviews: "Sends to each review's agent",
-    staleDraft: "Written on round {{round}}, which the review has moved past. Rewrite it on the new diff; it will not be sent.",
+    staleDraft: "Written on iteration {{iteration}}, which the review has moved past. Rewrite it on the new diff; it will not be sent.",
   },
 
   reviewExt: {
@@ -528,8 +528,8 @@ export default {
     unresolveAction: "Unresolve",
     resolved: "Resolved",
     resolvedBy: "Resolved by {{who}}",
-    outdatedIn: "Outdated in round {{n}}",
-    outdatedTip: "Opened on round {{round}}; a later round changed or removed its lines",
+    outdatedIn: "Outdated in iteration {{n}}",
+    outdatedTip: "Opened on iteration {{iteration}}; a later iteration changed or removed its lines",
   },
 
   blame: {

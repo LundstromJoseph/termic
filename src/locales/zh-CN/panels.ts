@@ -45,8 +45,8 @@ export default {
     viewed: "已查看",
     comparingWithParent: "正在将 {{sha}} 与其父提交比较",
     reviewChipTip: "来自智能体的评审 {{id}}",
-    reviewRound: "第 {{n}} 轮",
-    reviewRounds: "第 {{k}} → {{n}} 轮",
+    reviewIteration: "第 {{n}} 次迭代",
+    reviewIterations: "第 {{k}} → {{n}} 次迭代",
   },
 
   binaryDiff: {
@@ -396,15 +396,15 @@ export default {
       awaitingMany: "{{count}} 个讨论等待你回复",
       threads: "讨论",
       outdated: "已过时",
-      round: "第 {{n}} 轮",
+      iteration: "第 {{n}} 次迭代",
       from: "起点",
       base: "基线",
-      baseTip: "第 {{n}} 轮与其基线 {{base}} 对比",
-      fromTip: "从第 {{k}} 轮到第 {{n}} 轮的改动",
-      toTip: "差异显示的轮次",
+      baseTip: "第 {{n}} 次迭代与其基线 {{base}} 对比",
+      fromTip: "从第 {{k}} 次迭代到第 {{n}} 次迭代的改动",
+      toTip: "差异显示的迭代",
       upstream: "上游",
-      upstreamTip: "将第 {{k}} 轮重放到第 {{n}} 轮的基线时此文件有冲突，因此其差异从第 {{k}} 轮的 head 开始，包含上游改动。差异为空表示解决冲突时丢弃了这些改动。",
-      fallback: "无法将第 {{k}} 轮重放到第 {{n}} 轮的基线上，因此列表包含两轮所改文件中的上游改动。",
+      upstreamTip: "将第 {{k}} 次迭代重放到第 {{n}} 次迭代的基线时此文件有冲突，因此其差异从第 {{k}} 次迭代的 head 开始，包含上游改动。差异为空表示解决冲突时丢弃了这些改动。",
+      fallback: "无法将第 {{k}} 次迭代重放到第 {{n}} 次迭代的基线上，因此列表包含两次迭代所改文件中的上游改动。",
     },
   },
 
@@ -495,7 +495,7 @@ export default {
     line: "第 {{start}} 行",
     replyTo: "回复 {{thread}}",
     sendsToReviews: "发送给各评审的智能体",
-    staleDraft: "写于第 {{round}} 轮，评审已进入新一轮。请在新的 diff 上重写，此条不会发送。",
+    staleDraft: "写于第 {{iteration}} 次迭代，评审已进入新的迭代。请在新的 diff 上重写，此条不会发送。",
   },
 
   reviewExt: {
@@ -523,8 +523,8 @@ export default {
     unresolveAction: "重新打开",
     resolved: "已解决",
     resolvedBy: "由{{who}}标记为已解决",
-    outdatedIn: "第 {{n}} 轮起已过时",
-    outdatedTip: "在第 {{round}} 轮提出，相关行后来已改动或移除",
+    outdatedIn: "第 {{n}} 次迭代起已过时",
+    outdatedTip: "在第 {{iteration}} 次迭代提出，相关行后来已改动或移除",
   },
 
   blame: {
