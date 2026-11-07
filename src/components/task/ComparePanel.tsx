@@ -194,7 +194,7 @@ export function ComparePanel({ task, repoDir, search, viewMode, reloadToken, onO
   const threadCounts = useMemo(() => {
     if (!review) return null;
     const m = new Map<string, number>();
-    for (const th of review.threads) m.set(th.file, (m.get(th.file) ?? 0) + 1);
+    for (const th of review.threads) if (!th.resolved) m.set(th.file, (m.get(th.file) ?? 0) + 1);
     return m;
   }, [review]);
 

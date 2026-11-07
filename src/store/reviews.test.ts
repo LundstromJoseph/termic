@@ -79,6 +79,23 @@ describe("useReviews.apply", () => {
 
     expect(useReviews.getState().awaiting).toEqual({ t1: 2, t2: 1 });
   });
+
+  it("leaves a resolved thread out of the awaiting count even when its last comment is the agent's", () => {
+    const resolved = { ...thread("r1-t2", "agent"), resolved: { by: "user" as const, author: "", at: "" } };
+
+    useReviews.getState().apply("t1", review("r1", 2, { threads: [thread("r1-t1", "agent"), resolved] }));
+
+    expect(useReviews.getState().awaiting.t1).toBe(1);
+  });
+
+  it("lowers the awaiting count when a newer push resolves an awaiting thread", () => {
+    useReviews.getState().apply("t1", review("r1", 1, { threads: [thread("r1-t1", "agent")] }));
+    const resolved = { ...thread("r1-t1", "agent"), resolved: { by: "agent" as const, author: "claude", at: "" } };
+
+    useReviews.getState().apply("t1", review("r1", 2, { threads: [resolved] }));
+
+    expect(useReviews.getState().awaiting.t1).toBe(0);
+  });
 });
 
 describe("useReviews.setList", () => {

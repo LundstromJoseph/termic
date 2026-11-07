@@ -365,7 +365,8 @@ review: it opens in your task's Git tab (Compare) without taking focus,
 and you and the user talk it through in comment threads on its new side.
 Every `present` verb targets your own task unless you pass `--task`. Over
 MCP the same verbs are `present_new`, `present_comment`, `present_reply`,
-`present_show`, `present_list` and `present_claim`; pass your
+`present_show`, `present_list`, `present_claim`, `present_resolve` and
+`present_unresolve`; pass your
 `$TERMIC_TAB_ID` as `tab` to `present_new` and `present_claim`.
 
 - `"$TERMIC_CLI" present new main..HEAD --title "<title>"` - open one and
@@ -384,6 +385,10 @@ MCP the same verbs are `present_new`, `present_comment`, `present_reply`,
   review. `present list` lists the task's reviews.
 - `"$TERMIC_CLI" present claim r1` - from another agent tab of the task,
   take the review over: the user's next comments go there.
+- `"$TERMIC_CLI" present resolve r1-t3` - mark a thread settled once its
+  point is dealt with; `present unresolve r1-t3` reopens it. A reply from
+  either side reopens it too, and the user is not messaged. To say
+  "fixed" and close it, reply first, then resolve.
 
 The range never moves. After an amend, rebase or new commit, open a fresh
 review for the next round instead of commenting on the old one. A caged

@@ -221,14 +221,42 @@ export function buildCard(comment: ReviewComment, onEdit: () => void): HTMLEleme
 }
 
 /** One thread of an agent-presented review: its location, then every comment
- *  in order under an author line (the agent's name, or "You"). */
-export function buildThreadCard(thread: ReviewThread, onReply: () => void): HTMLElement {
+ *  in order under an author line (the agent's name, or "You"). A resolved
+ *  thread shows only its header unless `expanded`, with a toggle on the
+ *  location. The host owns `expanded` and rebuilds the card to change it. */
+export function buildThreadCard(thread: ReviewThread, expanded: boolean, host: {
+  onReply: () => void;
+  onResolve: (resolved: boolean) => Promise<void>;
+  onToggle: () => void;
+}): HTMLElement {
   const wrap = el("div", "tc-comment-card tc-thread-card");
   wrap.dataset.threadId = thread.id;
+  wrap.dataset.resolved = String(!!thread.resolved);
   const head = el("div", "tc-comment-card-head");
-  head.appendChild(el("span", "tc-comment-loc", locLabel(thread.start_line, thread.end_line, thread.file)));
+  const loc = locLabel(thread.start_line, thread.end_line, thread.file);
+  const resolved = thread.resolved;
+  if (resolved) {
+    wrap.dataset.collapsed = String(!expanded);
+    const toggle = button("tc-comment-loc tc-thread-toggle", `${expanded ? "▾" : "▸"} ${loc}`, host.onToggle);
+    toggle.setAttribute("aria-expanded", String(expanded));
+    keepFocus(toggle);
+    const lead = el("span", "");
+    lead.appendChild(toggle);
+    const chip = el("span", "tc-thread-chip", t("resolved"));
+    chip.title = t("resolvedBy", { who: resolved.by === "user" ? t("you") : resolved.author });
+    lead.appendChild(chip);
+    head.appendChild(lead);
+  } else {
+    head.appendChild(el("span", "tc-comment-loc", loc));
+  }
   const tools = el("div", "tc-comment-tools");
-  tools.appendChild(button("tc-icon-btn tc-btn-reply", t("replyAction"), onReply));
+  tools.appendChild(button("tc-icon-btn tc-btn-reply", t("replyAction"), host.onReply));
+  const resolve = button("tc-icon-btn tc-btn-resolve", resolved ? t("unresolveAction") : t("resolveAction"), () => {
+    resolve.disabled = true;
+    void host.onResolve(!resolved).finally(() => { resolve.disabled = false; });
+  });
+  keepFocus(resolve);
+  tools.appendChild(resolve);
   head.appendChild(tools);
   wrap.appendChild(head);
   for (const c of thread.comments) {
@@ -239,4 +267,11 @@ export function buildThreadCard(thread: ReviewThread, onReply: () => void): HTML
     wrap.appendChild(entry);
   }
   return wrap;
+}
+
+/** A click on `b` leaves focus where it was. The resolve button's card is
+ *  rebuilt once the write lands, and a focused button that leaves the DOM
+ *  drops focus to <body>, which takes ⌘W and pane switching with it. */
+function keepFocus(b: HTMLButtonElement) {
+  b.addEventListener("mousedown", e => e.preventDefault());
 }

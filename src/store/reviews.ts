@@ -1,6 +1,6 @@
 // Mirror of the task's agent-presented reviews (data-model.md, "Review").
 // Rust owns the file; this store only ever holds what a `review_changed`
-// push, `review_list` or `review_post` handed it. Separate from useApp so a
+// push, `review_list`, `review_post` or `review_resolve` handed it. Separate from useApp so a
 // comment landing does not copy useApp's state and re-run every selector.
 
 import { create } from "zustand";
@@ -12,7 +12,7 @@ const reviewKey = (taskId: string, reviewId: string) => `${taskId}/${reviewId}`;
 export interface ReviewsState {
   byKey: Record<string, Review>;
   idsByTask: Record<string, string[]>;
-  /** Threads whose last comment is the agent's, across the task's reviews. */
+  /** Open threads whose last comment is the agent's, across the task's reviews. */
   awaiting: Record<string, number>;
   loaded: Record<string, true>;
   /** The review Compare shows for a task; null or absent is branch compare. */
@@ -29,7 +29,7 @@ const reviewNumber = (id: string) => Number(id.slice(1));
 
 /** `s` itself when the review's seq is not newer, so the caller can bail
  *  without notifying (bear trap 8). Rust bumps seq on every change, claims
- *  included, so seq alone orders a push against a late `review_list`. */
+ *  and resolves included, so seq alone orders a push against a late `review_list`. */
 function merge<S extends Data>(s: S, taskId: string, review: Review): S {
   const k = reviewKey(taskId, review.id);
   const old = s.byKey[k];
@@ -44,7 +44,7 @@ function merge<S extends Data>(s: S, taskId: string, review: Review): S {
   let count = 0;
   for (const id of idsByTask[taskId]) {
     for (const t of byKey[reviewKey(taskId, id)].threads) {
-      if (t.comments[t.comments.length - 1]?.by === "agent") count++;
+      if (!t.resolved && t.comments[t.comments.length - 1]?.by === "agent") count++;
     }
   }
   const awaiting = s.awaiting[taskId] === count ? s.awaiting : { ...s.awaiting, [taskId]: count };

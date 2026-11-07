@@ -13,12 +13,15 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { EditorView } from "@codemirror/view";
 import { reviewCommentsExtension, dispatchFileComment, dispatchSelectionComment } from "./reviewCommentsExt";
-import { sendReviewComments } from "@/lib/sendReviewComments";
+import { sendReviewComments, resolveReviewThread } from "@/lib/sendReviewComments";
 import { useReviewComments } from "@/store/reviewComments";
 import { useReviews } from "@/store/reviews";
 import type { Review, ReviewThread } from "@/lib/types";
 
-vi.mock("@/lib/sendReviewComments", () => ({ sendReviewComments: vi.fn(async () => true) }));
+vi.mock("@/lib/sendReviewComments", () => ({
+  sendReviewComments: vi.fn(async () => true),
+  resolveReviewThread: vi.fn(async () => {}),
+}));
 
 const TASK = "task-157";
 const FILE = "src/thing.ts";
@@ -517,6 +520,120 @@ describe("agent-presented review threads in a review: diff", () => {
     await settle();
 
     expect(authors(cards(view)[0])).toEqual(["claude", "You"]);
+  });
+
+  const resolvedBy = (th: ReviewThread, by: "agent" | "user"): ReviewThread =>
+    ({ ...th, resolved: { by, author: by === "agent" ? "claude" : "", at: "" } });
+  const stripedLines = (view: EditorView) => view.contentDOM.querySelectorAll(".tc-commented-line").length;
+
+  it("mounts a resolved thread collapsed behind a Resolved chip naming who resolved it, with no line stripe", async () => {
+    putReview(1, [resolvedBy(thread("r1-t1", FILE, [2, 3], "agent"), "agent")]);
+    const view = mountReview();
+    await settle();
+
+    const card = cards(view)[0];
+    expect(card.dataset.resolved).toBe("true");
+    expect(card.dataset.collapsed).toBe("true");
+    expect(card.querySelector(".tc-thread-chip")?.textContent).toBe("Resolved");
+    expect(card.querySelector<HTMLElement>(".tc-thread-chip")?.title).toBe("Resolved by claude");
+    expect(card.querySelector(".tc-thread-toggle")?.getAttribute("aria-expanded")).toBe("false");
+    expect(card.querySelector(".tc-btn-resolve")?.textContent).toBe("Unresolve");
+    expect(stripedLines(view)).toBe(0);
+  });
+
+  it("names the user as You in a user-resolved thread's chip title", async () => {
+    putReview(1, [resolvedBy(thread("r1-t1", FILE, [2, 2], "agent"), "user")]);
+    const view = mountReview();
+    await settle();
+
+    expect(cards(view)[0].querySelector<HTMLElement>(".tc-thread-chip")?.title).toBe("Resolved by You");
+  });
+
+  it("expands and collapses a resolved thread from its location toggle by rebuilding the card", async () => {
+    putReview(1, [resolvedBy(thread("r1-t1", FILE, [2, 2], "agent"), "user")]);
+    const view = mountReview();
+    await settle();
+    const first = cards(view)[0];
+    const toggle = () => cards(view)[0].querySelector<HTMLButtonElement>(".tc-thread-toggle")!;
+    const read = () => ({
+      collapsed: cards(view)[0].dataset.collapsed, expanded: toggle().getAttribute("aria-expanded"), text: toggle().textContent,
+    });
+
+    toggle().click();
+    const opened = { ...read(), rebuilt: cards(view)[0] !== first };
+    toggle().click();
+
+    expect(opened).toEqual({ collapsed: "false", expanded: "true", text: "▾ thing.ts · line 2", rebuilt: true });
+    expect(read()).toEqual({ collapsed: "true", expanded: "false", text: "▸ thing.ts · line 2" });
+  });
+
+  it("keeps a thread expanded across a push that grows it, and collapses it again after a reopen and re-resolve", async () => {
+    putReview(1, [resolvedBy(thread("r1-t1", FILE, [2, 2], "agent"), "user")]);
+    const view = mountReview();
+    await settle();
+    cards(view)[0].querySelector<HTMLButtonElement>(".tc-thread-toggle")!.click();
+
+    putReview(2, [resolvedBy(thread("r1-t1", FILE, [2, 2], "agent", "user"), "user")]);
+    await settle();
+    const afterGrow = cards(view)[0].dataset.collapsed;
+    putReview(3, [thread("r1-t1", FILE, [2, 2], "agent", "user")]);
+    await settle();
+    putReview(4, [resolvedBy(thread("r1-t1", FILE, [2, 2], "agent", "user"), "user")]);
+    await settle();
+
+    expect(afterGrow).toBe("false");
+    expect(cards(view)[0].dataset.collapsed).toBe("true");
+  });
+
+  it("resolves an open thread and reopens a resolved one through resolveReviewThread, never through a send", async () => {
+    vi.mocked(resolveReviewThread).mockClear();
+    vi.mocked(sendReviewComments).mockClear();
+    putReview(1, [thread("r1-t1", FILE, [2, 2], "agent"), resolvedBy(thread("r1-t2", FILE, [4, 4], "agent"), "user")]);
+    const view = mountReview();
+    await settle();
+    const resolveBtn = (id: string) => view.contentDOM.querySelector<HTMLButtonElement>(`[data-thread-id="${id}"] .tc-btn-resolve`)!;
+
+    const openLabel = resolveBtn("r1-t1").textContent;
+    resolveBtn("r1-t1").click();
+    resolveBtn("r1-t2").click();
+    await settle();
+
+    expect(openLabel).toBe("Resolve");
+    expect(vi.mocked(resolveReviewThread).mock.calls).toEqual([[TASK, "r1-t1", true], [TASK, "r1-t2", false]]);
+    expect(sendReviewComments).not.toHaveBeenCalled();
+  });
+
+  it("keeps focus where it was when the resolve button or toggle is pressed", async () => {
+    putReview(1, [resolvedBy(thread("r1-t1", FILE, [2, 2], "agent"), "user")]);
+    const view = mountReview();
+    await settle();
+    const card = cards(view)[0];
+
+    const pressed = [".tc-btn-resolve", ".tc-thread-toggle"].map(sel => {
+      const e = new MouseEvent("mousedown", { bubbles: true, cancelable: true });
+      card.querySelector(sel)!.dispatchEvent(e);
+      return e.defaultPrevented;
+    });
+
+    expect(pressed).toEqual([true, true]);
+  });
+
+  it("rebuilds the card and its stripe when a push resolves or reopens a thread with no new comment", async () => {
+    putReview(1, [thread("r1-t1", FILE, [2, 2], "agent")]);
+    const view = mountReview();
+    await settle();
+    const openStripes = stripedLines(view);
+
+    putReview(2, [resolvedBy(thread("r1-t1", FILE, [2, 2], "agent"), "agent")]);
+    await settle();
+    const resolvedState = { resolved: cards(view)[0].dataset.resolved, stripes: stripedLines(view) };
+    putReview(3, [thread("r1-t1", FILE, [2, 2], "agent")]);
+    await settle();
+
+    expect(openStripes).toBe(1);
+    expect(resolvedState).toEqual({ resolved: "true", stripes: 0 });
+    expect(cards(view)[0].dataset.resolved).toBe("false");
+    expect(stripedLines(view)).toBe(1);
   });
 
   it("does not dispatch when a push leaves this file's threads unchanged", async () => {

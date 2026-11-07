@@ -1270,6 +1270,15 @@ export interface ReviewThread {
   /** "" at file level. */
   quote: string;
   comments: ReviewThreadComment[];
+  /** Absent while the thread is open. */
+  resolved?: ReviewThreadResolved;
+}
+
+export interface ReviewThreadResolved {
+  by: "agent" | "user";
+  /** The review's author when the agent resolved it; "" for the user. */
+  author: string;
+  at: string;
 }
 
 /** Named apart from store/reviewComments' `ReviewComment` (a local draft). */

@@ -16,7 +16,8 @@ use std::path::{Path, PathBuf};
 
 use termic_proto::{
     review_author_problem, review_body_problem, review_id_problem, review_range_problem,
-    review_title_problem, Review, ReviewBy, ReviewComment, ReviewThread,
+    review_thread_id_problem, review_title_problem, split_thread_id, Review, ReviewBy, ReviewComment,
+    ReviewResolved, ReviewThread,
     REVIEW_COMMENTS_PER_THREAD_MAX, REVIEW_QUOTE_MAX, REVIEW_THREADS_MAX,
 };
 
@@ -39,6 +40,7 @@ pub(crate) enum ReviewOp {
     Comment { file: String, lines: Option<(u32, u32)>, body: String, by: ReviewBy, author: String, quote: Option<String> },
     Reply { thread_id: String, body: String, by: ReviewBy, author: String },
     Claim { tab: String, author: Option<String> },
+    Resolve { thread_id: String, resolved: bool, by: ReviewBy },
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
@@ -308,6 +310,7 @@ pub(crate) fn apply(task: &Task, review_id: &str, ops: Vec<ReviewOp>) -> Result<
                     end_line: lines.map(|l| l.1),
                     quote: quote.chars().take(REVIEW_QUOTE_MAX).collect(),
                     comments: vec![comment],
+                    resolved: None,
                 });
             }
             ReviewOp::Reply { thread_id, body, by, author } => {
@@ -324,6 +327,8 @@ pub(crate) fn apply(task: &Task, review_id: &str, ops: Vec<ReviewOp>) -> Result<
                 }
                 posted.push(Posted { thread_id, seq: comment.seq, new_thread: false });
                 thread.comments.push(comment);
+                // A reply reopens, or it would sit collapsed outside the awaiting count.
+                thread.resolved = None;
             }
             ReviewOp::Claim { tab, author } => {
                 let before = (r.recipient_tab.clone(), r.author.clone());
@@ -340,6 +345,25 @@ pub(crate) fn apply(task: &Task, review_id: &str, ops: Vec<ReviewOp>) -> Result<
                     r.seq += 1;
                 }
             }
+            ReviewOp::Resolve { thread_id, resolved, by } => {
+                let author = r.author.clone();
+                let thread = r
+                    .threads
+                    .iter_mut()
+                    .find(|t| t.id == thread_id)
+                    .ok_or_else(|| ReviewError::NoSuchThread(thread_id.clone()))?;
+                if thread.resolved.is_some() != resolved {
+                    thread.resolved = resolved.then(|| ReviewResolved {
+                        by,
+                        author: match by {
+                            ReviewBy::Agent => author,
+                            ReviewBy::User => String::new(),
+                        },
+                        at: now(),
+                    });
+                    r.seq += 1;
+                }
+            }
         }
     }
     let changed = r != stored;
@@ -347,6 +371,16 @@ pub(crate) fn apply(task: &Task, review_id: &str, ops: Vec<ReviewOp>) -> Result<
         write(&dir, &r)?;
     }
     Ok((r, posted, changed))
+}
+
+/// Resolves or reopens thread `thread_id` (`r1-t3`). The bool is false when
+/// it was already in that state, and then nothing is written.
+pub(crate) fn set_resolved(task: &Task, thread_id: &str, resolved: bool, by: ReviewBy) -> Result<(Review, bool), ReviewError> {
+    let (review_id, _) = split_thread_id(thread_id)
+        .ok_or_else(|| ReviewError::Invalid(review_thread_id_problem(thread_id).unwrap_or_default()))?;
+    let (review, _, changed) =
+        apply(task, review_id, vec![ReviewOp::Resolve { thread_id: thread_id.into(), resolved, by }])?;
+    Ok((review, changed))
 }
 
 /// Validates the comment and takes the review's next seq for it.
@@ -830,6 +864,7 @@ mod tests {
                 end_line: None,
                 quote: String::new(),
                 comments: Vec::new(),
+                resolved: None,
             };
             full.threads = (1..=REVIEW_THREADS_MAX).map(thread).collect();
             write(&data.join("scratch/t1/reviews"), &full).unwrap();
@@ -893,6 +928,150 @@ mod tests {
             fs::set_permissions(&reviews, fs::Permissions::from_mode(0o755)).unwrap();
             assert_eq!(same.unwrap().2, false);
             assert!(matches!(other, Err(ReviewError::Io(_))), "the read-only guard is not doing anything");
+        });
+    }
+
+    /// r1 with one agent thread, r1-t1, at seq 1.
+    fn review_with_a_thread(t: &Task) {
+        new_review(t);
+        apply(t, "r1", vec![agent_comment("a.txt", Some((1, 1)), "why")]).unwrap();
+    }
+
+    #[test]
+    fn agent_resolve_records_the_reviews_author_bumps_seq_once_and_writes() {
+        let dir = repo();
+        let t = task(dir.path());
+        with_scratch_data_dir(|_| {
+            review_with_a_thread(&t);
+
+            let (r, changed) = set_resolved(&t, "r1-t1", true, ReviewBy::Agent).unwrap();
+
+            assert!(changed);
+            assert_eq!(r.seq, 2);
+            let res = r.threads[0].resolved.as_ref().unwrap();
+            assert_eq!((res.by, res.author.as_str()), (ReviewBy::Agent, "claude"));
+            assert!(!res.at.is_empty());
+            assert_eq!(load(&t, "r1").unwrap(), r);
+        });
+    }
+
+    #[test]
+    fn user_resolve_records_an_empty_author() {
+        let dir = repo();
+        let t = task(dir.path());
+        with_scratch_data_dir(|_| {
+            review_with_a_thread(&t);
+
+            let (r, _) = set_resolved(&t, "r1-t1", true, ReviewBy::User).unwrap();
+
+            let res = r.threads[0].resolved.as_ref().unwrap();
+            assert_eq!((res.by, res.author.as_str()), (ReviewBy::User, ""));
+        });
+    }
+
+    #[test]
+    fn resolving_an_already_resolved_thread_reports_unchanged_and_keeps_seq_and_the_first_record() {
+        let dir = repo();
+        let t = task(dir.path());
+        with_scratch_data_dir(|_| {
+            review_with_a_thread(&t);
+            let (first, _) = set_resolved(&t, "r1-t1", true, ReviewBy::User).unwrap();
+
+            let (r, changed) = set_resolved(&t, "r1-t1", true, ReviewBy::Agent).unwrap();
+
+            assert!(!changed);
+            assert_eq!(r, first);
+        });
+    }
+
+    #[test]
+    fn unresolve_clears_the_record_and_bumps_seq() {
+        let dir = repo();
+        let t = task(dir.path());
+        with_scratch_data_dir(|_| {
+            review_with_a_thread(&t);
+            set_resolved(&t, "r1-t1", true, ReviewBy::User).unwrap();
+
+            let (r, changed) = set_resolved(&t, "r1-t1", false, ReviewBy::Agent).unwrap();
+
+            assert!(changed);
+            assert_eq!(r.seq, 3);
+            assert_eq!(r.threads[0].resolved, None);
+            assert_eq!(load(&t, "r1").unwrap(), r);
+        });
+    }
+
+    #[test]
+    fn unresolving_an_open_thread_reports_unchanged_and_keeps_seq() {
+        let dir = repo();
+        let t = task(dir.path());
+        with_scratch_data_dir(|_| {
+            review_with_a_thread(&t);
+
+            let (r, changed) = set_resolved(&t, "r1-t1", false, ReviewBy::User).unwrap();
+
+            assert!(!changed);
+            assert_eq!(r.seq, 1);
+        });
+    }
+
+    #[test]
+    fn a_reply_from_the_user_or_the_agent_reopens_a_resolved_thread() {
+        let dir = repo();
+        let t = task(dir.path());
+        with_scratch_data_dir(|_| {
+            review_with_a_thread(&t);
+            let agent_reply =
+                ReviewOp::Reply { thread_id: "r1-t1".into(), body: "fixed".into(), by: ReviewBy::Agent, author: "claude".into() };
+
+            set_resolved(&t, "r1-t1", true, ReviewBy::Agent).unwrap();
+            let (after_user, _, _) = apply(&t, "r1", vec![user_reply("r1-t1", "not quite")]).unwrap();
+            set_resolved(&t, "r1-t1", true, ReviewBy::User).unwrap();
+            let (after_agent, _, _) = apply(&t, "r1", vec![agent_reply]).unwrap();
+
+            assert_eq!(after_user.threads[0].resolved, None);
+            assert_eq!(after_agent.threads[0].resolved, None);
+        });
+    }
+
+    #[test]
+    fn set_resolved_on_an_unknown_thread_is_no_such_thread() {
+        let dir = repo();
+        let t = task(dir.path());
+        with_scratch_data_dir(|_| {
+            review_with_a_thread(&t);
+
+            let r = set_resolved(&t, "r1-t9", true, ReviewBy::Agent);
+
+            assert_eq!(r.unwrap_err(), ReviewError::NoSuchThread("r1-t9".into()));
+        });
+    }
+
+    #[test]
+    fn set_resolved_with_a_malformed_thread_id_is_invalid_before_touching_the_disk() {
+        let dir = repo();
+        let t = task(dir.path());
+        with_scratch_data_dir(|_| {
+            let r = set_resolved(&t, "r1", true, ReviewBy::Agent);
+
+            assert!(matches!(r, Err(ReviewError::Invalid(ref m)) if m.contains("not a thread id")), "{r:?}");
+        });
+    }
+
+    #[test]
+    fn a_stored_thread_with_no_resolved_key_loads_as_open() {
+        let dir = repo();
+        let t = task(dir.path());
+        with_scratch_data_dir(|data| {
+            review_with_a_thread(&t);
+            let path = data.join("scratch/t1/reviews/r1.json");
+            let mut json: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+            json["threads"][0].as_object_mut().unwrap().remove("resolved");
+            fs::write(&path, json.to_string()).unwrap();
+
+            let r = load(&t, "r1").unwrap();
+
+            assert_eq!(r.threads[0].resolved, None);
         });
     }
 

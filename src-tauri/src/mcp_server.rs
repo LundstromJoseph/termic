@@ -1811,6 +1811,44 @@ const TOOLS: &[ToolDef] = &[
         }),
     },
     ToolDef {
+        name: "present_resolve",
+        cli_verb: "present resolve",
+        description: "Mark a review thread resolved; the user is not messaged.",
+        params: &[
+            P_PAD_TASK,
+            P_PROJECT,
+            ParamDef { name: "thread", json_type: "string", required: true, description: "r1-t3", cli_flag: Some("thread") },
+        ],
+        destructive: false,
+        read_only: false,
+        build: |a| Ok(Command::PresentResolve {
+            task: arg_str(a, "task")?,
+            project: arg_str(a, "project")?,
+            thread: need_str(a, "thread")?,
+            resolved: true,
+            cwd: None,
+        }),
+    },
+    ToolDef {
+        name: "present_unresolve",
+        cli_verb: "present unresolve",
+        description: "Reopen a resolved review thread.",
+        params: &[
+            P_PAD_TASK,
+            P_PROJECT,
+            ParamDef { name: "thread", json_type: "string", required: true, description: "r1-t3", cli_flag: Some("thread") },
+        ],
+        destructive: false,
+        read_only: false,
+        build: |a| Ok(Command::PresentResolve {
+            task: arg_str(a, "task")?,
+            project: arg_str(a, "project")?,
+            thread: need_str(a, "thread")?,
+            resolved: false,
+            cwd: None,
+        }),
+    },
+    ToolDef {
         name: "task_agents",
         cli_verb: "agents",
         description: "List the agent CLIs this app can run: the ids task_new and task_tab accept, with whether each is installed and usable, and each agent's named accounts (what task_new's account takes) with the default. Without this a caller has to guess an agent id and read the refusal.",
@@ -2260,6 +2298,7 @@ const SELF_DEFAULT_TOOLS: &[&str] = &[
     "task_rename", "task_group", "task_tab", "task_prop",
     "task_badge_set", "task_badge_remove", "task_badge_list",
     "present_new", "present_comment", "present_reply", "present_show", "present_list", "present_claim",
+    "present_resolve", "present_unresolve",
     "scratchpad_new", "scratchpad_write", "scratchpad_read", "scratchpad_list",
     "scratchpad_remove", "scratchpad_clear",
     "schedule_show", "schedule_set", "schedule_run", "schedule_delete",
@@ -4192,7 +4231,10 @@ mod tests {
         // descriptions are a clause, and about 1.7 KB of it is the task and
         // project params every one repeats. Measured, not rounded: the
         // size happens to land on 33200 exactly.
-        const RECORDED: usize = 33200;
+        // 34100: present_resolve / present_unresolve, parity with `termic
+        // present resolve|unresolve`. Two tools for two CLI verbs; the one
+        // thread param and a clause each. Also lands on a round number.
+        const RECORDED: usize = 34100;
         assert!(
             size <= RECORDED,
             "serialized tools/list grew to {size} bytes (recorded {RECORDED}); grow it consciously"
@@ -4399,6 +4441,8 @@ mod tests {
         let list = call("present_list", serde_json::json!({})).unwrap();
         let claim = call("present_claim", serde_json::json!({ "review": "r1", "tab": "tab-2" })).unwrap();
         let claim_no_tab = call("present_claim", serde_json::json!({ "review": "r1" }));
+        let resolve = call("present_resolve", serde_json::json!({ "thread": "r1-t2" })).unwrap();
+        let unresolve = call("present_unresolve", serde_json::json!({ "thread": "r1-t2" })).unwrap();
 
         assert!(matches!(&new, Command::PresentNew { task: Some(t), range, tab: Some(tab), title: Some(ti), author: None, repo: None, cwd: None, .. }
             if t == "me" && range == "main..HEAD" && tab == "tab-1" && ti == "T"));
@@ -4411,10 +4455,12 @@ mod tests {
         assert!(matches!(&list, Command::PresentList { task: Some(t), .. } if t == "me"));
         assert!(matches!(&claim, Command::PresentClaim { tab: Some(tab), author: None, .. } if tab == "tab-2"));
         assert!(claim_no_tab.unwrap_err().contains("tab"));
+        assert!(matches!(&resolve, Command::PresentResolve { task: Some(t), thread, resolved: true, .. } if t == "me" && thread == "r1-t2"));
+        assert!(matches!(&unresolve, Command::PresentResolve { task: Some(t), thread, resolved: false, .. } if t == "me" && thread == "r1-t2"));
         for n in ["present_show", "present_list"] {
             assert_eq!(tool_entry(tool(n))["annotations"]["readOnlyHint"], true, "{n}");
         }
-        for n in ["present_new", "present_comment", "present_reply", "present_claim"] {
+        for n in ["present_new", "present_comment", "present_reply", "present_claim", "present_resolve", "present_unresolve"] {
             assert_eq!(tool_entry(tool(n))["annotations"]["destructiveHint"], false, "{n}");
         }
     }

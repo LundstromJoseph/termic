@@ -510,6 +510,10 @@ export default {
     reply: "Reply to {{thread}} · {{loc}}",
     pendingReply: "Pending reply to {{thread}} · {{loc}}",
     replyAction: "Reply",
+    resolveAction: "Resolve",
+    unresolveAction: "Unresolve",
+    resolved: "Resolved",
+    resolvedBy: "Resolved by {{who}}",
   },
 
   blame: {

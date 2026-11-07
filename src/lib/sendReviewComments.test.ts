@@ -14,18 +14,19 @@ vi.mock("@/lib/ipc", () => ({
   detectClis: vi.fn().mockResolvedValue([]),
   reviewList: vi.fn().mockResolvedValue([]),
   reviewPost: vi.fn(),
+  reviewResolve: vi.fn(),
 }));
 vi.mock("@/lib/tabFocus", () => ({ focusTerminalTab: vi.fn() }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn().mockResolvedValue(() => {}) }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn().mockResolvedValue(null) }));
 vi.mock("@/lib/agentSend", () => ({ deliverMessage: vi.fn().mockResolvedValue(undefined) }));
 
-import { sendReviewComments, sendPendingComments } from "@/lib/sendReviewComments";
+import { sendReviewComments, sendPendingComments, resolveReviewThread } from "@/lib/sendReviewComments";
 import { useApp } from "@/store/app";
 import { useUI } from "@/store/ui";
 import { useReviews } from "@/store/reviews";
 import { deliverMessage } from "@/lib/agentSend";
-import { reviewPost } from "@/lib/ipc";
+import { reviewPost, reviewResolve } from "@/lib/ipc";
 import { focusTerminalTab } from "@/lib/tabFocus";
 import type { ReviewComment } from "@/store/reviewComments";
 import type { Review, ReviewPostItem, ReviewPostResult, Task, Tab, TerminalTab } from "@/lib/types";
@@ -172,6 +173,38 @@ describe("sendReviewComments", () => {
 
     expect(ok).toBe(true);
     expect(toasts()).toEqual([{ msg: "Saved to review r1, but reviewer could not be reached.", kind: "error" }]);
+  });
+});
+
+describe("resolveReviewThread", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useUI.setState({ toasts: [] });
+  });
+
+  it("applies the returned review to the store and delivers nothing to the agent", async () => {
+    seed();
+    const resolved = review({ seq: 2 });
+    resolved.threads[0].resolved = { by: "user", author: "", at: "" };
+    vi.mocked(reviewResolve).mockResolvedValueOnce(resolved);
+
+    await resolveReviewThread("ws1", "r1-t1", true);
+
+    expect(vi.mocked(reviewResolve).mock.calls).toEqual([["ws1", "r1-t1", true]]);
+    expect(useReviews.getState().byKey["ws1/r1"].threads[0].resolved).toEqual({ by: "user", author: "", at: "" });
+    expect(deliverMessage).not.toHaveBeenCalled();
+    expect(toasts()).toEqual([]);
+  });
+
+  it("toasts the error and leaves the store alone when the write is refused", async () => {
+    seed();
+    const before = useReviews.getState().byKey["ws1/r1"];
+    vi.mocked(reviewResolve).mockRejectedValueOnce("no such thread r1-t9");
+
+    await resolveReviewThread("ws1", "r1-t9", true);
+
+    expect(useReviews.getState().byKey["ws1/r1"]).toBe(before);
+    expect(toasts()).toEqual([{ msg: "Could not update thread r1-t9: no such thread r1-t9", kind: "error" }]);
   });
 });
 

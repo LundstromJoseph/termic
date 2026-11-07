@@ -107,6 +107,7 @@ export default {
     postFailed: "无法保存到评审 {{id}}：{{error}}",
     savedNoRecipient: "已保存到评审 {{id}}。它没有在线的智能体标签页：在某个智能体标签页中运行 termic present claim {{id}} 来接收。",
     deliveryFailed: "已保存到评审 {{id}}，但无法联系 {{name}}。",
+    resolveFailed: "无法更新讨论 {{id}}：{{error}}",
   },
 
   agentRace: {

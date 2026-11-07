@@ -505,6 +505,10 @@ export default {
     reply: "回复 {{thread}} · {{loc}}",
     pendingReply: "待发送回复 {{thread}} · {{loc}}",
     replyAction: "回复",
+    resolveAction: "解决",
+    unresolveAction: "重新打开",
+    resolved: "已解决",
+    resolvedBy: "由{{who}}标记为已解决",
   },
 
   blame: {

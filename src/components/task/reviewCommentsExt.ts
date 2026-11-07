@@ -24,6 +24,7 @@ import { StateField, StateEffect, type EditorState, RangeSet, type Range } from 
 import { useReviewComments, type ReviewComment } from "@/store/reviewComments";
 import { useReviews, selectReview } from "@/store/reviews";
 import type { ReviewThread } from "@/lib/types";
+import { resolveReviewThread } from "@/lib/sendReviewComments";
 import { buildCard, buildComposer, buildThreadCard, type CommentTarget, type ComposerSpec } from "./commentBoxes";
 import {
   anchorForLines, anchorStateChanged, linesForAnchor, mapAnchor, stateForAnchor, type Anchor,
@@ -40,6 +41,10 @@ interface CommentData {
   anchors: Map<string, Anchor>;
   /** An agent-presented review's threads on THIS file (review diffs only). */
   threads: ReviewThread[];
+  /** Resolved threads the user expanded. Held here, not in the card's DOM,
+   *  because CodeMirror never re-measures an attribute change inside a block
+   *  widget: a toggle has to rebuild the widget or the gutter drifts. */
+  expanded: ReadonlySet<string>;
 }
 
 /**
@@ -68,11 +73,12 @@ const setComments = StateEffect.define<ReviewComment[]>();
 const setThreads = StateEffect.define<ReviewThread[]>();
 const openComposer = StateEffect.define<ComposerSpec>();
 const closeComposer = StateEffect.define<void>();
+const toggleThread = StateEffect.define<string>();
 
 const dataField = StateField.define<CommentData>({
-  create: () => ({ comments: [], composer: null, anchors: new Map(), threads: [] }),
+  create: () => ({ comments: [], composer: null, anchors: new Map(), threads: [], expanded: new Set<string>() }),
   update(value, tr) {
-    let { comments, composer, anchors, threads } = value;
+    let { comments, composer, anchors, threads, expanded } = value;
     // 1. Edits move every held selection. Do this FIRST, so an anchor seeded
     //    in the same transaction (below) is not mapped through changes it was
     //    already built against.
@@ -100,6 +106,14 @@ const dataField = StateField.define<CommentData>({
         anchors = next;
       } else if (e.is(setThreads)) {
         threads = e.value;
+        // A reopened thread forgets it was expanded, so a later resolve collapses it again.
+        if ([...expanded].some(id => !threads.some(t => t.id === id && t.resolved))) {
+          expanded = new Set([...expanded].filter(id => threads.some(t => t.id === id && t.resolved)));
+        }
+      } else if (e.is(toggleThread)) {
+        const next = new Set(expanded);
+        if (!next.delete(e.value)) next.add(e.value);
+        expanded = next;
       } else if (e.is(openComposer)) {
         composer = e.value;
       } else if (e.is(closeComposer)) {
@@ -107,10 +121,10 @@ const dataField = StateField.define<CommentData>({
       }
     }
     if (comments === value.comments && composer === value.composer && anchors === value.anchors
-      && threads === value.threads) {
+      && threads === value.threads && expanded === value.expanded) {
       return value;
     }
-    return { comments, composer, anchors, threads };
+    return { comments, composer, anchors, threads, expanded };
   },
 });
 
@@ -256,19 +270,26 @@ class CommentCardWidget extends WidgetType {
 }
 
 class ThreadCardWidget extends WidgetType {
-  constructor(readonly thread: ReviewThread) { super(); }
+  constructor(readonly thread: ReviewThread, readonly expanded: boolean, readonly ctx: CommentTarget) { super(); }
 
-  // A thread only ever grows: comments are appended, never edited.
+  // A thread changes by growing (comments are appended, never edited), by
+  // being resolved or reopened, or by the user expanding or collapsing it.
   eq(other: ThreadCardWidget) {
     return other.thread.id === this.thread.id
-      && other.thread.comments.length === this.thread.comments.length;
+      && other.thread.comments.length === this.thread.comments.length
+      && !!other.thread.resolved === !!this.thread.resolved
+      && other.expanded === this.expanded;
   }
 
   toDOM(view: EditorView) {
     const th = this.thread;
-    const wrap = buildThreadCard(th, () => view.dispatch({
-      effects: openComposer.of({ threadId: th.id, startLine: th.start_line, endLine: th.end_line, quote: "", body: "" }),
-    }));
+    const wrap = buildThreadCard(th, this.expanded, {
+      onReply: () => view.dispatch({
+        effects: openComposer.of({ threadId: th.id, startLine: th.start_line, endLine: th.end_line, quote: "", body: "" }),
+      }),
+      onResolve: resolved => resolveReviewThread(this.ctx.taskId, th.id, resolved),
+      onToggle: () => view.dispatch({ effects: toggleThread.of(th.id) }),
+    });
     sizeToPane(wrap, view);
     return blockShell(wrap);
   }
@@ -279,7 +300,7 @@ class ThreadCardWidget extends WidgetType {
 // ── Decorations ─────────────────────────────────────────────────────────────
 
 function buildDeco(state: EditorState, ctx: CommentTarget): DecorationSet {
-  const { comments, composer, anchors, threads } = state.field(dataField);
+  const { comments, composer, anchors, threads, expanded } = state.field(dataField);
   const ranges: Range<Decoration>[] = [];
   // Where a comment sits RIGHT NOW: its mapped anchor while we hold one (the
   // store's line numbers lag by a keystroke), else the stored lines.
@@ -307,15 +328,16 @@ function buildDeco(state: EditorState, ctx: CommentTarget): DecorationSet {
   // head blob, so they need no anchor; the clamp only guards a bad file.
   for (const th of threads) {
     if (th.start_line == null) {
-      ranges.push(Decoration.widget({ widget: new ThreadCardWidget(th), block: true, side: -3 }).range(0));
+      ranges.push(Decoration.widget({ widget: new ThreadCardWidget(th, expanded.has(th.id), ctx), block: true, side: -3 }).range(0));
       continue;
     }
     const start = clampLine(state, th.start_line);
     const end = clampLine(state, th.end_line ?? th.start_line);
-    for (let i = start; i <= end; i++) {
+    // A resolved thread no longer marks its lines.
+    for (let i = start; !th.resolved && i <= end; i++) {
       ranges.push(Decoration.line({ class: "tc-commented-line" }).range(state.doc.line(i).from));
     }
-    ranges.push(Decoration.widget({ widget: new ThreadCardWidget(th), block: true, side: 1 }).range(state.doc.line(end).to));
+    ranges.push(Decoration.widget({ widget: new ThreadCardWidget(th, expanded.has(th.id), ctx), block: true, side: 1 }).range(state.doc.line(end).to));
   }
 
   // Committed comment cards (skip the one currently being edited).
@@ -420,8 +442,8 @@ function storeSyncPlugin(ctx: CommentTarget) {
 }
 
 /** The shown review's threads on `file`, kept in step with the reviews store.
- *  Same two guards as storeSyncPlugin; the signature is id + comment count,
- *  because a thread only changes by growing. */
+ *  Same two guards as storeSyncPlugin; the signature is id + comment count +
+ *  resolved, because a thread changes by growing or by being resolved. */
 function reviewSyncPlugin(taskId: string, reviewId: string, file: string) {
   return ViewPlugin.define((view): PluginValue => {
     let destroyed = false;
@@ -431,7 +453,7 @@ function reviewSyncPlugin(taskId: string, reviewId: string, file: string) {
       const review = selectReview(taskId, reviewId)(useReviews.getState());
       const pfx = review?.dir_name ? `${review.dir_name}/` : "";
       const threads = review ? review.threads.filter(t => pfx + t.file === file) : [];
-      const sig = JSON.stringify(threads.map(t => [t.id, t.comments.length]));
+      const sig = JSON.stringify(threads.map(t => [t.id, t.comments.length, !!t.resolved]));
       if (sig === lastSig) return;
       lastSig = sig;
       view.dispatch({ effects: setThreads.of(threads) });

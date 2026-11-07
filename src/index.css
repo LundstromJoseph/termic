@@ -879,6 +879,21 @@ html.termic-mod-held .xterm .xterm-cursor-pointer { cursor: pointer; }
   color: var(--color-fg-dim);
 }
 .tc-thread-entry[data-by="agent"] .tc-thread-author { color: var(--color-accent); }
+/* a resolved thread: no accent rail, and collapsed to its header until the
+   location toggle opens it. No transition on the rail: WKWebView never
+   repaints a transitioned themed border-color. */
+.tc-thread-card[data-resolved="true"] { border-left-color: var(--color-border); }
+.tc-thread-card[data-collapsed="true"] .tc-thread-entry { display: none; }
+.tc-thread-card[data-collapsed="true"] .tc-comment-card-head { margin-bottom: 0; }
+.tc-thread-toggle { background: none; border: 0; padding: 0; cursor: pointer; }
+.tc-thread-chip {
+  margin-left: 6px;
+  padding: 0 6px;
+  border-radius: 999px;
+  font-size: 10px;
+  background: var(--color-bg-3);
+  color: var(--color-fg-dim);
+}
 /* the selected code, quoted above the box: the same fenced snippet the agent
    is about to receive */
 .tc-comment-quote {

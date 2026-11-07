@@ -761,7 +761,12 @@ pub fn review_text(r: &termic_proto::Review) -> String {
             (Some(s), _) => format!("{}:{s}", t.file),
             _ => t.file.clone(),
         };
-        out.push_str(&format!("\n\n{} {loc}", t.id));
+        let resolved = match &t.resolved {
+            Some(r) if r.by == termic_proto::ReviewBy::User => " (resolved by You)".into(),
+            Some(r) => format!(" (resolved by {})", r.author),
+            None => String::new(),
+        };
+        out.push_str(&format!("\n\n{} {loc}{resolved}", t.id));
         for line in t.quote.lines() {
             out.push_str(&format!("\n> {line}"));
         }
@@ -1102,6 +1107,7 @@ mod tests {
                 end_line: Some(4),
                 quote: "let a = 1;\nlet b = 2;".into(),
                 comments: vec![comment(1, ReviewBy::Agent, "claude", "why two?"), comment(3, ReviewBy::User, "", "one\ntwo")],
+                resolved: None,
             },
             ReviewThread {
                 id: "r1-t2".into(),
@@ -1110,6 +1116,7 @@ mod tests {
                 end_line: Some(9),
                 quote: "x".into(),
                 comments: vec![comment(2, ReviewBy::Agent, "claude", "line")],
+                resolved: None,
             },
             ReviewThread {
                 id: "r1-t3".into(),
@@ -1118,6 +1125,7 @@ mod tests {
                 end_line: None,
                 quote: String::new(),
                 comments: vec![comment(4, ReviewBy::Agent, "claude", "generated")],
+                resolved: None,
             },
         ];
 
@@ -1152,6 +1160,26 @@ mod tests {
              Files:\n  a.rs\n  b.rs\n  (more not listed)\n\
              No comments."
         );
+    }
+
+    #[test]
+    fn review_text_marks_a_resolved_thread_header_with_you_or_the_resolving_agents_name() {
+        use termic_proto::{ReviewBy, ReviewResolved, ReviewThread};
+        let thread = |id: &str, by: ReviewBy, author: &str| ReviewThread {
+            id: id.into(),
+            file: "b.rs".into(),
+            start_line: None,
+            end_line: None,
+            quote: String::new(),
+            comments: vec![comment(1, ReviewBy::Agent, "claude", "x")],
+            resolved: Some(ReviewResolved { by, author: author.into(), at: String::new() }),
+        };
+        let threads = vec![thread("r1-t1", ReviewBy::User, ""), thread("r1-t2", ReviewBy::Agent, "Codex")];
+
+        let text = review_text(&review(threads, Some("t1")));
+
+        assert!(text.contains("\nr1-t1 b.rs (resolved by You)\n"), "{text}");
+        assert!(text.contains("\nr1-t2 b.rs (resolved by Codex)\n"), "{text}");
     }
 
     #[test]

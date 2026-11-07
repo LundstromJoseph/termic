@@ -133,6 +133,22 @@ describe("agent-presented review", () => {
       }));
     }, taskId) as Promise<{ id: string; authors: string[]; bodies: string[]; top: boolean }[]>;
 
+  /** How far the line numbers sit from their lines in the visible review
+   *  diff. Flushed first, since the occluded harness window never runs
+   *  CodeMirror's rAF measure. */
+  const drift = async () => {
+    expect(await flushEditorMeasure()).toBeGreaterThan(0);
+    return browser.execute((tid) => {
+      const ed = [...document.querySelectorAll(`[data-task-id="${tid}"] [data-testid="diff-pane"] .cm-editor`)]
+        .find((e) => e.getBoundingClientRect().height > 0)!;
+      const lines = [...ed.querySelector(".cm-content")!.children].filter((el) => el.classList.contains("cm-line"));
+      const nums = [...ed.querySelectorAll(".cm-lineNumbers .cm-gutterElement")]
+        .filter((el) => getComputedStyle(el).visibility !== "hidden");
+      const d = lines.map((l, i) => (nums[i]?.getBoundingClientRect().top ?? NaN) - l.getBoundingClientRect().top);
+      return { lines: lines.length, nums: nums.length, spread: Math.max(...d) - Math.min(...d) };
+    }, taskId);
+  };
+
   before(async () => {
     await waitForAppShell();
     await requireTermicApi();
@@ -273,20 +289,7 @@ describe("agent-presented review", () => {
     expect((await threadCards()).find(c => c.id === id)!.top).toBe(true);
 
     // The cards are block widgets above and between lines: the numbers must
-    // stay level with the code (GH #157). Flushed first, since the occluded
-    // harness window never runs CodeMirror's rAF measure.
-    const drift = async () => {
-      expect(await flushEditorMeasure()).toBeGreaterThan(0);
-      return browser.execute((tid) => {
-        const ed = [...document.querySelectorAll(`[data-task-id="${tid}"] [data-testid="diff-pane"] .cm-editor`)]
-          .find((e) => e.getBoundingClientRect().height > 0)!;
-        const lines = [...ed.querySelector(".cm-content")!.children].filter((el) => el.classList.contains("cm-line"));
-        const nums = [...ed.querySelectorAll(".cm-lineNumbers .cm-gutterElement")]
-          .filter((el) => getComputedStyle(el).visibility !== "hidden");
-        const d = lines.map((l, i) => (nums[i]?.getBoundingClientRect().top ?? NaN) - l.getBoundingClientRect().top);
-        return { lines: lines.length, nums: nums.length, spread: Math.max(...d) - Math.min(...d) };
-      }, taskId);
-    };
+    // stay level with the code (GH #157).
     await browser.waitUntil(async () => { const m = await drift(); return m.nums === m.lines && m.spread < 2; }, {
       timeout: 10_000, timeoutMsg: "the line numbers never settled level with the code around the thread cards",
     });
@@ -595,5 +598,100 @@ describe("agent-presented review", () => {
     await browser.waitUntil(async () => (await tabLogs(claimer)).includes(body),
       { timeout: 30_000, timeoutMsg: "the reply never reached the claiming tab" });
     expect(await tabLogs(agentTab)).not.toContain(body);
+  });
+
+  // ── Resolve / unresolve ─────────────────────────────────────────────────
+
+  /** The Compare sub-tab's awaiting pill; it is not rendered at 0. */
+  const awaiting = () =>
+    browser.execute(() => Number(
+      (document.querySelector('[data-testid="git-compare-awaiting"]') as HTMLElement | null)?.innerText ?? 0,
+    )) as Promise<number>;
+
+  /** One thread card's resolved state as the visible review diff draws it. */
+  const cardState = (threadId: string) =>
+    browser.execute((id, th) => {
+      const pane = [...document.querySelectorAll(`[data-task-id="${id}"] [data-testid="diff-pane"]`)]
+        .find(e => (e as HTMLElement).offsetParent !== null);
+      const card = pane?.querySelector<HTMLElement>(`.tc-thread-card[data-thread-id="${th}"]`);
+      if (!card) return null;
+      const entry = card.querySelector(".tc-thread-entry");
+      return {
+        resolved: card.dataset.resolved ?? null,
+        chip: card.querySelector(".tc-thread-chip")?.textContent ?? null,
+        entries: entry ? getComputedStyle(entry).display : null,
+      };
+    }, taskId, threadId) as Promise<{ resolved: string | null; chip: string | null; entries: string | null } | null>;
+
+  const waitResolved = (threadId: string, resolved: boolean, msg: string) =>
+    browser.waitUntil(async () => (await cardState(threadId))?.resolved === String(resolved), { timeout: 10_000, timeoutMsg: msg });
+
+  it("collapses a thread the agent resolves behind a Resolved chip and drops it from the awaiting count", async () => {
+    await showReviewDiff();
+    const before = await awaiting();
+
+    const r = await cliRpc({ cmd: "present_resolve", task: taskId, thread: "r1-t1", resolved: true });
+
+    expect(r.ok).toBe(true);
+    expect(r.data).toMatchObject({ thread_id: "r1-t1", resolved: true, changed: true });
+    await waitResolved("r1-t1", true, "the agent's resolve never reached the open diff");
+    expect(await cardState("r1-t1")).toEqual({ resolved: "true", chip: "Resolved", entries: "none" });
+    expect((await cardState("r1-t2"))?.resolved).toBe("false");
+    await browser.waitUntil(async () => (await awaiting()) === before - 1,
+      { timeout: 10_000, timeoutMsg: "the awaiting count never dropped for the resolved thread" });
+    // The earlier background-task case left the panel on r3: back to r1, whose
+    // file holds three threads, one now resolved. The row counts open ones only.
+    await openMenu('[data-testid="compare-review"]');
+    await clickIn('[data-testid="compare-review-item"][data-review="r1"]');
+    await waitForReview("r1", "the review picker never switched back to r1");
+    const rowCount = () => browser.execute(() => (document.querySelector(
+      '[data-testid="compare-file-row"][data-path="present-a.txt"] [data-testid="compare-thread-count"]',
+    ) as HTMLElement | null)?.innerText ?? null);
+    await browser.waitUntil(async () => (await rowCount()) === "2",
+      { timeout: 10_000, timeoutMsg: "the row never counted only the two open threads" });
+    await browser.waitUntil(async () => { const m = await drift(); return m.nums === m.lines && m.spread < 2; }, {
+      timeout: 10_000, timeoutMsg: "the line numbers drifted after a thread collapsed",
+    });
+    await snap("present-thread-resolved.png");
+  });
+
+  it("expands a resolved thread from its location toggle with the line numbers still level", async () => {
+    await showReviewDiff();
+
+    await clickInDiff('[data-thread-id="r1-t1"] .tc-thread-toggle');
+
+    expect((await cardState("r1-t1"))?.entries).not.toBe("none");
+    await browser.waitUntil(async () => { const m = await drift(); return m.nums === m.lines && m.spread < 2; }, {
+      timeout: 10_000, timeoutMsg: "the line numbers drifted after expanding a resolved thread",
+    });
+  });
+
+  it("reopens a thread from its Unresolve button and stores it open", async () => {
+    await showReviewDiff();
+    const before = await awaiting();
+
+    await clickInDiff('[data-thread-id="r1-t1"] .tc-btn-resolve');
+
+    await waitResolved("r1-t1", false, "Unresolve never reopened the card");
+    const shown = await cliRpc({ cmd: "present_show", task: taskId, review: "r1" });
+    expect(shown.data.review.threads.find((t: any) => t.id === "r1-t1").resolved).toBeUndefined();
+    await browser.waitUntil(async () => (await awaiting()) === before + 1,
+      { timeout: 10_000, timeoutMsg: "the awaiting count never came back for the reopened thread" });
+  });
+
+  it("reopens a thread the user resolved when the agent replies in it", async () => {
+    await showReviewDiff();
+    const open = await awaiting();
+    await clickInDiff('[data-thread-id="r1-t1"] .tc-btn-resolve');
+    await waitResolved("r1-t1", true, "Resolve never collapsed the card");
+    await browser.waitUntil(async () => (await awaiting()) === open - 1,
+      { timeout: 10_000, timeoutMsg: "the user's resolve never lowered the awaiting count" });
+
+    const r = await cliRpc({ cmd: "present_reply", task: taskId, thread: "r1-t1", body: `reopened ${stamp}` });
+
+    expect(r.ok).toBe(true);
+    await waitResolved("r1-t1", false, "the agent's reply never reopened the thread");
+    await browser.waitUntil(async () => (await awaiting()) === open,
+      { timeout: 10_000, timeoutMsg: "the awaiting count never came back after the agent's reply" });
   });
 });

@@ -5,7 +5,7 @@
 
 import { queueOrDeliver } from "./agentDelivery";
 import { tabLabel, workDoneCapable } from "./agents";
-import { reviewPost } from "./ipc";
+import { reviewPost, reviewResolve } from "./ipc";
 import { composeReviewMessage } from "./reviewMessage";
 import { agentTargets, sendCommentsToAgent } from "./sendComments";
 import { i18n } from "./i18n";
@@ -64,6 +64,16 @@ export async function sendReviewComments(taskId: string, reviewId: string, draft
     pushToast(i18n.t("backend:review.deliveryFailed", { id: review.id, name }), "error");
   }
   return true;
+}
+
+/** Resolve or reopen a thread as the user. Tells the agent nothing: a resolve
+ *  means nothing is left to do, and a reply is how the user asks for more. */
+export async function resolveReviewThread(taskId: string, threadId: string, resolved: boolean): Promise<void> {
+  try {
+    useReviews.getState().apply(taskId, await reviewResolve(taskId, threadId, resolved));
+  } catch (e) {
+    useUI.getState().pushToast(i18n.t("backend:review.resolveFailed", { id: threadId, error: String(e) }), "error");
+  }
 }
 
 /**

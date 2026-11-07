@@ -132,7 +132,11 @@ use std::io::{self, BufRead, Read, Write};
 /// an agent-presented review of a commit range and thread comments on it.
 /// A v25 server does not know them; the bump turns that into "restart the
 /// app" instead of an unknown-command failure.
-pub const PROTOCOL_VERSION: u32 = 26;
+///
+/// v27: `present_resolve` resolves or reopens a review thread, and a thread
+/// carries `resolved`. A v26 server does not know the verb; the bump turns
+/// that into "restart the app".
+pub const PROTOCOL_VERSION: u32 = 27;
 
 /// A pasted "123", "#123", "!123" or a PR / MR link, reduced to its number.
 /// None for anything else. The webview's `parsePrRef` (src/lib/prReview.ts)
@@ -364,6 +368,17 @@ pub struct ReviewThread {
     /// The head-side text of those lines when the thread opened; "" at file level.
     pub quote: String,
     pub comments: Vec<ReviewComment>,
+    /// Absent while the thread is open. Either side sets it; any reply clears it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved: Option<ReviewResolved>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ReviewResolved {
+    pub by: ReviewBy,
+    /// The review's author at resolve time; "" for the user.
+    pub author: String,
+    pub at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -980,6 +995,18 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cwd: Option<String>,
     },
+    /// v27: resolve (`resolved` true) or reopen a thread. Replies
+    /// `ReplyData::ReviewResolve`.
+    PresentResolve {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project: Option<String>,
+        thread: String,
+        resolved: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cwd: Option<String>,
+    },
     /// v26: one review. With `since`, only the comments whose seq is
     /// greater, in the threads that have one. Replies `ReplyData::Review`.
     PresentShow {
@@ -1506,6 +1533,8 @@ pub enum ReplyData {
     ReviewClaim(ReviewClaimData),
     /// `present comment` and `present reply` (v26).
     ReviewWrite(ReviewWriteData),
+    /// `present resolve` and `present unresolve` (v27).
+    ReviewResolve(ReviewResolveData),
     /// `present list` (v26).
     Reviews(ReviewsData),
     Quit(QuitData),
@@ -1605,6 +1634,17 @@ pub struct ReviewWriteData {
     /// The comment's seq: `present show --since <seq>` reads what came after.
     pub seq: u64,
     pub new_thread: bool,
+}
+
+/// A `present resolve` or `present unresolve` (v27). `changed` is false
+/// when the thread was already in that state.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ReviewResolveData {
+    pub task_id: String,
+    pub review_id: String,
+    pub thread_id: String,
+    pub resolved: bool,
+    pub changed: bool,
 }
 
 /// One row of `present list` (v26).
@@ -3047,6 +3087,11 @@ mod tests {
                 author: Some("Codex".into()), cwd: None,
             },
             Command::PresentClaim { task: None, project: None, review: "r1".into(), tab: None, author: None, cwd: None },
+            Command::PresentResolve { task: None, project: None, thread: "r1-t3".into(), resolved: true, cwd: None },
+            Command::PresentResolve {
+                task: Some("fix-auth".into()), project: Some("web".into()), thread: "r1-t3".into(), resolved: false,
+                cwd: Some("/t".into()),
+            },
             Command::Agents,
             Command::Prompts { selector: None },
             Command::Prompts { selector: Some("builtin:review".into()) },
@@ -3400,6 +3445,9 @@ mod tests {
             }),
             ReplyData::ReviewWrite(ReviewWriteData {
                 task_id: "w1".into(), review_id: "r1".into(), thread_id: "r1-t2".into(), seq: 3, new_thread: true,
+            }),
+            ReplyData::ReviewResolve(ReviewResolveData {
+                task_id: "w1".into(), review_id: "r1".into(), thread_id: "r1-t2".into(), resolved: true, changed: false,
             }),
             ReplyData::ReviewClaim(ReviewClaimData {
                 task_id: "w1".into(),
@@ -4036,14 +4084,26 @@ mod tests {
                     body: "why".into(),
                     at: "2026-11-06T10:00:01+00:00".into(),
                 }],
+                resolved: None,
             }],
         };
+        let mut resolved = review.clone();
+        resolved.threads[0].resolved = Some(ReviewResolved {
+            by: ReviewBy::User,
+            author: String::new(),
+            at: "2026-11-06T10:00:02+00:00".into(),
+        });
 
         let json = serde_json::to_string(&review).unwrap();
         let back: Review = serde_json::from_str(&json).unwrap();
+        let resolved_json = serde_json::to_string(&resolved).unwrap();
+        let resolved_back: Review = serde_json::from_str(&resolved_json).unwrap();
 
         assert_eq!(back, review);
         assert!(json.contains(r#""by":"agent""#), "{json}");
+        assert!(!json.contains("\"resolved\""), "an open thread writes no resolved key: {json}");
+        assert_eq!(resolved_back, resolved);
+        assert!(resolved_json.contains(r#""resolved":{"by":"user""#), "{resolved_json}");
     }
 
     #[test]

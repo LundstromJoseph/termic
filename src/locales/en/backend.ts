@@ -111,6 +111,7 @@ export default {
     postFailed: "Could not save to review {{id}}: {{error}}",
     savedNoRecipient: "Saved to review {{id}}. It has no live agent tab: run termic present claim {{id}} from one to receive it.",
     deliveryFailed: "Saved to review {{id}}, but {{name}} could not be reached.",
+    resolveFailed: "Could not update thread {{id}}: {{error}}",
   },
 
   agentRace: {

@@ -14848,6 +14848,19 @@ async fn review_post(
     .map_err(|e| e.to_string())?
 }
 
+/// The user resolving or reopening a thread. No push, as `review_post`.
+#[tauri::command]
+async fn review_resolve(task_id: String, thread_id: String, resolved: bool) -> Result<termic_proto::Review, String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<_, String> {
+        let w = load_tasks_all().into_iter().find(|w| w.id == task_id).ok_or("no task")?;
+        reviews::set_resolved(&w, &thread_id, resolved, termic_proto::ReviewBy::User)
+            .map(|(r, _)| r)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 async fn task_git_compare(
     id: String,
@@ -27424,7 +27437,7 @@ pub fn run() {
             task_diff, task_diff_stat, task_files,
             desktop_integration_status, desktop_integration_add, desktop_integration_remove, task_list_files_for_finder, task_match_ignored_files, task_send_diff_to_main,
             task_changes, task_git_status, task_git_branches, project_git_branches, project_branch_context, project_git_current_branch, task_git_checkout, task_git_update, task_git_update_all, task_git_update_info, task_stage, task_unstage, task_commit, task_discard,
-            task_git_log, task_git_refs, task_git_push, task_git_commit_files, task_git_compare, task_git_range, review_list, review_post, task_git_blame, task_git_commit_meta, task_git_commit_offset,
+            task_git_log, task_git_refs, task_git_push, task_git_commit_files, task_git_compare, task_git_range, review_list, review_post, review_resolve, task_git_blame, task_git_commit_meta, task_git_commit_offset,
             detect_forges, task_pr_status, task_member_pr_status, task_pr_create, task_pr_comments, task_set_pr_watch, task_set_pr_comments_seen,
             project_forge_issues, project_forge_provider, project_forge_prs, project_fetch_pr_branch, project_git_checkout,
             task_file_diff, task_file_diff_sides, task_file_read, file_read_external, clipboard_image_save, clipboard_image_capture, task_file_read_base64, task_file_fp, task_file_write, task_dir_list, task_path_stat,

@@ -943,7 +943,8 @@ pub(crate) fn dispatch_authenticated(
         | Command::PresentReply { .. }
         | Command::PresentShow { .. }
         | Command::PresentList { .. }
-        | Command::PresentClaim { .. } => handle_present(&req.id, host, &req.cmd),
+        | Command::PresentClaim { .. }
+        | Command::PresentResolve { .. } => handle_present(&req.id, host, &req.cmd),
         Command::TabClose { task, project, tab, yes, cwd } => handle_tab_close(
             &req.id,
             host,
@@ -3443,7 +3444,8 @@ fn handle_present(id: &str, host: &dyn CliHost, cmd: &Command) -> Reply {
         | Command::PresentReply { task, project, cwd, .. }
         | Command::PresentShow { task, project, cwd, .. }
         | Command::PresentList { task, project, cwd }
-        | Command::PresentClaim { task, project, cwd, .. } => (task.as_deref(), project.as_deref(), cwd.as_deref()),
+        | Command::PresentClaim { task, project, cwd, .. }
+        | Command::PresentResolve { task, project, cwd, .. } => (task.as_deref(), project.as_deref(), cwd.as_deref()),
         _ => unreachable!("dispatch sends only the present verbs here"),
     };
     let (projects, tasks) = host.projects_tasks();
@@ -3619,6 +3621,19 @@ fn present(
                 task_id: t.id.clone(),
                 task: name.into(),
                 review: review_summary(r),
+            }))
+        }
+        Command::PresentResolve { thread, resolved, .. } => {
+            let (r, changed) = reviews::set_resolved(t, thread, *resolved, proto::ReviewBy::Agent)?;
+            if changed {
+                host.push_review(serde_json::json!({ "taskId": t.id, "review": r }));
+            }
+            Ok(ReplyData::ReviewResolve(proto::ReviewResolveData {
+                task_id: t.id.clone(),
+                review_id: r.id,
+                thread_id: thread.clone(),
+                resolved: *resolved,
+                changed,
             }))
         }
         _ => unreachable!("dispatch sends only the present verbs here"),
@@ -10161,6 +10176,16 @@ mod tests {
         )
     }
 
+    fn present_resolve(thread: &str, resolved: bool) -> Request {
+        req(Command::PresentResolve { task: Some("w9".into()), project: None, thread: thread.into(), resolved, cwd: None }, Some("tok"))
+    }
+
+    fn resolve_of(reply: Reply) -> proto::ReviewResolveData {
+        assert!(reply.ok, "{:?}", reply.error);
+        let Some(ReplyData::ReviewResolve(d)) = reply.data else { panic!("expected a resolve") };
+        d
+    }
+
     fn review_of(reply: Reply) -> proto::Review {
         assert!(reply.ok, "{:?}", reply.error);
         let Some(ReplyData::Review(d)) = reply.data else { panic!("expected a review") };
@@ -10393,6 +10418,50 @@ mod tests {
 
             assert_eq!(none, (ErrorCode::BadRequest, "no tab: run this from an agent tab or pass --tab".into()));
             assert_eq!(shell.0, ErrorCode::Unsupported);
+        });
+    }
+
+    #[test]
+    fn present_resolve_and_unresolve_reply_the_new_state_signed_by_the_agent_and_push_only_on_change() {
+        let repo = present_repo();
+        crate::test_support::with_scratch_data_dir(|_| {
+            let host = present_host(repo.path());
+            handle(&present_new(Some("tab-c"), None), &host);
+            handle(&present_comment("r1", "a.txt", None, "x"), &host);
+
+            let resolved = resolve_of(handle(&present_resolve("r1-t1", true), &host));
+            let repeat = resolve_of(handle(&present_resolve("r1-t1", true), &host));
+            let stored = review_of(handle(&present_show("r1", None), &host));
+            let reopened = resolve_of(handle(&present_resolve("r1-t1", false), &host));
+
+            let expect = |resolved, changed| proto::ReviewResolveData {
+                task_id: "w9".into(),
+                review_id: "r1".into(),
+                thread_id: "r1-t1".into(),
+                resolved,
+                changed,
+            };
+            assert_eq!(resolved, expect(true, true));
+            assert_eq!(repeat, expect(true, false));
+            assert_eq!(reopened, expect(false, true));
+            let by = stored.threads[0].resolved.as_ref().unwrap();
+            assert_eq!((by.by, by.author.as_str()), (proto::ReviewBy::Agent, "Claude"));
+            assert_eq!(review_pushes(&host).len(), 4, "new, the comment, the resolve and the reopen; not the repeat");
+        });
+    }
+
+    #[test]
+    fn present_resolve_of_an_unknown_thread_is_not_found_and_of_a_malformed_id_a_bad_request() {
+        let repo = present_repo();
+        crate::test_support::with_scratch_data_dir(|_| {
+            let host = present_host(repo.path());
+            handle(&present_new(Some("tab-c"), None), &host);
+
+            let unknown = err_of(handle(&present_resolve("r1-t9", true), &host));
+            let malformed = err_of(handle(&present_resolve("r1", true), &host));
+
+            assert_eq!(unknown, (ErrorCode::NotFound, "no such thread r1-t9".into()));
+            assert_eq!(malformed.0, ErrorCode::BadRequest);
         });
     }
 
