@@ -408,12 +408,12 @@ function commentTooltips(state: EditorState, surface: ReviewSurface): readonly T
 // ── Store subscription plugin ────────────────────────────────────────────────
 
 /** A review diff holds only that review's drafts, a plain diff only plain ones.
- *  A new-thread draft written on another round than the view's is left out:
+ *  A new-thread draft written on another round than the one drawn is left out:
  *  its lines belong to that round's head. */
 function commentsForFile(ctx: CommentTarget): ReviewComment[] {
   const all = useReviewComments.getState().byTask[ctx.taskId] ?? [];
   const otherRound = (c: ReviewComment) =>
-    !c.threadId && c.reviewRound != null && ctx.reviewRound != null && c.reviewRound !== ctx.reviewRound;
+    !c.threadId && c.reviewRound != null && ctx.drawRound != null && c.reviewRound !== ctx.drawRound;
   return all
     .filter((c) => c.file === ctx.file && c.reviewId === ctx.reviewId && !otherRound(c))
     .slice()
@@ -458,14 +458,18 @@ function storeSyncPlugin(ctx: CommentTarget) {
 /** The shown review's threads on `file` in round `to` (the latest when null),
  *  kept in step with the reviews store. Same two guards as storeSyncPlugin.
  *  The signature carries what a card shows besides its comments: a new round
- *  moves lines or outdates a thread without adding a comment. */
-function reviewSyncPlugin(taskId: string, reviewId: string, file: string, to: number | null) {
+ *  moves lines or outdates a thread without adding a comment.
+ *  A latest-following view built on round `built` skips the pushes of a newer
+ *  round: their anchors belong to a head it does not show, and the host
+ *  rebuilds it (after any open composer closes). */
+function reviewSyncPlugin(taskId: string, reviewId: string, file: string, to: number | null, built: number) {
   return ViewPlugin.define((view): PluginValue => {
     let destroyed = false;
     let lastSig = "[]";
     const push = () => {
       if (destroyed) return;
       const review = selectReview(taskId, reviewId)(useReviews.getState());
+      if (review && to == null && built && review.rounds.length !== built) return;
       const threads = review ? threadsInView(review, file, to) : [];
       const sig = JSON.stringify(threads.map(t =>
         [t.id, t.comments.length, !!t.resolved, t.file, t.start_line, t.end_line, t.outdated ?? 0]));
@@ -718,7 +722,7 @@ export function reviewCommentsExtension(
   const ctx: CommentTarget = {
     taskId, file, source: surface.source,
     ...(reviewId ? { reviewId } : {}),
-    ...(reviewId && view.round ? { reviewRound: view.round } : {}),
+    ...(reviewId && view.round ? { reviewRound: view.round, drawRound: view.to ?? view.round } : {}),
   };
 
   const decoField = StateField.define<DecorationSet>({
@@ -742,7 +746,7 @@ export function reviewCommentsExtension(
   });
 
   return [
-    ...(reviewId ? [reviewSyncPlugin(taskId, reviewId, file, view.to)] : []),
+    ...(reviewId ? [reviewSyncPlugin(taskId, reviewId, file, view.to, view.round)] : []),
     dataField,
     hoverLineField,
     decoField,

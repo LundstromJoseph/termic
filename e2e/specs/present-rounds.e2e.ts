@@ -245,9 +245,10 @@ describe("review rounds", () => {
       (document.querySelector(".tc-comment-composer .tc-comment-textarea") as HTMLTextAreaElement).value = body;
     }, typed);
 
-    const next = numbered(13);
+    // One more line in at the top, so round 3 moves the shifted thread again.
+    const next = numbered(12);
     next[3] = "line four, rewritten";
-    writeFileSync(path.join(cwd, FILE), ["top 1", "top 2", ...next].join("\n") + "\n");
+    writeFileSync(path.join(cwd, FILE), ["top 1", "top 2", "top 3", ...next].join("\n") + "\n");
     execGit(`git -C "${cwd}" commit -qam "rounds 3 ${stamp}"`);
     const r = await cliRpc({ cmd: "present_update", task: taskId, review: reviewId, head: "HEAD" });
     expect(r.ok).toBe(true);
@@ -255,8 +256,11 @@ describe("review rounds", () => {
       (document.querySelector('[data-testid="compare-review-round"]') as HTMLElement | null)?.innerText === "Round 3"),
     { timeout: 10_000, timeoutMsg: "the webview never saw round 3" });
 
-    // The store is on round 3; the open view is still round 2's, text and all.
+    // The store is on round 3; the open view is still round 2's, text, cards
+    // and all: round 3's anchors would pin the moved card a line too low.
+    await flushEditorMeasure();
     expect((await pane()).lines).toBe(before);
+    expect((await cards()).find(c => c.id === tShifted)?.under).toBe("line 10");
     expect(await browser.execute(() =>
       (document.querySelector(".tc-comment-composer .tc-comment-textarea") as HTMLTextAreaElement | null)?.value ?? null)).toBe(typed);
 
@@ -267,6 +271,7 @@ describe("review rounds", () => {
     });
     await flushEditorMeasure();
     expect((await pane()).draft).toBe(false);
+    expect((await cards()).find(c => c.id === tShifted)?.under).toBe("line 10");
     await clickIn('[data-testid="review-comments-pill"]');
     await waitVisible('[data-state="stale"]');
     const row = await browser.execute(() => (document.querySelector('[data-state="stale"]') as HTMLElement).innerText);

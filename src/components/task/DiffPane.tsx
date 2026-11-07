@@ -357,6 +357,7 @@ export function DiffPane({ task, tab }: { task: Task; tab: DiffTab }) {
         hostRef.current.innerHTML = "";
         setOneSided(false);
         setBinary(sides);
+        setCommentable(false);
         return;
       }
       // Existence flags, not content emptiness — "" is what BOTH a missing
@@ -540,7 +541,11 @@ export function DiffPane({ task, tab }: { task: Task; tab: DiffTab }) {
         setCommentable(canComment);
       }
       setBuilt(n => n + 1);
-    }).catch(e => alive && setErr(String(e)));
+    }).catch(e => {
+      if (!alive) return;
+      setErr(String(e));
+      setCommentable(false);
+    });
     return () => {
       alive = false;
       mergeRef.current?.destroy(); mergeRef.current = null;

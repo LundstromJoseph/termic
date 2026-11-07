@@ -14536,7 +14536,7 @@ async fn task_git_commit_files(
 /// would accept) only — the History tab never passes a user-typed ref, so this
 /// stays deliberately strict rather than trying to sanitize refnames. Blocks
 /// leading-dash argument injection for free.
-fn is_commit_ish(s: &str) -> bool {
+pub(crate) fn is_commit_ish(s: &str) -> bool {
     !s.is_empty() && s.len() <= 64 && s.chars().all(|c| c.is_ascii_hexdigit())
 }
 
@@ -14865,10 +14865,6 @@ struct ReviewRange {
 fn review_range(cwd: &Path, r: &termic_proto::Review, from: Option<u32>, to: Option<u32>) -> Result<ReviewRange, String> {
     let n = review_rounds::round(r, to)?;
     let k = from.map(|f| review_rounds::from_round(r, f, to)).transpose()?;
-    // The stored shas reach git as revs, so a hand-edited file must not slip in a flag.
-    if ![&n.base, &n.head].into_iter().chain(k.iter().flat_map(|k| [&k.base, &k.head])).all(|s| is_commit_ish(s)) {
-        return Err("review rounds must be commit shas".into());
-    }
     let Some(k) = k else {
         return Ok(ReviewRange { compare: git_range(cwd, &n.base, &n.head)?, mode: "plain", upstream: Vec::new() });
     };
@@ -17437,12 +17433,6 @@ fn task_file_diff_sides_for_task(w: &Task, path: &str, scope: Option<&str>) -> R
             let r = reviews::load(w, rid).map_err(|e| e.to_string())?;
             let rd = review_rounds::round(&r, to)?;
             let kd = from.map(|k| review_rounds::from_round(&r, k, to)).transpose()?;
-            // Rust wrote every sha from rev-parse; checked anyway, like every
-            // other revision that reaches `git show` here.
-            let mut shas = [&rd.base, &rd.head].into_iter().chain(kd.iter().flat_map(|k| [&k.base, &k.head]));
-            if !shas.all(|s| is_commit_ish(s)) {
-                return Err(format!("review {rid} holds a malformed sha"));
-            }
             if cwd != repo_cwd(w, &r.dir_name)? {
                 return Err(format!("{path} is not in review {rid}'s repo"));
             }
@@ -35871,7 +35861,7 @@ filename f.rs
             let other_repo = task_file_diff_sides_for_task(&task, "frontend/committed.txt", Some("review:r1"));
 
             assert!(malformed_id.is_err());
-            assert_eq!(malformed_sha.err().as_deref(), Some("review r2 holds a malformed sha"));
+            assert!(malformed_sha.as_ref().is_err_and(|e| e.ends_with("r2.json: review rounds must be commit shas")), "{:?}", malformed_sha.err());
             assert_eq!(other_repo.err().as_deref(), Some("frontend/committed.txt is not in review r1's repo"));
         });
     }

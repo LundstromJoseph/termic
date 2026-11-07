@@ -739,6 +739,31 @@ describe("agent-presented review threads in a review: diff", () => {
     expect(draftCards(view).map(c => c.querySelector(".tc-comment-body")!.textContent).sort()).toEqual(["a reply", "round 3's lines"]);
   });
 
+  it("draws a pinned older round's own new-thread drafts and leaves the latest round's out", async () => {
+    putReview(1, [], "", 2);
+    const add = (body: string, reviewRound: number) => useReviewComments.getState().add({
+      taskId: TASK, file: FILE, startLine: 3, endLine: 3, quote: "x", body, reviewId: REVIEW, reviewRound,
+    });
+    add("round 1's lines", 1);
+    add("round 2's lines", 2);
+
+    const view = mountReview(FILE, undefined, { to: 1, round: 2 });
+    await settle();
+
+    expect(draftCards(view).map(c => c.querySelector(".tc-comment-body")!.textContent)).toEqual(["round 1's lines"]);
+  });
+
+  it("keeps a latest-following view's cards on its own round's lines when a newer round lands", async () => {
+    putReview(1, [thread("r1-t1", FILE, [2, 2], "agent")]);
+    const view = mountReview(FILE, undefined, { to: null, round: 1 });
+    await settle();
+
+    putReview(2, [thread("r1-t1", FILE, [4, 4], "agent")], "", 2);
+    await settle();
+
+    expect(view.state.doc.lineAt(view.posAtDOM(cards(view)[0])).number).toBe(2);
+  });
+
   it("tells the host when a composer opens and when it closes", async () => {
     const heard: boolean[] = [];
     const view = mountReview(FILE, undefined, { to: null, round: 1, onComposer: open => heard.push(open) });

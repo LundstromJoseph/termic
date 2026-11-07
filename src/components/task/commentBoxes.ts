@@ -24,13 +24,15 @@ function locLabel(start: number | null, end: number | null, file: string): strin
 /** Where a comment goes: the task, its file, and the surface that made it
  *  (decides how the batch is worded to the agent, see composeCommentsMessage).
  *  `reviewId` when the file is a `review:` diff: the comment joins that review,
- *  written on its round `reviewRound`. */
+ *  written on its round `reviewRound`. `drawRound` is the round whose head the
+ *  view shows, which differs from `reviewRound` on a pinned older round. */
 export interface CommentTarget {
   taskId: string;
   file: string;
   source: "diff" | "editor";
   reviewId?: string;
   reviewRound?: number;
+  drawRound?: number;
 }
 
 /** A comment being written. `id` is set when it edits a queued one, and

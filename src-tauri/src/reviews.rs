@@ -305,6 +305,10 @@ fn read(dir: &Path, id: &str) -> Result<Review, ReviewError> {
     if review.id != id {
         return Err(ReviewError::Io(format!("{} holds review {}", path.display(), review.id)));
     }
+    // The stored shas reach git as revs, so a hand-edited file must not slip in a flag.
+    if !review.rounds.iter().all(|r| crate::is_commit_ish(&r.base) && crate::is_commit_ish(&r.head)) {
+        return Err(ReviewError::Io(format!("{}: review rounds must be commit shas", path.display())));
+    }
     Ok(review)
 }
 
@@ -1306,6 +1310,25 @@ mod tests {
             assert!(matches!(loaded, Err(ReviewError::Io(ref m)) if m.contains("holds review r1")), "{loaded:?}");
             assert!(matches!(applied, Err(ReviewError::Io(_))), "{applied:?}");
             assert_eq!(load(&t, "r1").unwrap(), first);
+        });
+    }
+
+    #[test]
+    fn a_review_whose_round_head_is_flag_shaped_is_refused_before_git_sees_it() {
+        let dir = repo();
+        let t = task(dir.path());
+        with_scratch_data_dir(|data| {
+            new_review(&t);
+            let file = data.join("scratch/t1/reviews/r1.json");
+            let mut json: serde_json::Value = serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
+            json["rounds"][0]["head"] = "--output=/tmp/x".into();
+            fs::write(&file, json.to_string()).unwrap();
+
+            let loaded = load(&t, "r1");
+            let updated = update(&t, "r1", NewRound { head: "HEAD".into(), base: None, show: None });
+
+            assert!(matches!(loaded, Err(ReviewError::Io(ref m)) if m.contains("must be commit shas")), "{loaded:?}");
+            assert!(matches!(updated, Err(ReviewError::Io(_))), "{updated:?}");
         });
     }
 
