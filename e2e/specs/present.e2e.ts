@@ -946,5 +946,24 @@ describe("agent-presented review", () => {
       // The same pane, recycled: a fresh one would start from the preference anyway.
       expect(await activeTab()).toBe(before);
     });
+
+    it("does not carry a reveal's flip to source over to the same file under another scope", async () => {
+      await clickIn(`[data-testid="compare-thread-row"][data-thread="${tNotes}"]`);
+      await waitRevealed(tNotes, "the markdown file's thread never showed");
+      expect((await revealState(tNotes)).preview).toBe(false);
+      const activeTab = () => browser.execute((id) => window.__termic!.useApp.getState().activeTab[id], taskId);
+      const before = await activeTab();
+
+      // Same path, new in both diffs, only the scope differs: the recycle keeps tab.path.
+      await browser.execute((tid, rid) => window.__termic!.useApp.getState().openPreviewTab(tid, {
+        type: "diff", path: "present-notes.md", scope: `review:${rid}:to:1`, title: "Δ present-notes.md",
+      }), taskId, reviewId);
+
+      await browser.waitUntil(async () => {
+        const s = await revealState("");
+        return s.scope === `review:${reviewId}:to:1` && s.preview;
+      }, { timeout: 10_000, timeoutMsg: "the same new file under another scope kept the reveal's source view" });
+      expect(await activeTab()).toBe(before);
+    });
   });
 });
