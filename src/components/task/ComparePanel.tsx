@@ -35,7 +35,9 @@
 // range instead (docs/ui.md "Agent-presented reviews"). The bar names the
 // review, rows open `review:<id>` diffs and carry thread counts, and nothing
 // is fingerprinted, so there are no viewed marks. The branch compare's state
-// survives untouched underneath for "Back to branch compare".
+// survives untouched underneath for "Back to branch compare". A review with
+// two or more rounds adds a From/To bar: which round to show, from its base
+// or from an earlier round's change (replayed onto its base, Rust side).
 
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -45,7 +47,7 @@ import {
 } from "lucide-react";
 import type { GitCompare, GitFile, Review, ReviewThread, Task } from "@/lib/types";
 import { taskGitCompare, taskReviewRange, taskGitRefs } from "@/lib/ipc";
-import { reviewScope, threadAnchor } from "@/lib/reviewScope";
+import { effectiveView, reviewScope, threadAnchor } from "@/lib/reviewScope";
 import { useApp } from "@/store/app";
 import { useReviews, useReview, useTaskReviewIds } from "@/store/reviews";
 import { useFileViewed, useIsViewed } from "@/store/fileViewed";
@@ -143,10 +145,16 @@ export function ComparePanel({ task, repoDir, search, viewMode, reloadToken, onO
   const shownId = useReviews(s => s.shown[task.id] ?? null);
   const review = useReview(task.id, shownId);
   const reviewIds = useTaskReviewIds(task.id);
-  const reviewKey = review ? `${task.id}/${review.id}/${review.rounds.length}` : null;
-  /** The shown review's file list, keyed by task/review/round. A round's range
-   *  never changes, so it is read once per round and never on reloadToken. */
-  const [range, setRange] = useState<{ key: string; cmp: GitCompare | null; err: string | null } | null>(null);
+  const pick = useReviews(s => review ? s.view[`${task.id}/${review.id}`] : undefined);
+  const rv = useMemo(() => review ? effectiveView(review, pick) : null, [review, pick]);
+  const viewFrom = rv?.from ?? null;
+  const viewTo = rv?.to ?? null;
+  const reviewKey = review ? `${task.id}/${review.id}/${review.rounds.length}/${viewFrom ?? ""}/${viewTo ?? ""}` : null;
+  /** The shown review's file list, keyed by task/review/round/view. A round's
+   *  range never changes, so it is read once per view and never on reloadToken. */
+  const [range, setRange] = useState<{
+    key: string; cmp: GitCompare | null; err: string | null; fallback: boolean; upstream: ReadonlySet<string>;
+  } | null>(null);
 
   const toggleMergeBase = () => setMergeBase(v => { const n = !v; persist(LS_MERGE_BASE, n ? "1" : "0"); return n; });
 
@@ -180,9 +188,11 @@ export function ComparePanel({ task, repoDir, search, viewMode, reloadToken, onO
     setSelected(null);
     if (!review || !reviewKey || (range?.key === reviewKey && !range.err)) return;
     let alive = true;
-    taskReviewRange(task.id, review.id, null)
-      .then(r => { if (alive) setRange({ key: reviewKey, cmp: r.compare, err: null }); })
-      .catch(e => { if (alive) setRange({ key: reviewKey, cmp: null, err: String(e) }); });
+    taskReviewRange(task.id, review.id, viewFrom, viewTo)
+      .then(r => {
+        if (alive) setRange({ key: reviewKey, cmp: r.compare, err: null, fallback: r.mode === "fallback", upstream: new Set(r.upstream) });
+      })
+      .catch(e => { if (alive) setRange({ key: reviewKey, cmp: null, err: String(e), fallback: false, upstream: new Set() }); });
     return () => { alive = false; };
     // A new seq in the same round is a new comment, not a new range.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -197,10 +207,15 @@ export function ComparePanel({ task, repoDir, search, viewMode, reloadToken, onO
   const threadCounts = useMemo(() => {
     if (!review) return null;
     const m = new Map<string, number>();
-    // The threads drawn in each file's diff: an outdated one is not.
-    for (const th of review.threads) if (!th.resolved && !th.outdated) m.set(th.file, (m.get(th.file) ?? 0) + 1);
+    // The threads drawn in each file's diff (threadsInView): on the latest
+    // round the live ones, on an older one those opened on it, where opened.
+    for (const th of review.threads) {
+      if (th.resolved || (viewTo == null ? th.outdated : th.round !== viewTo)) continue;
+      const file = viewTo == null ? th.file : threadAnchor(th).file;
+      m.set(file, (m.get(file) ?? 0) + 1);
+    }
     return m;
-  }, [review]);
+  }, [review, viewTo]);
 
   /** Refs are only needed once the picker opens, and re-reading them on every
    *  compare would be a process per keystroke of the filter. */
@@ -244,9 +259,9 @@ export function ComparePanel({ task, repoDir, search, viewMode, reloadToken, onO
     { added: 0, removed: 0 },
   ), [files]);
 
-  const openReviewDiff = useCallback((review: Review, path: string, revealThread?: string, to: number | null = null) => {
+  const openReviewDiff = useCallback((review: Review, path: string, from: number | null, to: number | null, revealThread?: string) => {
     useApp.getState().openPreviewTab(task.id, {
-      type: "diff", path: dir ? `${dir}/${path}` : path, scope: reviewScope(review, to),
+      type: "diff", path: dir ? `${dir}/${path}` : path, scope: reviewScope(review, from, to),
       title: `Δ ${path.split("/").pop()} · ${review.id}`, revealThread,
     });
   }, [dir, task.id]);
@@ -254,18 +269,20 @@ export function ComparePanel({ task, repoDir, search, viewMode, reloadToken, onO
   const openFile = useCallback((path: string) => {
     if (!view.cmp) return;
     setSelected(path);
-    if (review) openReviewDiff(review, path);
+    if (review) openReviewDiff(review, path, viewFrom, viewTo);
     else onOpenDiff(dir ? `${dir}/${path}` : path, view.cmp.base_sha, `Δ ${path.split("/").pop()}`);
-  }, [view.cmp, dir, review, openReviewDiff, onOpenDiff]);
+  }, [view.cmp, dir, review, viewFrom, viewTo, openReviewDiff, onOpenDiff]);
 
   // An outdated thread's lines are gone from the latest head: it opens on the
-  // round it was made on, where they still are.
+  // round it was made on, where they still are. A live thread is on the latest
+  // round, so it keeps the picked From only while the view shows that round.
   const openThread = useCallback((th: ReviewThread) => {
     if (!review) return;
     const file = th.outdated ? threadAnchor(th).file : th.file;
     setSelected(file);
-    openReviewDiff(review, file, th.id, th.outdated ? th.round : null);
-  }, [review, openReviewDiff]);
+    if (th.outdated) openReviewDiff(review, file, null, th.round, th.id);
+    else openReviewDiff(review, file, viewTo == null ? viewFrom : null, null, th.id);
+  }, [review, viewFrom, viewTo, openReviewDiff]);
 
   // The other reading of the same row: the file itself, not the comparison.
   // Selection moves either way, so the list keeps your place when you switch.
@@ -306,7 +323,15 @@ export function ComparePanel({ task, repoDir, search, viewMode, reloadToken, onO
           that only shows it when it is needed; a ref you cannot read costs the
           whole bar its point. `min-h-8` + `py-1` keeps the one-row case the
           same 32px it was. */}
-      {review ? <ReviewBar task={task} review={review} reviewIds={reviewIds} /> : (
+      {review ? (<>
+        <ReviewBar task={task} review={review} reviewIds={reviewIds} />
+        {review.rounds.length >= 2 && (
+          <ReviewRoundsBar
+            review={review} from={viewFrom} to={viewTo}
+            onPick={(from, to) => useReviews.getState().setView(task.id, review.id, from, to, review.rounds.length)}
+          />
+        )}
+      </>) : (
       <div className="flex min-h-8 shrink-0 flex-wrap items-center gap-x-1.5 gap-y-1 border-b border-[var(--color-border-soft)] px-2 py-1 text-[11.5px]">
         <GitCompareIcon className="h-3.5 w-3.5 shrink-0 text-[var(--color-fg-faint)]" />
         <DropdownRoot onOpenChange={o => { if (o) loadRefs(); }}>
@@ -413,6 +438,12 @@ export function ComparePanel({ task, repoDir, search, viewMode, reloadToken, onO
           {t("compare.noMergeBase", { base })}
         </Note>
       )}
+      {review && shownRange?.fallback && (
+        <Note testId="compare-review-fallback">
+          <AlertTriangle className="h-3 w-3 shrink-0" />
+          {t("compare.review.fallback", { k: viewFrom, n: viewTo ?? review.rounds.length })}
+        </Note>
+      )}
       {view.cmp?.truncated && <Note>{t("compare.truncated")}</Note>}
 
       {/* 5. Rows. */}
@@ -447,6 +478,8 @@ export function ComparePanel({ task, repoDir, search, viewMode, reloadToken, onO
             root={task.path}
             repoDir={dir}
             threads={threadCounts && row.kind === "file" ? threadCounts.get(row.file.path) ?? 0 : undefined}
+            upstream={row.kind === "file" && !!shownRange?.upstream.has(row.file.path)
+              ? { k: viewFrom ?? 0, n: viewTo ?? review?.rounds.length ?? 0 } : undefined}
             selected={row.kind === "file" && selected === row.file.path}
             onOpen={openFile}
             onOpenWholeFile={openWholeFile}
@@ -470,9 +503,9 @@ function Empty({ children, tone }: { children: React.ReactNode; tone?: "err" }) 
   );
 }
 
-function Note({ children }: { children: React.ReactNode }) {
+function Note({ children, testId }: { children: React.ReactNode; testId?: string }) {
   return (
-    <div className="flex shrink-0 items-center gap-1.5 border-b border-[var(--color-border-soft)] bg-[var(--color-bg-2)] px-2.5 py-1 text-[11px] text-[var(--color-fg-faint)]">
+    <div data-testid={testId} className="flex shrink-0 items-center gap-1.5 border-b border-[var(--color-border-soft)] bg-[var(--color-bg-2)] px-2.5 py-1 text-[11px] text-[var(--color-fg-faint)]">
       {children}
     </div>
   );
@@ -526,6 +559,76 @@ function ReviewBar({ task, review, reviewIds }: { task: Task; review: Review; re
       <span className="ml-auto shrink-0 text-[var(--color-fg-faint)]" data-testid="compare-review-author">
         {t("compare.review.by", { author: review.author })}
       </span>
+    </div>
+  );
+}
+
+/** Which rounds the review list and its diffs show. From chips: the to-round's
+ *  base, or an earlier round's change, one click each; To: any round. */
+function ReviewRoundsBar({ review, from, to, onPick }: {
+  review: Review;
+  from: number | null;
+  to: number | null;
+  onPick: (from: number | null, to: number | null) => void;
+}) {
+  const { t } = useTranslation("panels");
+  const n = review.rounds.length;
+  const end = to ?? n;
+  const chip = (round: number | null) => (
+    <button
+      key={round ?? "base"}
+      type="button"
+      data-testid="compare-round-from"
+      data-from={round ?? "base"}
+      aria-pressed={from === round}
+      title={round == null
+        ? t("compare.review.baseTip", { n: end, base: review.rounds[end - 1].base_ref })
+        : t("compare.review.fromTip", { k: round, n: end })}
+      onClick={() => onPick(round, to)}
+      className={cn(
+        "h-5 shrink-0 rounded px-1.5",
+        from === round
+          ? "bg-[var(--color-sel)] text-[var(--color-fg)]"
+          : "text-[var(--color-fg-dim)] hover:bg-[var(--color-hover)] hover:text-[var(--color-fg)]",
+      )}
+    >
+      {round == null ? t("compare.review.base") : t("compare.review.round", { n: round })}
+    </button>
+  );
+  return (
+    <div data-testid="compare-rounds" className="flex min-h-7 shrink-0 flex-wrap items-center gap-1 border-b border-[var(--color-border-soft)] px-2 py-1 text-[11px]">
+      <span className="shrink-0 text-[var(--color-fg-faint)]">{t("compare.review.from")}</span>
+      {chip(null)}
+      {Array.from({ length: end - 1 }, (_, i) => chip(i + 1))}
+      <ArrowRight className="h-3 w-3 shrink-0 text-[var(--color-fg-faint)]" />
+      <DropdownRoot>
+        <DropdownTrigger asChild>
+          <button
+            data-testid="compare-round-to"
+            data-to={end}
+            title={t("compare.review.toTip")}
+            className="flex h-5 shrink-0 items-center gap-1 rounded border border-[var(--color-border)] bg-[var(--color-bg)] px-1.5 text-[var(--color-fg)] hover:border-[var(--color-accent-soft)]"
+          >
+            {t("compare.review.round", { n: end })}
+            <ChevronDown className="h-3 w-3 shrink-0 text-[var(--color-fg-faint)]" />
+          </button>
+        </DropdownTrigger>
+        <DropdownMenu align="start">
+          {review.rounds.map((_, i) => (
+            <DropdownItem
+              key={i}
+              data-testid="compare-round-to-item"
+              data-to={i + 1}
+              // A From at or past the new To would compare backwards: back to Base.
+              onSelect={() => onPick(from != null && from >= i + 1 ? null : from, i + 1 === n ? null : i + 1)}
+              className="items-center"
+            >
+              <Check className={cn("h-3.5 w-3.5 shrink-0", i + 1 !== end && "opacity-0")} />
+              <span className="text-[12px]">{t("compare.review.round", { n: i + 1 })}</span>
+            </DropdownItem>
+          ))}
+        </DropdownMenu>
+      </DropdownRoot>
     </div>
   );
 }
@@ -653,13 +756,15 @@ function RefItem({ label, active, onSelect }: { label: string; active: boolean; 
   );
 }
 
-function Row({ row, taskId, root, repoDir, threads, selected, onOpen, onOpenWholeFile, setCollapsed }: {
+function Row({ row, taskId, root, repoDir, threads, upstream, selected, onOpen, onOpenWholeFile, setCollapsed }: {
   row: FlatRow;
   taskId: string;
   root: string;
   repoDir: string;
   /** Review mode: the file's thread count, shown in place of draft comments. */
   threads?: number;
+  /** Round K -> N: the replay conflicted here, so the diff includes upstream changes. */
+  upstream?: { k: number; n: number };
   selected: boolean;
   onOpen: (path: string) => void;
   onOpenWholeFile: (path: string) => void;
@@ -678,7 +783,7 @@ function Row({ row, taskId, root, repoDir, threads, selected, onOpen, onOpenWhol
   return (
     <FileRow
       file={row.file} label={row.label} depth={row.depth}
-      taskId={taskId} root={root} repoDir={repoDir} threads={threads}
+      taskId={taskId} root={root} repoDir={repoDir} threads={threads} upstream={upstream}
       selected={selected} onOpen={onOpen} onOpenWholeFile={onOpenWholeFile}
     />
   );
@@ -717,7 +822,7 @@ function DirRow({ row, setCollapsed }: {
  *  and plus a churn column: the same glyph, icon, strike-through-when-viewed
  *  and eye toggle, so moving between the two tabs never asks you to relearn
  *  a row. */
-function FileRow({ file, label, depth, taskId, root, repoDir, threads, selected, onOpen, onOpenWholeFile }: {
+function FileRow({ file, label, depth, taskId, root, repoDir, threads, upstream, selected, onOpen, onOpenWholeFile }: {
   file: GitFile;
   label: string;
   depth: number;
@@ -725,6 +830,7 @@ function FileRow({ file, label, depth, taskId, root, repoDir, threads, selected,
   root: string;
   repoDir: string;
   threads?: number;
+  upstream?: { k: number; n: number };
   selected: boolean;
   onOpen: (path: string) => void;
   onOpenWholeFile: (path: string) => void;
@@ -775,6 +881,13 @@ function FileRow({ file, label, depth, taskId, root, repoDir, threads, selected,
           )}>
             {label}
           </span>
+          {upstream && (
+            <Tip side="left" content={t("compare.review.upstreamTip", upstream)}>
+              <span data-testid="compare-upstream-chip" className="shrink-0 rounded-full bg-[var(--color-bg-3)] px-1.5 text-[10px] text-[var(--color-warn)]">
+                {t("compare.review.upstream")}
+              </span>
+            </Tip>
+          )}
           {threads !== undefined ? threads > 0 && (
             <Tip side="left" content={threads === 1 ? t("compare.review.threadOne") : t("compare.review.threadMany", { count: threads })}>
               <span data-testid="compare-thread-count" className="flex shrink-0 items-center gap-0.5 rounded bg-[var(--color-bg-3)] px-1 text-[10.5px] tabular-nums text-[var(--color-fg-dim)]">

@@ -152,8 +152,11 @@ export function DiffPane({ task, tab }: { task: Task; tab: DiffTab }) {
   // An agent-presented review's diff: both sides are commits, like a History
   // diff, so viewed marks and the stale probe are off. Its threads still show.
   // `reviewTo` pins an older round, which takes replies but no new threads.
+  // `reviewFrom` compares from that round's change: the left side is a
+  // replayed tree (or round K's head), which takes no comments either way.
   const reviewScope = parseReviewScope(tab.scope);
   const reviewId = reviewScope?.reviewId ?? null;
+  const reviewFrom = reviewScope?.from ?? null;
   const reviewTo = reviewScope?.to ?? null;
   const reviewRounds = useReviews(s => reviewId ? s.byKey[`${task.id}/${reviewId}`]?.rounds.length ?? 0 : 0);
   // The one live-update exception to GH #266: a diff following a review's
@@ -609,7 +612,8 @@ export function DiffPane({ task, tab }: { task: Task; tab: DiffTab }) {
             title={tr("diff.reviewChipTip", { id: reviewId })}
             className="ml-2 shrink-0 rounded bg-[var(--color-bg-3)] px-1.5 font-mono text-[11px] leading-[18px] text-[var(--color-fg-faint)]"
           >
-            {reviewTo == null ? reviewId : `${reviewId} · ${tr("diff.reviewRound", { n: reviewTo })}`}
+            {reviewFrom != null ? `${reviewId} · ${tr("diff.reviewRounds", { k: reviewFrom, n: reviewTo ?? reviewRounds })}`
+              : reviewTo == null ? reviewId : `${reviewId} · ${tr("diff.reviewRound", { n: reviewTo })}`}
           </span>
         )}
         <div className="ml-auto flex items-center gap-1">

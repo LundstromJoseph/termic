@@ -1,15 +1,15 @@
 // Which round a review diff shows, and which threads it draws there.
 import { describe, it, expect } from "vitest";
-import { parseReviewScope, reviewScope, threadAnchor, threadsInView } from "./reviewScope";
+import { effectiveView, parseReviewScope, reviewScope, threadAnchor, threadsInView } from "./reviewScope";
 import type { Review, ReviewRound, ReviewThread } from "./types";
 
 const ROUND: ReviewRound = { base: "a", head: "b", base_ref: "main", head_ref: "HEAD", at: "" };
 
-function review(rounds: number, threads: ReviewThread[], dir = ""): Review {
+function review(rounds: number, threads: ReviewThread[], dir = "", defaultFrom?: number): Review {
   return {
     version: 1, id: "r1", task_id: "t", dir_name: dir, base: "a", head: "b", base_ref: "main", head_ref: "HEAD",
     title: null, author: "claude", recipient_tab: null, created_at: "", seq: 1, files: [], files_truncated: false,
-    threads, rounds: Array.from({ length: rounds }, () => ROUND),
+    threads, rounds: Array.from({ length: rounds }, () => ROUND), default_from: defaultFrom,
   };
 }
 
@@ -18,10 +18,12 @@ function thread(id: string, file: string, line: number | null, extra: Partial<Re
 }
 
 describe("parseReviewScope / reviewScope", () => {
-  it("reads the plain form as the latest round and the to form as that round", () => {
+  it("reads the plain form as the latest round, the to form as that round, and a from before the to", () => {
     expect(parseReviewScope("review:r1")).toEqual({ reviewId: "r1", from: null, to: null });
     expect(parseReviewScope("review:r12:to:3")).toEqual({ reviewId: "r12", from: null, to: 3 });
-    for (const bad of [undefined, null, "base:abc", "review:r1:to:0", "review:r1:to:", "review:x", "review:r1:from:1"]) {
+    expect(parseReviewScope("review:r1:from:1")).toEqual({ reviewId: "r1", from: 1, to: null });
+    expect(parseReviewScope("review:r1:from:1:to:3")).toEqual({ reviewId: "r1", from: 1, to: 3 });
+    for (const bad of [undefined, null, "base:abc", "review:r1:to:0", "review:r1:to:", "review:x", "review:r1:to:2:from:1", "review:r1:from:0"]) {
       expect(parseReviewScope(bad), String(bad)).toBeNull();
     }
   });
@@ -29,9 +31,44 @@ describe("parseReviewScope / reviewScope", () => {
   it("builds the plain form for the latest round so the tab follows new rounds, and round trips an older one", () => {
     const r = review(3, []);
 
-    expect(reviewScope(r, null)).toBe("review:r1");
-    expect(reviewScope(r, 3)).toBe("review:r1");
-    expect(parseReviewScope(reviewScope(r, 2))).toEqual({ reviewId: "r1", from: null, to: 2 });
+    expect(reviewScope(r, null, null)).toBe("review:r1");
+    expect(reviewScope(r, null, 3)).toBe("review:r1");
+    expect(parseReviewScope(reviewScope(r, null, 2))).toEqual({ reviewId: "r1", from: null, to: 2 });
+  });
+
+  it("builds a from form and drops a from that is not before the to round", () => {
+    const r = review(3, []);
+
+    expect(reviewScope(r, 1, null)).toBe("review:r1:from:1");
+    expect(reviewScope(r, 1, 2)).toBe("review:r1:from:1:to:2");
+    expect(reviewScope(r, 2, 2)).toBe("review:r1:to:2");
+    expect(reviewScope(r, 3, null)).toBe("review:r1");
+  });
+});
+
+describe("effectiveView", () => {
+  it("is the agent's default_from against the latest round when the viewer picked nothing", () => {
+    expect(effectiveView(review(3, [], "", 2))).toEqual({ from: 2, to: null });
+    expect(effectiveView(review(3, []))).toEqual({ from: null, to: null });
+  });
+
+  it("is the viewer's pick while the review has the rounds it was made at", () => {
+    const r = review(3, [], "", 2);
+
+    expect(effectiveView(r, { from: null, to: 2, rounds: 3 })).toEqual({ from: null, to: 2 });
+  });
+
+  it("drops the pick when a new round arrives, back to the default", () => {
+    const r = review(4, [], "", 2);
+
+    expect(effectiveView(r, { from: null, to: 2, rounds: 3 })).toEqual({ from: 2, to: null });
+  });
+
+  it("normalizes the latest round to null and drops a from not below the to", () => {
+    const r = review(3, []);
+
+    expect(effectiveView(r, { from: 1, to: 3, rounds: 3 })).toEqual({ from: 1, to: null });
+    expect(effectiveView(r, { from: 2, to: 2, rounds: 3 })).toEqual({ from: null, to: 2 });
   });
 });
 

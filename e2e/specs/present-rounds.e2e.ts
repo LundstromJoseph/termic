@@ -1,5 +1,6 @@
 import { execSync } from "node:child_process";
-import { writeFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import {
   archiveTask, cliRpc, createWorktreeTask, ensureActiveTask, flushEditorMeasure, openRightTab, requireTermicApi, snap,
@@ -211,5 +212,129 @@ describe("review rounds", () => {
     expect(r.ok).toBe(false);
     expect(r.error.message).toContain(`round 2 of ${reviewId} is already`);
     expect((await show()).rounds).toHaveLength(2);
+  });
+});
+
+// The From/To picker after a rebase: "Round 1 -> 2" replays round 1's change
+// onto round 2's base, so upstream's commit stays out of the list.
+describe("review rounds picker", () => {
+  let taskId!: string;
+  let cwd = "";
+  let reviewId = "";
+  const stamp = Date.now();
+  const FILE = "picker.txt";
+  const UP = `e2e-up-${stamp}`;
+
+  /** Compare's rows as `path status`, in list order. */
+  const rows = () => browser.execute(() =>
+    [...document.querySelectorAll('[data-testid="compare-file-row"]')]
+      .map(r => `${r.getAttribute("data-path")} ${r.getAttribute("data-status")}`)) as Promise<string[]>;
+
+  const waitRows = (want: string[], msg: string) =>
+    browser.waitUntil(async () => JSON.stringify(await rows()) === JSON.stringify(want), { timeout: 10_000, timeoutMsg: msg });
+
+  /** The From chip that is pressed, "base" or a round number. */
+  const pressedFrom = () => browser.execute(() =>
+    document.querySelector('[data-testid="compare-round-from"][aria-pressed="true"]')?.getAttribute("data-from") ?? null);
+
+  const authorCommit = (content: string, msg: string) => {
+    writeFileSync(path.join(cwd, FILE), content);
+    execGit(`git -C "${cwd}" add ${FILE}`);
+    execGit(`git -C "${cwd}" commit -q -m "${msg} ${stamp}"`);
+  };
+
+  const update = async (extra: Record<string, unknown> = {}) => {
+    const r = await cliRpc({ cmd: "present_update", task: taskId, review: reviewId, head: "HEAD", ...extra });
+    expect(r.ok).toBe(true);
+    return r.data;
+  };
+
+  before(async () => {
+    await waitForAppShell();
+    await requireTermicApi();
+    taskId = await createWorktreeTask("e2e-picker", `e2e-picker-${stamp}`);
+    await waitForAgentReady(taskId);
+    const { path: p, tab } = await browser.execute((id) => {
+      const s = window.__termic!.useApp.getState();
+      return { path: s.tasks.find((t: any) => t.id === id).path as string, tab: (s.tabs[id] ?? [])[0].id as string };
+    }, taskId);
+    cwd = p;
+    // The branch the task "rebases onto", at the task's start.
+    execGit(`git -C "${cwd}" branch ${UP}`);
+    authorCommit("one\ntwo\nthree\n", "picker round 1");
+    const r = await cliRpc({ cmd: "present_new", task: taskId, range: `${UP}..HEAD`, title: "Picker", tab });
+    expect(r.ok).toBe(true);
+    reviewId = r.data.review.id;
+  });
+
+  after(async () => {
+    if (cwd) execGit(`git -C "${cwd}" branch -D ${UP}`);
+    if (taskId) await archiveTask(taskId);
+  });
+
+  it("Round 1 -> 2 is one click and lists only the author's changes after a rebase", async () => {
+    await ensureActiveTask(taskId);
+    await openRightTab("Git");
+    await waitVisible(`[data-testid="compare-panel"][data-review="${reviewId}"]`);
+    // Upstream moves on in a worktree of its own, and the task rebases onto it.
+    const tmp = mkdtempSync(path.join(os.tmpdir(), "termic-e2e-up-"));
+    execGit(`git -C "${cwd}" worktree add -q "${tmp}" ${UP}`);
+    writeFileSync(path.join(tmp, "upstream.txt"), "upstream\n");
+    execGit(`git -C "${tmp}" add upstream.txt`);
+    execGit(`git -C "${tmp}" commit -q -m "upstream ${stamp}"`);
+    execGit(`git -C "${cwd}" worktree remove --force "${tmp}"`);
+    execGit(`git -C "${cwd}" rebase -q ${UP}`);
+    authorCommit("one\nTWO\nthree\n", "picker round 2");
+
+    const d = await update();
+
+    expect(d.round).toBe(2);
+    await waitVisible('[data-testid="compare-rounds"]');
+    expect(await pressedFrom()).toBe("base");
+    await waitRows([`${FILE} A`], "round 2 against its base did not list only the author's file");
+
+    await clickIn('[data-testid="compare-round-from"][data-from="1"]');
+
+    // A plain round 1 head..round 2 head would list upstream.txt as added too.
+    await waitRows([`${FILE} M`], "Round 1 -> 2 did not list only the author's second change");
+    expect(await browser.execute(() => (document.querySelector('[data-testid="compare-summary"]') as HTMLElement).innerText))
+      .toContain("+1");
+    expect(await browser.execute(() => document.querySelector('[data-testid="compare-review-fallback"]') === null)).toBe(true);
+    await snap("present-rounds-picker.png");
+
+    await clickIn(`[data-testid="compare-file-row"][data-path="${FILE}"]`);
+    await browser.waitUntil(async () => {
+      const chip = await browser.execute((tid) =>
+        ([...document.querySelectorAll(`[data-task-id="${tid}"] [data-testid="diff-review-chip"]`)]
+          .find(e => (e as HTMLElement).offsetParent !== null) as HTMLElement | undefined)?.innerText ?? null, taskId);
+      return chip === `${reviewId} · Round 1 → 2`;
+    }, { timeout: 10_000, timeoutMsg: "the file did not open as the Round 1 -> 2 diff" });
+
+    await clickIn('[data-testid="compare-round-from"][data-from="base"]');
+
+    await waitRows([`${FILE} A`], "Base did not bring back round 2 against its base");
+  });
+
+  it("--show sets the first view, the picker overrides it, a new round resets it", async () => {
+    authorCommit("one\nTWO\nthree\nfour\n", "picker round 3");
+
+    const d = await update({ show: "1" });
+
+    expect([d.round, d.default_from]).toEqual([3, 1]);
+    await browser.waitUntil(async () => (await pressedFrom()) === "1",
+      { timeout: 10_000, timeoutMsg: "--show 1 did not make Round 1 the first view" });
+
+    await clickIn('[data-testid="compare-round-from"][data-from="base"]');
+
+    await browser.waitUntil(async () => (await pressedFrom()) === "base",
+      { timeout: 10_000, timeoutMsg: "Base did not override the agent's default" });
+    const r = await cliRpc({ cmd: "present_show", task: taskId, review: reviewId });
+    expect(r.data.review.default_from).toBe(1);
+
+    authorCommit("one\nTWO\nthree\nfour\nfive\n", "picker round 4");
+    await update();
+
+    await browser.waitUntil(async () => (await pressedFrom()) === "1",
+      { timeout: 10_000, timeoutMsg: "a new round did not drop the viewer's pick for the default" });
   });
 });

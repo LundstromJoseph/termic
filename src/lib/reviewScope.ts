@@ -1,25 +1,45 @@
 // A review diff's scope string and which threads it draws. `review:<id>`
 // follows the review's latest round; `review:<id>:to:<N>` pins an older round
 // and draws only the threads opened on it, at the anchor they were opened on.
+// `:from:<K>` after the id compares from round K's change instead of the base.
 
 import type { Review, ReviewAnchor, ReviewThread } from "./types";
 
 export interface ParsedReviewScope {
   reviewId: string;
-  /** Always null until the From/To picker lands. */
+  /** Null compares from the round's base. */
   from: number | null;
   /** Null follows the latest round. */
   to: number | null;
 }
 
 export function parseReviewScope(scope?: string | null): ParsedReviewScope | null {
-  const m = scope?.match(/^review:(r[1-9]\d*)(?::to:([1-9]\d*))?$/);
-  return m ? { reviewId: m[1], from: null, to: m[2] ? Number(m[2]) : null } : null;
+  const m = scope?.match(/^review:(r[1-9]\d*)(?::from:([1-9]\d*))?(?::to:([1-9]\d*))?$/);
+  return m ? { reviewId: m[1], from: m[2] ? Number(m[2]) : null, to: m[3] ? Number(m[3]) : null } : null;
 }
 
-/** The scope of round `to` of `review`; the latest round is the plain form. */
-export function reviewScope(review: Review, to: number | null): `review:${string}` {
-  return to == null || to >= review.rounds.length ? `review:${review.id}` : `review:${review.id}:to:${to}`;
+/** The scope of `review` from round `from` (the base when null) to round
+ *  `to`; the latest round is left out, and a from not below to is dropped. */
+export function reviewScope(review: Review, from: number | null, to: number | null): `review:${string}` {
+  const n = review.rounds.length;
+  const end = to == null || to >= n ? null : to;
+  const start = from != null && from < (end ?? n) ? `:from:${from}` : "";
+  return `review:${review.id}${start}${end == null ? "" : `:to:${end}`}`;
+}
+
+export interface ReviewView {
+  from: number | null;
+  to: number | null;
+}
+
+/** The view Compare shows: the viewer's pick while the review has the rounds
+ *  it was made at, else the agent's `default_from` against the latest round. */
+export function effectiveView(review: Review, pick?: ReviewView & { rounds: number }): ReviewView {
+  const n = review.rounds.length;
+  const v = pick && pick.rounds === n ? pick : { from: review.default_from ?? null, to: null };
+  const to = v.to != null && v.to < n ? v.to : null;
+  const from = v.from != null && v.from < (to ?? n) ? v.from : null;
+  return { from, to };
 }
 
 /** Where a thread was opened. */

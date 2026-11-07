@@ -46,6 +46,7 @@ export default {
     comparingWithParent: "正在将 {{sha}} 与其父提交比较",
     reviewChipTip: "来自智能体的评审 {{id}}",
     reviewRound: "第 {{n}} 轮",
+    reviewRounds: "第 {{k}} → {{n}} 轮",
   },
 
   binaryDiff: {
@@ -396,6 +397,14 @@ export default {
       threads: "讨论",
       outdated: "已过时",
       round: "第 {{n}} 轮",
+      from: "起点",
+      base: "基线",
+      baseTip: "第 {{n}} 轮与其基线 {{base}} 对比",
+      fromTip: "从第 {{k}} 轮到第 {{n}} 轮的改动",
+      toTip: "差异显示的轮次",
+      upstream: "上游",
+      upstreamTip: "将第 {{k}} 轮重放到第 {{n}} 轮的基线时此文件有冲突，因此其差异包含上游改动",
+      fallback: "当前 git 无法将第 {{k}} 轮重放到第 {{n}} 轮的基线上，因此列表包含两轮所改文件中的上游改动。",
     },
   },
 

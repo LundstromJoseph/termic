@@ -6,6 +6,7 @@
 import { create } from "zustand";
 import { reviewList } from "@/lib/ipc";
 import type { Review } from "@/lib/types";
+import type { ReviewView } from "@/lib/reviewScope";
 
 const reviewKey = (taskId: string, reviewId: string) => `${taskId}/${reviewId}`;
 
@@ -17,10 +18,14 @@ export interface ReviewsState {
   loaded: Record<string, true>;
   /** The review Compare shows for a task; null or absent is branch compare. */
   shown: Record<string, string | null>;
+  /** The viewer's From/To pick per review, for this session only, with the
+   *  round count it was made at: a new round drops it (`effectiveView`). */
+  view: Record<string, ReviewView & { rounds: number }>;
   apply: (taskId: string, review: Review) => void;
   setList: (taskId: string, reviews: Review[]) => void;
   ensureLoaded: (taskId: string) => void;
   setShown: (taskId: string, reviewId: string | null) => void;
+  setView: (taskId: string, reviewId: string, from: number | null, to: number | null, rounds: number) => void;
 }
 
 type Data = Pick<ReviewsState, "byKey" | "idsByTask" | "awaiting">;
@@ -60,6 +65,7 @@ export const useReviews = create<ReviewsState>((set, get) => ({
   awaiting: {},
   loaded: {},
   shown: {},
+  view: {},
   apply: (taskId, review) => set(s => merge(s, taskId, review)),
   setList: (taskId, reviews) => set(s => {
     const next = reviews.reduce((acc, r) => merge(acc, taskId, r), s);
@@ -75,6 +81,11 @@ export const useReviews = create<ReviewsState>((set, get) => ({
   },
   setShown: (taskId, reviewId) => set(s =>
     (s.shown[taskId] ?? null) === reviewId ? s : { shown: { ...s.shown, [taskId]: reviewId } }),
+  setView: (taskId, reviewId, from, to, rounds) => set(s => {
+    const k = reviewKey(taskId, reviewId);
+    const o = s.view[k];
+    return o && o.from === from && o.to === to && o.rounds === rounds ? s : { view: { ...s.view, [k]: { from, to, rounds } } };
+  }),
 }));
 
 export const EMPTY_REVIEW_IDS: readonly string[] = Object.freeze([]);

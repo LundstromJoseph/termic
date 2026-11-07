@@ -14821,20 +14821,26 @@ fn compare_result(base: String, base_sha: String, branch: String, no_merge_base:
 /// A review's `base..head`: committed blobs on both sides, so no untracked
 /// pass, no branch, and an empty `fp` on every row (nothing to mark viewed).
 fn git_range(cwd: &Path, base_sha: &str, head_sha: &str) -> Result<GitCompare, String> {
-    // `tracked_diff_files` reads a git failure as "no files", and a review is
-    // never empty, so a sha gc'd after an amend must be an error, not a blank list.
-    for sha in [base_sha, head_sha] {
-        if git(&["cat-file", "-e", &format!("{sha}^{{commit}}")], cwd).is_err() {
-            return Err(format!("commit {} is no longer in this repo", &sha[..sha.len().min(8)]));
-        }
-    }
+    commits_present(cwd, &[base_sha, head_sha])?;
     let files = tracked_diff_files(cwd, &[base_sha, head_sha], false);
     Ok(compare_result(base_sha.to_string(), base_sha.to_string(), String::new(), false, files))
 }
 
-/// A review round's file list for Compare. `mode` and `upstream` are for the
-/// From/To picker's replayed interdiff; a plain round range is "plain" with
-/// no upstream paths.
+/// `tracked_diff_files` reads a git failure as "no files", and a review is
+/// never empty, so a sha gc'd after an amend must be an error, not a blank list.
+fn commits_present(cwd: &Path, shas: &[&str]) -> Result<(), String> {
+    for sha in shas {
+        if git(&["cat-file", "-e", &format!("{sha}^{{commit}}")], cwd).is_err() {
+            return Err(format!("commit {} is no longer in this repo", &sha[..sha.len().min(8)]));
+        }
+    }
+    Ok(())
+}
+
+/// A review view's file list for Compare. `mode` is "plain" for one round's
+/// range, "replay" for round K -> N with K's change replayed onto N's base
+/// (`upstream` lists the rows that fell back to the plain diff on a
+/// conflict), and "fallback" when this git cannot replay at all.
 #[derive(Serialize)]
 struct ReviewRange {
     compare: GitCompare,
@@ -14842,17 +14848,51 @@ struct ReviewRange {
     upstream: Vec<String>,
 }
 
-/// Round `to` of a review (the latest when None), read from the stored shas
-/// so the caller never passes a rev.
+/// Round `to` of `r` (the latest when None), or from round `from`'s head to it.
+fn review_range(cwd: &Path, r: &termic_proto::Review, from: Option<u32>, to: Option<u32>) -> Result<ReviewRange, String> {
+    let n = review_rounds::round(r, to)?;
+    let Some(from) = from else {
+        return Ok(ReviewRange { compare: git_range(cwd, &n.base, &n.head)?, mode: "plain", upstream: Vec::new() });
+    };
+    let k = review_rounds::from_round(r, from, to)?;
+    commits_present(cwd, &[&k.base, &k.head, &n.base, &n.head])?;
+    interdiff_range(cwd, k, n, review_rounds::replay(cwd, &k.base, &k.head, &n.base))
+}
+
+/// Round K -> N's rows given the replay of K onto N's base.
+fn interdiff_range(cwd: &Path, k: &termic_proto::ReviewRound, n: &termic_proto::ReviewRound, replay: review_rounds::Replay) -> Result<ReviewRange, String> {
+    let plain = || tracked_diff_files(cwd, &[&k.head, &n.head], false);
+    let (files, mode, upstream) = match replay {
+        review_rounds::Replay::Clean { left, conflicted } => {
+            let mut files: Vec<GitFile> =
+                tracked_diff_files(cwd, &[&left, &n.head], false).into_iter().filter(|f| !conflicted.contains(&f.path)).collect();
+            let fell_back: Vec<GitFile> = plain().into_iter().filter(|f| conflicted.contains(&f.path)).collect();
+            let upstream = fell_back.iter().map(|f| f.path.clone()).collect();
+            files.extend(fell_back);
+            (files, "replay", upstream)
+        }
+        // Upstream's own files at least stay out: only what either round touched.
+        review_rounds::Replay::Unavailable => {
+            let mut touched = std::collections::HashSet::new();
+            for (a, b) in [(&k.base, &k.head), (&n.base, &n.head)] {
+                let names = git(&["--no-pager", "diff", "--name-only", "-z", "--relative", a, b], cwd).map_err(|e| e.to_string())?;
+                touched.extend(names.split('\0').filter(|p| !p.is_empty()).map(str::to_string));
+            }
+            (plain().into_iter().filter(|f| touched.contains(&f.path)).collect(), "fallback", Vec::new())
+        }
+    };
+    Ok(ReviewRange { compare: compare_result(k.head.clone(), k.head.clone(), String::new(), false, files), mode, upstream })
+}
+
+/// A review view's file list, read from the stored shas so the caller never
+/// passes a rev.
 #[tauri::command]
-async fn task_review_range(task_id: String, review_id: String, to: Option<u32>) -> Result<ReviewRange, String> {
+async fn task_review_range(task_id: String, review_id: String, from: Option<u32>, to: Option<u32>) -> Result<ReviewRange, String> {
     tauri::async_runtime::spawn_blocking(move || -> Result<ReviewRange, String> {
         let w = load_tasks_all().into_iter().find(|w| w.id == task_id).ok_or("no task")?;
         let r = reviews::load(&w, &review_id).map_err(|e| e.to_string())?;
         let cwd = repo_cwd(&w, &r.dir_name)?;
-        let rd = review_rounds::round(&r, to)?;
-        let compare = git_range(&cwd, &rd.base, &rd.head)?;
-        Ok(ReviewRange { compare, mode: "plain", upstream: Vec::new() })
+        review_range(&cwd, &r, from, to)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -17319,7 +17359,9 @@ fn task_file_diff_sides_for_task(w: &Task, path: &str, scope: Option<&str>) -> R
     //   "commit:SHA"→ SHA^ vs SHA            (History tab, issue #199)
     //   "base:SHA"  → SHA vs working tree    (History › Compare, issue #208)
     //   "review:ID" → the review's latest round, base vs head (agent-
-    //                 presented reviews); "review:ID:to:N" → round N's
+    //                 presented reviews); "review:ID:to:N" → round N's;
+    //                 "review:ID[:to:N]" with ":from:K" after the id →
+    //                 round K replayed onto N's base vs N's head
     //   None       → HEAD vs working tree   (full uncommitted delta; the
     //                 pre-#122 behavior, kept for callers with no pane)
     //
@@ -17361,18 +17403,29 @@ fn task_file_diff_sides_for_task(w: &Task, path: &str, scope: Option<&str>) -> R
     let base_sha = scope.and_then(|s| s.strip_prefix("base:")).filter(|s| is_commit_ish(s));
     let review = match scope.and_then(|s| s.strip_prefix("review:")) {
         Some(rest) => {
-            let (rid, to) = review_rounds::parse_scope(rest)?;
+            let (rid, from, to) = review_rounds::parse_scope(rest)?;
             let r = reviews::load(w, rid).map_err(|e| e.to_string())?;
             let rd = review_rounds::round(&r, to)?;
-            // Rust wrote both shas from rev-parse; checked anyway, like every
+            let kd = from.map(|k| review_rounds::from_round(&r, k, to)).transpose()?;
+            // Rust wrote every sha from rev-parse; checked anyway, like every
             // other revision that reaches `git show` here.
-            if !is_commit_ish(&rd.base) || !is_commit_ish(&rd.head) {
+            let mut shas = [&rd.base, &rd.head].into_iter().chain(kd.iter().flat_map(|k| [&k.base, &k.head]));
+            if !shas.all(|s| is_commit_ish(s)) {
                 return Err(format!("review {rid} holds a malformed sha"));
             }
             if cwd != repo_cwd(w, &r.dir_name)? {
                 return Err(format!("{path} is not in review {rid}'s repo"));
             }
-            Some((rd.base.clone(), rd.head.clone()))
+            // A replayed tree is the left side, except for a path the replay
+            // conflicted on, whose tree blob holds markers: that one is K's head.
+            let left = match kd {
+                None => rd.base.clone(),
+                Some(k) => match review_rounds::replay(&cwd, &k.base, &k.head, &rd.base) {
+                    review_rounds::Replay::Clean { left, conflicted } if !conflicted.contains(&rel_path) => left,
+                    _ => k.head.clone(),
+                },
+            };
+            Some((left, rd.head.clone()))
         }
         None => None,
     };
@@ -35617,6 +35670,117 @@ filename f.rs
             assert_eq!(round1.modified, "c\n");
             assert_eq!(latest.modified, "c2\n");
             assert_eq!(missing.err().as_deref(), Some("review r1 has no round 3"));
+        });
+    }
+
+    /// Round 1 is main..topic: a.txt line 2 and c.txt edited. main then moves
+    /// on: up.txt added, a.txt line 5 and c.txt edited (c.txt conflicts with
+    /// the author's). Round 2 is the rebase onto the new main with c.txt
+    /// resolved and a second author change to a.txt line 6. Returns the task.
+    fn rebased_review_fixture(repo: &Path) -> Task {
+        git_init_with_commit(repo);
+        git_set_identity(repo);
+        let lines = |edits: &[(usize, &str)]| {
+            let mut l: Vec<String> = (1..=6).map(|i| format!("a{i}")).collect();
+            for (i, v) in edits {
+                l[i - 1] = v.to_string();
+            }
+            l.join("\n") + "\n"
+        };
+        fs::write(repo.join("a.txt"), lines(&[])).unwrap();
+        git_commit_file(repo, "c.txt", "c\n", "base");
+        let main = git_branch(repo);
+        git_run(repo, &["checkout", "-q", "-b", "topic"]);
+        fs::write(repo.join("a.txt"), lines(&[(2, "A2")])).unwrap();
+        git_commit_file(repo, "c.txt", "c author\n", "round 1");
+        let task = Task { id: "t1".into(), ..task_at(repo) };
+        reviews::create(&task, reviews::NewReview {
+            range: format!("{main}..topic"),
+            title: None,
+            author: "claude".into(),
+            recipient_tab: None,
+            dir_name: String::new(),
+        })
+        .unwrap();
+        git_run(repo, &["checkout", "-q", &main]);
+        fs::write(repo.join("a.txt"), lines(&[(5, "U5")])).unwrap();
+        fs::write(repo.join("up.txt"), "up\n").unwrap();
+        git_commit_file(repo, "c.txt", "c upstream\n", "upstream");
+        git_run(repo, &["checkout", "-q", "-B", "topic"]);
+        fs::write(repo.join("a.txt"), lines(&[(2, "A2"), (5, "U5"), (6, "A6")])).unwrap();
+        git_commit_file(repo, "c.txt", "c resolved\n", "round 2");
+        reviews::update(&task, "r1", reviews::NewRound { head: "HEAD".into(), base: None, show: None }).unwrap();
+        task
+    }
+
+    fn range_rows(range: &ReviewRange) -> Vec<(&str, Option<u32>, Option<u32>)> {
+        range.compare.files.iter().map(|f| (f.path.as_str(), f.added, f.removed)).collect()
+    }
+
+    #[test]
+    fn review_range_from_round_1_after_a_rebase_lists_only_the_authors_changes_and_flags_the_conflicted_file() {
+        let dir = tempdir().unwrap();
+        crate::test_support::with_scratch_data_dir(|_| {
+            let task = rebased_review_fixture(dir.path());
+            let r = reviews::load(&task, "r1").unwrap();
+
+            let full = review_range(dir.path(), &r, None, None).unwrap();
+            let interdiff = review_range(dir.path(), &r, Some(1), None).unwrap();
+
+            // Round 2 against its own base: both files, upstream's lines not in it.
+            assert_eq!((full.mode, range_rows(&full)), ("plain", vec![("a.txt", Some(2), Some(2)), ("c.txt", Some(1), Some(1))]));
+            // up.txt and a.txt's upstream line 5 are gone; a.txt is the one new author line.
+            assert_eq!(interdiff.mode, "replay");
+            assert_eq!(range_rows(&interdiff), vec![("a.txt", Some(1), Some(1)), ("c.txt", Some(1), Some(1))]);
+            assert_eq!(interdiff.upstream, vec!["c.txt"]);
+            assert_eq!(interdiff.compare.base_sha, r.rounds[0].head);
+        });
+    }
+
+    #[test]
+    fn review_range_without_a_replay_lists_the_plain_head_to_head_rows_of_files_either_round_touched() {
+        let dir = tempdir().unwrap();
+        crate::test_support::with_scratch_data_dir(|_| {
+            let task = rebased_review_fixture(dir.path());
+            let r = reviews::load(&task, "r1").unwrap();
+
+            let range = interdiff_range(dir.path(), &r.rounds[0], &r.rounds[1], review_rounds::Replay::Unavailable).unwrap();
+
+            // up.txt is upstream's alone; a.txt keeps upstream's line 5 (+2 -2).
+            assert_eq!((range.mode, range_rows(&range)), ("fallback", vec![("a.txt", Some(2), Some(2)), ("c.txt", Some(1), Some(1))]));
+            assert!(range.upstream.is_empty());
+        });
+    }
+
+    #[test]
+    fn review_range_refuses_a_from_round_not_before_the_to_round() {
+        let dir = tempdir().unwrap();
+        crate::test_support::with_scratch_data_dir(|_| {
+            let task = rebased_review_fixture(dir.path());
+            let r = reviews::load(&task, "r1").unwrap();
+
+            let same = review_range(dir.path(), &r, Some(2), Some(2));
+            let latest = review_range(dir.path(), &r, Some(2), None);
+
+            assert_eq!(same.err().as_deref(), Some("round 2 of r1 is not before round 2"));
+            assert!(latest.is_err());
+        });
+    }
+
+    #[test]
+    fn review_scoped_diff_sides_with_from_read_the_replayed_tree_or_round_ks_head_for_a_conflicted_file() {
+        let dir = tempdir().unwrap();
+        crate::test_support::with_scratch_data_dir(|_| {
+            let task = rebased_review_fixture(dir.path());
+
+            let a = task_file_diff_sides_for_task(&task, "a.txt", Some("review:r1:from:1")).unwrap();
+            let c = task_file_diff_sides_for_task(&task, "c.txt", Some("review:r1:from:1")).unwrap();
+            let bad = task_file_diff_sides_for_task(&task, "a.txt", Some("review:r1:from:2:to:2"));
+
+            assert_eq!(a.original, "a1\nA2\na3\na4\nU5\na6\n", "round 1's change on round 2's base");
+            assert_eq!(a.modified, "a1\nA2\na3\na4\nU5\nA6\n");
+            assert_eq!((c.original.as_str(), c.modified.as_str()), ("c author\n", "c resolved\n"));
+            assert!(bad.is_err());
         });
     }
 

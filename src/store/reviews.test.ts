@@ -22,7 +22,7 @@ function review(id: string, seq: number, over: Partial<Review> = {}): Review {
 }
 
 beforeEach(() => {
-  useReviews.setState({ byKey: {}, idsByTask: {}, awaiting: {}, loaded: {}, shown: {} });
+  useReviews.setState({ byKey: {}, idsByTask: {}, awaiting: {}, loaded: {}, shown: {}, view: {} });
   resetReviewsLoaded();
   vi.mocked(ipc.reviewList).mockReset();
 });
@@ -153,5 +153,17 @@ describe("useReviews.setShown", () => {
     useReviews.getState().setShown("t1", "r1");
     expect(useReviews.getState()).toBe(shown);
     expect(shown.shown.t1).toBe("r1");
+  });
+});
+
+describe("useReviews.setView", () => {
+  it("stores the pick per review and returns the same state when it is unchanged", () => {
+    useReviews.getState().setView("t1", "r1", 1, null, 2);
+    const picked = useReviews.getState();
+
+    useReviews.getState().setView("t1", "r1", 1, null, 2);
+
+    expect(useReviews.getState()).toBe(picked);
+    expect(picked.view["t1/r1"]).toEqual({ from: 1, to: null, rounds: 2 });
   });
 });
