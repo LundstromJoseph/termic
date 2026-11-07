@@ -237,9 +237,8 @@ export function buildThreadCard(thread: ReviewThread, expanded: boolean, host: {
   const resolved = thread.resolved;
   if (resolved) {
     wrap.dataset.collapsed = String(!expanded);
-    const toggle = button("tc-comment-loc tc-thread-toggle", `${expanded ? "▾" : "▸"} ${loc}`, host.onToggle);
+    const toggle = steadyButton("tc-comment-loc tc-thread-toggle", `${expanded ? "▾" : "▸"} ${loc}`, host.onToggle);
     toggle.setAttribute("aria-expanded", String(expanded));
-    keepFocus(toggle);
     const lead = el("span", "");
     lead.appendChild(toggle);
     const chip = el("span", "tc-thread-chip", t("resolved"));
@@ -251,11 +250,10 @@ export function buildThreadCard(thread: ReviewThread, expanded: boolean, host: {
   }
   const tools = el("div", "tc-comment-tools");
   tools.appendChild(button("tc-icon-btn tc-btn-reply", t("replyAction"), host.onReply));
-  const resolve = button("tc-icon-btn tc-btn-resolve", resolved ? t("unresolveAction") : t("resolveAction"), () => {
+  const resolve = steadyButton("tc-icon-btn tc-btn-resolve", resolved ? t("unresolveAction") : t("resolveAction"), () => {
     resolve.disabled = true;
     void host.onResolve(!resolved).finally(() => { resolve.disabled = false; });
   });
-  keepFocus(resolve);
   tools.appendChild(resolve);
   head.appendChild(tools);
   wrap.appendChild(head);
@@ -269,9 +267,17 @@ export function buildThreadCard(thread: ReviewThread, expanded: boolean, host: {
   return wrap;
 }
 
-/** A click on `b` leaves focus where it was. The resolve button's card is
- *  rebuilt once the write lands, and a focused button that leaves the DOM
- *  drops focus to <body>, which takes ⌘W and pane switching with it. */
-function keepFocus(b: HTMLButtonElement) {
+/** A button whose press leaves focus in the pane. Its card is rebuilt by the
+ *  press, and a focused button that leaves the DOM drops focus to <body>,
+ *  which takes ⌘W and pane switching with it. A mouse press never takes
+ *  focus; a keyboard press hands it to the tab host before the card goes. */
+function steadyButton(cls: string, text: string, onClick: () => void): HTMLButtonElement {
+  const b = button(cls, text, () => {
+    if (b.ownerDocument.activeElement === b) {
+      b.closest<HTMLElement>("[data-main-tab-id], [data-split-leaf]")?.focus({ preventScroll: true });
+    }
+    onClick();
+  });
   b.addEventListener("mousedown", e => e.preventDefault());
+  return b;
 }

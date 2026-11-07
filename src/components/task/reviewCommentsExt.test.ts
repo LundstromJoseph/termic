@@ -618,6 +618,34 @@ describe("agent-presented review threads in a review: diff", () => {
     expect(pressed).toEqual([true, true]);
   });
 
+  it("hands focus to the tab host when the toggle is pressed from the keyboard, as the card it sits on is rebuilt", async () => {
+    putReview(1, [resolvedBy(thread("r1-t1", FILE, [2, 2], "agent"), "user")]);
+    const view = mountReview();
+    await settle();
+    const host = view.dom.parentElement!;
+    host.dataset.mainTabId = "tab-1";
+    host.tabIndex = -1;
+    const toggle = cards(view)[0].querySelector<HTMLButtonElement>(".tc-thread-toggle")!;
+    toggle.focus();
+
+    toggle.click();
+
+    expect(toggle.isConnected).toBe(false);
+    expect(document.activeElement).toBe(host);
+  });
+
+  it("expands a collapsed resolved thread when Reply is pressed on it, with the composer open under it", async () => {
+    putReview(1, [resolvedBy(thread("r1-t1", FILE, [2, 2], "agent"), "user")]);
+    const view = mountReview();
+    await settle();
+
+    clickReply(view, "r1-t1");
+    await settle();
+
+    expect(cards(view)[0].dataset.collapsed).toBe("false");
+    expect(view.contentDOM.querySelector(".tc-comment-composer .tc-comment-loc")?.textContent).toBe("Reply to r1-t1 · thing.ts · line 2");
+  });
+
   it("rebuilds the card and its stripe when a push resolves or reopens a thread with no new comment", async () => {
     putReview(1, [thread("r1-t1", FILE, [2, 2], "agent")]);
     const view = mountReview();

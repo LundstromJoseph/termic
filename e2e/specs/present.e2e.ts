@@ -618,10 +618,11 @@ describe("agent-presented review", () => {
       const entry = card.querySelector(".tc-thread-entry");
       return {
         resolved: card.dataset.resolved ?? null,
+        collapsed: card.dataset.collapsed ?? null,
         chip: card.querySelector(".tc-thread-chip")?.textContent ?? null,
         entries: entry ? getComputedStyle(entry).display : null,
       };
-    }, taskId, threadId) as Promise<{ resolved: string | null; chip: string | null; entries: string | null } | null>;
+    }, taskId, threadId) as Promise<{ resolved: string | null; collapsed: string | null; chip: string | null; entries: string | null } | null>;
 
   const waitResolved = (threadId: string, resolved: boolean, msg: string) =>
     browser.waitUntil(async () => (await cardState(threadId))?.resolved === String(resolved), { timeout: 10_000, timeoutMsg: msg });
@@ -635,7 +636,7 @@ describe("agent-presented review", () => {
     expect(r.ok).toBe(true);
     expect(r.data).toMatchObject({ thread_id: "r1-t1", resolved: true, changed: true });
     await waitResolved("r1-t1", true, "the agent's resolve never reached the open diff");
-    expect(await cardState("r1-t1")).toEqual({ resolved: "true", chip: "Resolved", entries: "none" });
+    expect(await cardState("r1-t1")).toEqual({ resolved: "true", collapsed: "true", chip: "Resolved", entries: "none" });
     expect((await cardState("r1-t2"))?.resolved).toBe("false");
     await browser.waitUntil(async () => (await awaiting()) === before - 1,
       { timeout: 10_000, timeoutMsg: "the awaiting count never dropped for the resolved thread" });
@@ -660,7 +661,9 @@ describe("agent-presented review", () => {
 
     await clickInDiff('[data-thread-id="r1-t1"] .tc-thread-toggle');
 
-    expect((await cardState("r1-t1"))?.entries).not.toBe("none");
+    await browser.waitUntil(async () => (await cardState("r1-t1"))?.entries === "block",
+      { timeout: 10_000, timeoutMsg: "the toggle never showed the resolved thread's comments" });
+    expect((await cardState("r1-t1"))?.collapsed).toBe("false");
     await browser.waitUntil(async () => { const m = await drift(); return m.nums === m.lines && m.spread < 2; }, {
       timeout: 10_000, timeoutMsg: "the line numbers drifted after expanding a resolved thread",
     });
@@ -693,6 +696,27 @@ describe("agent-presented review", () => {
     await waitResolved("r1-t1", false, "the agent's reply never reopened the thread");
     await browser.waitUntil(async () => (await awaiting()) === open,
       { timeout: 10_000, timeoutMsg: "the awaiting count never came back after the agent's reply" });
+  });
+
+  // The harness window never has OS focus, so browser.keys cannot press a
+  // button. A keyboard press reaches the handler as a click on the focused
+  // button, which is what this drives.
+  it("leaves focus in the diff tab when Resolve is pressed while focused, as a keyboard press does", async () => {
+    const diffTab = await showReviewDiff();
+
+    await browser.execute((id) => {
+      const btn = [...document.querySelectorAll<HTMLElement>(`[data-task-id="${id}"] [data-thread-id="r1-t1"] .tc-btn-resolve`)]
+        .find(e => e.offsetParent !== null)!;
+      btn.focus();
+      btn.click();
+    }, taskId);
+
+    await waitResolved("r1-t1", true, "the focused Resolve never collapsed the card");
+    expect(await browser.execute((d) => !!document.activeElement?.closest(`[data-main-tab-id="${CSS.escape(d)}"]`), diffTab))
+      .toBe(true);
+    const r = await cliRpc({ cmd: "present_resolve", task: taskId, thread: "r1-t1", resolved: false });
+    expect(r.ok).toBe(true);
+    await waitResolved("r1-t1", false, "the thread never reopened for the cases after this one");
   });
 
   // ── Thread list ─────────────────────────────────────────────────────────

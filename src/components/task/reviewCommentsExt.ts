@@ -284,8 +284,12 @@ class ThreadCardWidget extends WidgetType {
   toDOM(view: EditorView) {
     const th = this.thread;
     const wrap = buildThreadCard(th, this.expanded, {
+      // A reply answers the thread's comments, so a collapsed card opens with the composer.
       onReply: () => view.dispatch({
-        effects: openComposer.of({ threadId: th.id, startLine: th.start_line, endLine: th.end_line, quote: "", body: "" }),
+        effects: [
+          ...expandThreadEffects(view.state, th),
+          openComposer.of({ threadId: th.id, startLine: th.start_line, endLine: th.end_line, quote: "", body: "" }),
+        ],
       }),
       onResolve: resolved => resolveReviewThread(this.ctx.taskId, th.id, resolved),
       onToggle: () => view.dispatch({ effects: toggleThread.of(th.id) }),
