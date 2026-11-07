@@ -136,7 +136,11 @@ use std::io::{self, BufRead, Read, Write};
 /// v27: `present_resolve` resolves or reopens a review thread, and a thread
 /// carries `resolved`. A v26 server does not know the verb; the bump turns
 /// that into "restart the app".
-pub const PROTOCOL_VERSION: u32 = 27;
+///
+/// v28: `present_update` starts a review's next round, and a review carries
+/// `rounds` while its threads carry `round`, `origin` and `outdated`. A v27
+/// server does not know the verb; the bump turns that into "restart the app".
+pub const PROTOCOL_VERSION: u32 = 28;
 
 /// A pasted "123", "#123", "!123" or a PR / MR link, reduced to its number.
 /// None for anything else. The webview's `parsePrRef` (src/lib/prReview.ts)
@@ -319,8 +323,8 @@ pub fn badge_color_problem(color: &str) -> Option<String> {
     ))
 }
 
-/// An agent-presented review: an immutable `base..head` range plus comment
-/// threads on its head side. This one type is the on-disk record
+/// An agent-presented review: one `base..head` range per round plus comment
+/// threads on the latest head side. This one type is the on-disk record
 /// (`scratch/<task_id>/reviews/<id>.json`, written only by the app), the
 /// wire reply and the webview's mirror, so the three cannot drift.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -332,8 +336,9 @@ pub struct Review {
     pub task_id: String,
     /// Composition member the range lives in; "" is the host repo.
     pub dir_name: String,
-    /// Full shas when the review was opened: `head` is B, `base` the
-    /// merge-base of A and B (A itself when they share no commit).
+    /// The latest round's range, mirrored from `rounds`: full shas, `head`
+    /// is B, `base` the merge-base of A and B (A itself when they share no
+    /// commit).
     pub base: String,
     pub head: String,
     /// The two refs as the agent typed them, for display.
@@ -350,19 +355,51 @@ pub struct Review {
     /// stores the value it was given, so `--since <seq>` reads "everything
     /// after this".
     pub seq: u64,
-    /// Changed paths in the range, repo-relative, sorted, capped.
+    /// Changed paths in the latest round's range, repo-relative, sorted, capped.
     pub files: Vec<String>,
     pub files_truncated: bool,
     pub threads: Vec<ReviewThread>,
+    /// Round 1 first. A file written before rounds has none; the app reads
+    /// it as one round made of the top-level range.
+    #[serde(default)]
+    pub rounds: Vec<ReviewRound>,
+    /// The view the user sees first: None is base..latest, Some(K) is round
+    /// K's head..latest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_from: Option<u32>,
+}
+
+/// One round of a review: the range as of a `present new` or `present update`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ReviewRound {
+    pub base: String,
+    pub head: String,
+    pub base_ref: String,
+    pub head_ref: String,
+    pub at: String,
+}
+
+/// Where a thread points: a file, and head-side lines unless it is file level.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ReviewAnchor {
+    pub file: String,
+    pub start_line: Option<u32>,
+    pub end_line: Option<u32>,
+}
+
+fn round_one() -> u32 {
+    1
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ReviewThread {
     /// `<review id>-t<M>`, e.g. `r1-t3`.
     pub id: String,
-    /// Repo-relative path, one of `Review::files`.
+    /// Repo-relative path: the anchor on the latest head while live, the
+    /// last live anchor once outdated.
     pub file: String,
-    /// Head-side lines, 1-based and inclusive. Both None for a file-level thread.
+    /// Head-side lines of that anchor, 1-based and inclusive. Both None for
+    /// a file-level thread.
     pub start_line: Option<u32>,
     pub end_line: Option<u32>,
     /// The head-side text of those lines when the thread opened; "" at file level.
@@ -371,6 +408,26 @@ pub struct ReviewThread {
     /// Absent while the thread is open. Either side sets it; any reply clears it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved: Option<ReviewResolved>,
+    /// The round the thread was opened on.
+    #[serde(default = "round_one")]
+    pub round: u32,
+    /// The anchor it was opened on. Absent until re-anchoring first moves it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<ReviewAnchor>,
+    /// The round whose changes outdated it. Absent while it is live.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outdated: Option<u32>,
+}
+
+impl ReviewThread {
+    /// The anchor the thread was opened on.
+    pub fn origin_anchor(&self) -> ReviewAnchor {
+        self.origin.clone().unwrap_or_else(|| ReviewAnchor {
+            file: self.file.clone(),
+            start_line: self.start_line,
+            end_line: self.end_line,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -389,6 +446,9 @@ pub struct ReviewComment {
     pub author: String,
     pub body: String,
     pub at: String,
+    /// The round the comment was posted in.
+    #[serde(default = "round_one")]
+    pub round: u32,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -406,6 +466,21 @@ pub const REVIEW_BODY_MAX: usize = 8000;
 pub const REVIEW_QUOTE_MAX: usize = 4000;
 pub const REVIEW_THREADS_MAX: usize = 500;
 pub const REVIEW_COMMENTS_PER_THREAD_MAX: usize = 200;
+pub const REVIEW_ROUNDS_MAX: usize = 100;
+
+/// `present update --show`: "full" is None (base..latest), a round number
+/// K >= 1 is Some(K) (round K's head..latest).
+pub fn parse_review_show(s: &str) -> Result<Option<u32>, String> {
+    if s == "full" {
+        return Ok(None);
+    }
+    if s.starts_with(|c: char| ('1'..='9').contains(&c)) && s.chars().all(|c| c.is_ascii_digit()) {
+        if let Ok(n) = s.parse::<u32>() {
+            return Ok(Some(n));
+        }
+    }
+    Err(format!("\"{s}\" is not a view (full, or a round number like 1)"))
+}
 
 /// Why `title` cannot be a review title: one line, no control characters,
 /// at most `REVIEW_TITLE_MAX` characters once trimmed.
@@ -1046,6 +1121,23 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cwd: Option<String>,
     },
+    /// v28: start the review's next round at `head`; `base` defaults to the
+    /// last round's base_ref re-resolved; `show` is full or a round number.
+    /// Replies `ReplyData::ReviewUpdate`.
+    PresentUpdate {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project: Option<String>,
+        review: String,
+        head: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        base: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        show: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cwd: Option<String>,
+    },
     /// Close ONE tab of a running task: the GUI's × as a verb (GH #185).
     /// Anything that opens tabs programmatically needs a way to clean
     /// them up; task-level `archive` is the wrong hammer, it takes every
@@ -1537,6 +1629,8 @@ pub enum ReplyData {
     ReviewResolve(ReviewResolveData),
     /// `present list` (v26).
     Reviews(ReviewsData),
+    /// `present update` (v28).
+    ReviewUpdate(ReviewUpdateData),
     Quit(QuitData),
     Archive(ArchiveData),
     Rename(RenameData),
@@ -1659,6 +1753,36 @@ pub struct ReviewSummary {
     pub threads: u32,
     pub comments: u32,
     pub seq: u64,
+    #[serde(default = "round_one")]
+    pub rounds: u32,
+}
+
+/// `present update`'s reply (v28): the new round and the threads it outdated.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ReviewUpdateData {
+    pub task_id: String,
+    /// `project/name`.
+    pub task: String,
+    pub review_id: String,
+    pub round: u32,
+    pub base: String,
+    pub head: String,
+    pub base_ref: String,
+    pub head_ref: String,
+    pub files: u32,
+    pub files_truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_from: Option<u32>,
+    pub outdated: Vec<ReviewOutdated>,
+}
+
+/// A thread a new round outdated, at its anchor in the previous round.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ReviewOutdated {
+    pub thread_id: String,
+    pub file: String,
+    pub start_line: Option<u32>,
+    pub end_line: Option<u32>,
 }
 
 /// `present claim`'s reply: the review's list row, not its threads, which
@@ -3092,6 +3216,15 @@ mod tests {
                 task: Some("fix-auth".into()), project: Some("web".into()), thread: "r1-t3".into(), resolved: false,
                 cwd: Some("/t".into()),
             },
+            // v28: review rounds.
+            Command::PresentUpdate {
+                task: None, project: None, review: "r1".into(), head: "HEAD".into(), base: None, show: None,
+                cwd: Some("/t".into()),
+            },
+            Command::PresentUpdate {
+                task: Some("fix-auth".into()), project: Some("web".into()), review: "r2".into(), head: "HEAD".into(),
+                base: Some("main".into()), show: Some("1".into()), cwd: None,
+            },
             Command::Agents,
             Command::Prompts { selector: None },
             Command::Prompts { selector: Some("builtin:review".into()) },
@@ -3441,6 +3574,14 @@ mod tests {
                     files: vec!["src/a.rs".into()],
                     files_truncated: false,
                     threads: Vec::new(),
+                    rounds: vec![ReviewRound {
+                        base: "a".repeat(40),
+                        head: "b".repeat(40),
+                        base_ref: "main".into(),
+                        head_ref: "HEAD".into(),
+                        at: "2026-11-06T10:00:00+00:00".into(),
+                    }],
+                    default_from: None,
                 },
             }),
             ReplyData::ReviewWrite(ReviewWriteData {
@@ -3462,6 +3603,7 @@ mod tests {
                     threads: 0,
                     comments: 0,
                     seq: 0,
+                    rounds: 1,
                 },
             }),
             ReplyData::Reviews(ReviewsData {
@@ -3477,7 +3619,41 @@ mod tests {
                     threads: 2,
                     comments: 3,
                     seq: 3,
+                    rounds: 2,
                 }],
+            }),
+            ReplyData::ReviewUpdate(ReviewUpdateData {
+                task_id: "w1".into(),
+                task: "web/fix-auth".into(),
+                review_id: "r1".into(),
+                round: 2,
+                base: "a".repeat(40),
+                head: "c".repeat(40),
+                base_ref: "main".into(),
+                head_ref: "HEAD".into(),
+                files: 3,
+                files_truncated: false,
+                default_from: Some(1),
+                outdated: vec![ReviewOutdated {
+                    thread_id: "r1-t2".into(),
+                    file: "src/a.rs".into(),
+                    start_line: Some(3),
+                    end_line: Some(4),
+                }],
+            }),
+            ReplyData::ReviewUpdate(ReviewUpdateData {
+                task_id: "w1".into(),
+                task: "web/fix-auth".into(),
+                review_id: "r1".into(),
+                round: 3,
+                base: "a".repeat(40),
+                head: "d".repeat(40),
+                base_ref: "main".into(),
+                head_ref: "HEAD".into(),
+                files: 1,
+                files_truncated: true,
+                default_from: None,
+                outdated: Vec::new(),
             }),
             ReplyData::Open(OpenData { task: Some(summary.clone()), raised: true }),
             ReplyData::Open(OpenData { task: None, raised: true }),
@@ -4083,9 +4259,15 @@ mod tests {
                     author: "claude".into(),
                     body: "why".into(),
                     at: "2026-11-06T10:00:01+00:00".into(),
+                    round: 1,
                 }],
                 resolved: None,
+                round: 1,
+                origin: None,
+                outdated: None,
             }],
+            rounds: Vec::new(),
+            default_from: None,
         };
         let mut resolved = review.clone();
         resolved.threads[0].resolved = Some(ReviewResolved {
@@ -4104,6 +4286,53 @@ mod tests {
         assert!(!json.contains("\"resolved\""), "an open thread writes no resolved key: {json}");
         assert_eq!(resolved_back, resolved);
         assert!(resolved_json.contains(r#""resolved":{"by":"user""#), "{resolved_json}");
+        assert!(!json.contains("\"origin\"") && !json.contains("\"outdated\""), "a live thread writes neither: {json}");
+    }
+
+    #[test]
+    fn a_review_written_before_rounds_loads_as_round_one_everywhere() {
+        let json = r#"{"version":1,"id":"r1","task_id":"t1","dir_name":"","base":"a","head":"b",
+            "base_ref":"main","head_ref":"HEAD","title":null,"author":"claude","recipient_tab":null,
+            "created_at":"x","seq":1,"files":["a.rs"],"files_truncated":false,
+            "threads":[{"id":"r1-t1","file":"a.rs","start_line":1,"end_line":1,"quote":"q",
+              "comments":[{"seq":1,"by":"agent","author":"claude","body":"b","at":"x"}]}]}"#;
+        let summary = r#"{"id":"r1","title":null,"base_ref":"a","head_ref":"b","author":"c",
+            "recipient_tab":null,"threads":0,"comments":0,"seq":0}"#;
+
+        let r: Review = serde_json::from_str(json).unwrap();
+        let s: ReviewSummary = serde_json::from_str(summary).unwrap();
+
+        assert!(r.rounds.is_empty());
+        assert_eq!(r.default_from, None);
+        let th = &r.threads[0];
+        assert_eq!((th.round, th.comments[0].round, &th.origin, th.outdated), (1, 1, &None, None));
+        assert_eq!(s.rounds, 1);
+    }
+
+    #[test]
+    fn origin_anchor_is_the_stored_origin_or_else_the_current_anchor() {
+        let mut th: ReviewThread = serde_json::from_str(
+            r#"{"id":"r1-t1","file":"b.rs","start_line":5,"end_line":6,"quote":"","comments":[]}"#,
+        )
+        .unwrap();
+        let current = ReviewAnchor { file: "b.rs".into(), start_line: Some(5), end_line: Some(6) };
+        let origin = ReviewAnchor { file: "a.rs".into(), start_line: Some(1), end_line: Some(2) };
+
+        let before = th.origin_anchor();
+        th.origin = Some(origin.clone());
+
+        assert_eq!(before, current);
+        assert_eq!(th.origin_anchor(), origin);
+    }
+
+    #[test]
+    fn parse_review_show_takes_full_or_a_round_number_without_a_leading_zero() {
+        assert_eq!(parse_review_show("full"), Ok(None));
+        assert_eq!(parse_review_show("1"), Ok(Some(1)));
+        assert_eq!(parse_review_show("12"), Ok(Some(12)));
+        for bad in ["0", "01", "r1", "", "-1", "Full", " 1", "99999999999"] {
+            assert!(parse_review_show(bad).unwrap_err().contains("is not a view"), "{bad:?}");
+        }
     }
 
     #[test]
@@ -4118,6 +4347,7 @@ mod tests {
             review_thread_id_problem("x").unwrap(),
             parse_line_range("x").unwrap_err(),
             parse_line_range("2-1").unwrap_err(),
+            parse_review_show("x").unwrap_err(),
         ];
         for m in msgs {
             assert!(!m.contains('\u{2014}'), "em dash in {m:?}");

@@ -8,8 +8,8 @@ import type { Review, ReviewThread } from "@/lib/types";
 
 function thread(id: string, ...by: ("agent" | "user")[]): ReviewThread {
   return {
-    id, file: "a.ts", start_line: 1, end_line: 1, quote: "x",
-    comments: by.map((b, i) => ({ seq: i + 1, by: b, author: b === "agent" ? "claude" : "", body: "b", at: "" })),
+    id, file: "a.ts", start_line: 1, end_line: 1, quote: "x", round: 1,
+    comments: by.map((b, i) => ({ seq: i + 1, by: b, author: b === "agent" ? "claude" : "", body: "b", at: "", round: 1 })),
   };
 }
 
@@ -17,7 +17,7 @@ function review(id: string, seq: number, over: Partial<Review> = {}): Review {
   return {
     version: 1, id, task_id: "t1", dir_name: "", base: "a", head: "b", base_ref: "main", head_ref: "HEAD",
     title: null, author: "claude", recipient_tab: "tab-1", created_at: "", seq, files: ["a.ts"],
-    files_truncated: false, threads: [], ...over,
+    files_truncated: false, threads: [], rounds: [], ...over,
   };
 }
 

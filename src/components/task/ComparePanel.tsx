@@ -31,7 +31,7 @@
 // edited. That is what makes this the surface for reviewing a whole feature.
 //
 // Review mode: while the reviews store `shown`s one of the task's
-// agent-presented reviews, the panel lists that review's fixed `base..head`
+// agent-presented reviews, the panel lists its latest round's `base..head`
 // range instead (docs/ui.md "Agent-presented reviews"). The bar names the
 // review, rows open `review:<id>` diffs and carry thread counts, and nothing
 // is fingerprinted, so there are no viewed marks. The branch compare's state
@@ -44,7 +44,8 @@ import {
   ArrowRight, MessageSquare, AlertTriangle, FileText,
 } from "lucide-react";
 import type { GitCompare, GitFile, Review, ReviewThread, Task } from "@/lib/types";
-import { taskGitCompare, taskGitRange, taskGitRefs } from "@/lib/ipc";
+import { taskGitCompare, taskReviewRange, taskGitRefs } from "@/lib/ipc";
+import { reviewScope, threadAnchor } from "@/lib/reviewScope";
 import { useApp } from "@/store/app";
 import { useReviews, useReview, useTaskReviewIds } from "@/store/reviews";
 import { useFileViewed, useIsViewed } from "@/store/fileViewed";
@@ -142,9 +143,9 @@ export function ComparePanel({ task, repoDir, search, viewMode, reloadToken, onO
   const shownId = useReviews(s => s.shown[task.id] ?? null);
   const review = useReview(task.id, shownId);
   const reviewIds = useTaskReviewIds(task.id);
-  const reviewKey = review ? `${task.id}/${review.id}` : null;
-  /** The shown review's file list, keyed by task/review. A review's range is
-   *  immutable, so it is read once and never on reloadToken. */
+  const reviewKey = review ? `${task.id}/${review.id}/${review.rounds.length}` : null;
+  /** The shown review's file list, keyed by task/review/round. A round's range
+   *  never changes, so it is read once per round and never on reloadToken. */
   const [range, setRange] = useState<{ key: string; cmp: GitCompare | null; err: string | null } | null>(null);
 
   const toggleMergeBase = () => setMergeBase(v => { const n = !v; persist(LS_MERGE_BASE, n ? "1" : "0"); return n; });
@@ -179,11 +180,11 @@ export function ComparePanel({ task, repoDir, search, viewMode, reloadToken, onO
     setSelected(null);
     if (!review || !reviewKey || (range?.key === reviewKey && !range.err)) return;
     let alive = true;
-    taskGitRange(task.id, review.dir_name, review.base, review.head)
-      .then(r => { if (alive) setRange({ key: reviewKey, cmp: r, err: null }); })
+    taskReviewRange(task.id, review.id, null)
+      .then(r => { if (alive) setRange({ key: reviewKey, cmp: r.compare, err: null }); })
       .catch(e => { if (alive) setRange({ key: reviewKey, cmp: null, err: String(e) }); });
     return () => { alive = false; };
-    // A new seq on the same review is a new comment, not a new range.
+    // A new seq in the same round is a new comment, not a new range.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reviewKey]);
 
@@ -196,7 +197,8 @@ export function ComparePanel({ task, repoDir, search, viewMode, reloadToken, onO
   const threadCounts = useMemo(() => {
     if (!review) return null;
     const m = new Map<string, number>();
-    for (const th of review.threads) if (!th.resolved) m.set(th.file, (m.get(th.file) ?? 0) + 1);
+    // The threads drawn in each file's diff: an outdated one is not.
+    for (const th of review.threads) if (!th.resolved && !th.outdated) m.set(th.file, (m.get(th.file) ?? 0) + 1);
     return m;
   }, [review]);
 
@@ -242,9 +244,9 @@ export function ComparePanel({ task, repoDir, search, viewMode, reloadToken, onO
     { added: 0, removed: 0 },
   ), [files]);
 
-  const openReviewDiff = useCallback((review: Review, path: string, revealThread?: string) => {
+  const openReviewDiff = useCallback((review: Review, path: string, revealThread?: string, to: number | null = null) => {
     useApp.getState().openPreviewTab(task.id, {
-      type: "diff", path: dir ? `${dir}/${path}` : path, scope: `review:${review.id}`,
+      type: "diff", path: dir ? `${dir}/${path}` : path, scope: reviewScope(review, to),
       title: `Δ ${path.split("/").pop()} · ${review.id}`, revealThread,
     });
   }, [dir, task.id]);
@@ -256,10 +258,13 @@ export function ComparePanel({ task, repoDir, search, viewMode, reloadToken, onO
     else onOpenDiff(dir ? `${dir}/${path}` : path, view.cmp.base_sha, `Δ ${path.split("/").pop()}`);
   }, [view.cmp, dir, review, openReviewDiff, onOpenDiff]);
 
+  // An outdated thread's lines are gone from the latest head: it opens on the
+  // round it was made on, where they still are.
   const openThread = useCallback((th: ReviewThread) => {
     if (!review) return;
-    setSelected(th.file);
-    openReviewDiff(review, th.file, th.id);
+    const file = th.outdated ? threadAnchor(th).file : th.file;
+    setSelected(file);
+    openReviewDiff(review, file, th.id, th.outdated ? th.round : null);
   }, [review, openReviewDiff]);
 
   // The other reading of the same row: the file itself, not the comparison.
@@ -513,6 +518,11 @@ function ReviewBar({ task, review, reviewIds }: { task: Task; review: Review; re
         <ArrowRight className="h-3 w-3 shrink-0 text-[var(--color-fg-faint)]" />
         <span className="truncate" title={review.head.slice(0, 7)}>{review.head_ref}</span>
       </span>
+      {review.rounds.length >= 2 && (
+        <span data-testid="compare-review-round" className="shrink-0 rounded bg-[var(--color-bg-3)] px-1.5 text-[10.5px] text-[var(--color-fg-dim)]">
+          {t("compare.review.round", { n: review.rounds.length })}
+        </span>
+      )}
       <span className="ml-auto shrink-0 text-[var(--color-fg-faint)]" data-testid="compare-review-author">
         {t("compare.review.by", { author: review.author })}
       </span>
@@ -553,30 +563,27 @@ function ThreadRow({ thread, onOpen }: { thread: ReviewThread; onOpen: (th: Revi
   const { t } = useTranslation("panels");
   const last = thread.comments[thread.comments.length - 1];
   const resolved = !!thread.resolved;
-  const base = thread.file.split("/").pop() ?? thread.file;
-  const lines = thread.start_line === null ? ""
-    : thread.end_line === null || thread.end_line === thread.start_line ? `:${thread.start_line}`
-    : `:${thread.start_line}–${thread.end_line}`;
-  return (
-    <button
-      type="button"
-      data-testid="compare-thread-row"
-      data-thread={thread.id}
-      data-awaiting={!resolved && last?.by === "agent" ? "1" : "0"}
-      data-resolved={resolved ? "1" : "0"}
-      title={thread.file}
-      onClick={() => onOpen(thread)}
-      className={cn(
-        "flex h-[22px] w-full items-center gap-2 px-2.5 text-left text-[11.5px] hover:bg-[var(--color-hover)]",
-        resolved && "opacity-60",
-      )}
-    >
+  const outdated = !!thread.outdated;
+  // An outdated thread is named where it was opened, which is where a click takes it.
+  const at = outdated ? threadAnchor(thread) : thread;
+  const base = at.file.split("/").pop() ?? at.file;
+  const lines = at.start_line === null ? ""
+    : at.end_line === null || at.end_line === at.start_line ? `:${at.start_line}`
+    : `:${at.start_line}–${at.end_line}`;
+  const snippet = outdated ? thread.quote.split("\n")[0] : "";
+  const row = (
+    <>
       <span className="shrink-0 font-mono text-[var(--color-fg-faint)]" data-testid="compare-thread-id">{thread.id}</span>
       {/* The line suffix never truncates: it is what tells two rows on one file apart. */}
       <span className="flex min-w-0 flex-1 font-mono text-[var(--color-fg)]" data-testid="compare-thread-loc">
         <span className="truncate">{base}</span>
         <span className="shrink-0">{lines}</span>
       </span>
+      {outdated && (
+        <span data-testid="compare-thread-outdated" className="shrink-0 rounded-full bg-[var(--color-bg-3)] px-1.5 text-[10px] text-[var(--color-fg-dim)]">
+          {t("compare.review.outdated")}
+        </span>
+      )}
       {resolved && (
         <Check className="h-3 w-3 shrink-0 text-[var(--color-fg-faint)]" data-testid="compare-thread-resolved" aria-label={t("reviewExt.resolved")} />
       )}
@@ -592,6 +599,35 @@ function ThreadRow({ thread, onOpen }: { thread: ReviewThread; onOpen: (th: Revi
         <MessageSquare className="h-2.5 w-2.5" />
         {thread.comments.length}
       </span>
+    </>
+  );
+  return (
+    <button
+      type="button"
+      data-testid="compare-thread-row"
+      data-thread={thread.id}
+      data-awaiting={!resolved && last?.by === "agent" ? "1" : "0"}
+      data-resolved={resolved ? "1" : "0"}
+      data-state={outdated ? "outdated" : resolved ? "resolved" : "open"}
+      title={at.file}
+      onClick={() => onOpen(thread)}
+      className={cn(
+        "w-full px-2.5 text-left text-[11.5px] hover:bg-[var(--color-hover)]",
+        outdated ? "flex flex-col py-0.5" : "flex h-[22px] items-center gap-2",
+        (resolved || outdated) && "opacity-60",
+      )}
+    >
+      {outdated ? (
+        <>
+          <span className="flex h-[18px] w-full items-center gap-2">{row}</span>
+          {/* The lines it was about are gone from the head; the quote says what they were. */}
+          {snippet && (
+            <span data-testid="compare-thread-snippet" title={thread.quote} className="block w-full truncate pl-1 font-mono text-[10.5px] text-[var(--color-fg-faint)]">
+              {snippet}
+            </span>
+          )}
+        </>
+      ) : row}
     </button>
   );
 }

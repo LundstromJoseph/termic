@@ -365,8 +365,8 @@ review: it opens in your task's Git tab (Compare) without taking focus,
 and you and the user talk it through in comment threads on its new side.
 Every `present` verb targets your own task unless you pass `--task`. Over
 MCP the same verbs are `present_new`, `present_comment`, `present_reply`,
-`present_show`, `present_list`, `present_claim`, `present_resolve` and
-`present_unresolve`; pass your
+`present_show`, `present_list`, `present_claim`, `present_resolve`,
+`present_unresolve` and `present_update`; pass your
 `$TERMIC_TAB_ID` as `tab` to `present_new` and `present_claim`.
 
 - `"$TERMIC_CLI" present new main..HEAD --title "<title>"` - open one and
@@ -390,9 +390,16 @@ MCP the same verbs are `present_new`, `present_comment`, `present_reply`,
   either side reopens it too, and the user is not messaged. To say
   "fixed" and close it, reply first, then resolve.
 
-The range never moves. After an amend, rebase or new commit, open a fresh
-review for the next round instead of commenting on the old one. A caged
-(enforce/enforce-fs) task has no CLI, so it cannot present.
+- `"$TERMIC_CLI" present update r1 --head HEAD` - after an amend, rebase
+  or new commit, start the review's next round instead of opening a new
+  review. Threads whose lines did not change move with the code; the rest
+  go outdated, and the reply lists them so you can answer each in its
+  thread. Without `--base` the base is the last round's base rev resolved
+  again (a rebase onto a moved main needs nothing more); pass `--base` when
+  it was relative, like `HEAD~3`. `--show 1` makes "what changed since
+  round 1" the view the user sees first, `--show full` the whole range.
+
+A caged (enforce/enforce-fs) task has no CLI, so it cannot present.
 
 ### Recurring task schedules
 

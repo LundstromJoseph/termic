@@ -1232,7 +1232,8 @@ export interface GitCompare {
 }
 
 /** An agent-presented review. Mirrors termic-proto's `Review`, which is also
- *  the on-disk record; Rust is its only writer. The range is immutable. */
+ *  the on-disk record; Rust is its only writer. The top-level range and files
+ *  mirror the latest round. */
 export interface Review {
   version: number;
   /** `r<N>`, sequential per task. */
@@ -1258,11 +1259,30 @@ export interface Review {
   files: string[];
   files_truncated: boolean;
   threads: ReviewThread[];
+  /** Round 1 first; Rust fills round 1 for a file written before rounds. */
+  rounds: ReviewRound[];
+  /** The view the user sees first: absent is base..latest, K is round K's head..latest. */
+  default_from?: number;
+}
+
+export interface ReviewRound {
+  base: string;
+  head: string;
+  base_ref: string;
+  head_ref: string;
+  at: string;
+}
+
+export interface ReviewAnchor {
+  file: string;
+  start_line: number | null;
+  end_line: number | null;
 }
 
 export interface ReviewThread {
   /** `r<N>-t<M>`. */
   id: string;
+  /** The anchor on the latest head while live, the last live one once outdated. */
   file: string;
   /** Head-side lines, 1-based inclusive; null for a file-level thread. */
   start_line: number | null;
@@ -1272,6 +1292,12 @@ export interface ReviewThread {
   comments: ReviewThreadComment[];
   /** Absent while the thread is open. */
   resolved?: ReviewThreadResolved;
+  /** The round it was opened on. */
+  round: number;
+  /** The anchor it was opened on; absent until re-anchoring first moved it. */
+  origin?: ReviewAnchor;
+  /** The round whose changes outdated it; absent while live. */
+  outdated?: number;
 }
 
 export interface ReviewThreadResolved {
@@ -1289,6 +1315,7 @@ export interface ReviewThreadComment {
   author: string;
   body: string;
   at: string;
+  round: number;
 }
 
 /** A reply when `thread_id` is set, otherwise a new thread on `file`
@@ -1300,6 +1327,8 @@ export interface ReviewPostItem {
   end_line: number | null;
   quote: string | null;
   body: string;
+  /** The round a new thread was written on; Rust refuses it once stale. */
+  round?: number | null;
 }
 
 export interface ReviewPostResult {

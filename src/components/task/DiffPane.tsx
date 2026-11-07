@@ -24,9 +24,10 @@ import { tags as t } from "@lezer/highlight";
 import { cn } from "@/lib/utils";
 import { langForPath } from "@/lib/languageExts";
 import { resolveEditorTheme, editorSurfaceTheme } from "@/lib/editorTheme";
-import { reviewCommentsExtension, dispatchFileComment } from "./reviewCommentsExt";
+import { reviewCommentsExtension, dispatchFileComment, type ReviewSurface } from "./reviewCommentsExt";
 import { revealThread } from "./revealThread";
 import { useReviews, selectReview } from "@/store/reviews";
+import { parseReviewScope, threadsInView } from "@/lib/reviewScope";
 import { MessageSquarePlus } from "lucide-react";
 import { ContextMenuRoot, ContextMenuTrigger, ContextMenuContent } from "@/components/ui/ContextMenu";
 import { CopyPathItems } from "./CopyPathItems";
@@ -34,6 +35,9 @@ import { attachHiddenScrollRestore } from "@/lib/hiddenScrollRestore";
 
 type Mode = "side" | "unified";
 const LS_DIFF_MODE = "diffMode";
+/** An older round of a review: its threads take replies, but a new thread
+ *  anchors to the latest head, so nothing offers to start one here. */
+const REPLY_ONLY_SURFACE: ReviewSurface = { selection: "none", hoverGutter: false, source: "diff" };
 
 // Issue #40: syntax themes color comments dim by design (Atom One, the default
 // dark "auto" theme, uses #54636D), which de-emphasizes them while you write
@@ -146,7 +150,15 @@ export function DiffPane({ task, tab }: { task: Task; tab: DiffTab }) {
   const baseSha = tab.scope?.startsWith("base:") ? tab.scope.slice("base:".length) : null;
   // An agent-presented review's diff: both sides are commits, like a History
   // diff, so viewed marks and the stale probe are off. Its threads still show.
-  const reviewId = tab.scope?.startsWith("review:") ? tab.scope.slice("review:".length) : null;
+  // `reviewTo` pins an older round, which takes replies but no new threads.
+  const reviewScope = parseReviewScope(tab.scope);
+  const reviewId = reviewScope?.reviewId ?? null;
+  const reviewTo = reviewScope?.to ?? null;
+  const reviewRounds = useReviews(s => reviewId ? s.byKey[`${task.id}/${reviewId}`]?.rounds.length ?? 0 : 0);
+  // The one live-update exception to GH #266: a diff following a review's
+  // latest round rebuilds on a new round, or the moved cards would sit on the
+  // old head's lines. A pinned round never changes.
+  const latestRound = reviewTo == null ? reviewRounds : 0;
   const hostRef = useRef<HTMLDivElement>(null);
   // The host div is the scroll container for both modes; its position
   // dies with the box when a hidden task/tab goes display:none in
@@ -432,9 +444,13 @@ export function DiffPane({ task, tab }: { task: Task; tab: DiffTab }) {
       // agent is about to edit, and this diff's right side is a commit that
       // already happened (GH #199).
       const isCommitScope = !!tab.scope?.startsWith("commit:");
-      const commentExt = isCommitScope ? [] : reviewCommentsExtension(task.id, tab.path, undefined, reviewId ?? undefined);
+      const olderRound = reviewTo != null;
+      const commentExt = isCommitScope ? [] : reviewCommentsExtension(
+        task.id, tab.path, olderRound ? REPLY_ONLY_SURFACE : undefined, reviewId ?? undefined,
+        { to: reviewTo, round: reviewRounds },
+      );
       // A review diff takes comments too: they join the review's threads.
-      const canComment = !isCommitScope;
+      const canComment = !isCommitScope && !olderRound;
 
       // GH #118: @codemirror/merge's default diffConfig caps the precise
       // diff at scanLimit 500 changed characters per scanned range; a big
@@ -495,7 +511,7 @@ export function DiffPane({ task, tab }: { task: Task; tab: DiffTab }) {
       mergeRef.current?.destroy(); mergeRef.current = null;
       editorRef.current?.destroy(); editorRef.current = null;
     };
-  }, [task.id, tab.path, tab.scope, editorFontSize, mode, editorThemeId, appIsLight, tab.reloadNonce]);
+  }, [task.id, tab.path, tab.scope, editorFontSize, mode, editorThemeId, appIsLight, tab.reloadNonce, latestRound]);
 
   const effectiveMode: Mode = oneSided ? "unified" : mode;
 
@@ -514,7 +530,8 @@ export function DiffPane({ task, tab }: { task: Task; tab: DiffTab }) {
     if (!id || !view) return;
     if (showingPreview) { setNewView("source"); return; }
     useApp.getState().consumeReveal(task.id, tab.id);
-    const th = reviewId ? selectReview(task.id, reviewId)(useReviews.getState())?.threads.find(t => t.id === id) : undefined;
+    const review = reviewId ? selectReview(task.id, reviewId)(useReviews.getState()) : null;
+    const th = review ? threadsInView(review, tab.path, reviewTo).find(t => t.id === id) : undefined;
     // A file-level card sits above line 1. Side-by-side scrolls the merge
     // view's own box; unified scrolls the editor.
     if (th && !revealThread(view, th)) (mergeRef.current?.dom ?? view.scrollDOM).scrollTop = 0;
@@ -591,7 +608,7 @@ export function DiffPane({ task, tab }: { task: Task; tab: DiffTab }) {
             title={tr("diff.reviewChipTip", { id: reviewId })}
             className="ml-2 shrink-0 rounded bg-[var(--color-bg-3)] px-1.5 font-mono text-[11px] leading-[18px] text-[var(--color-fg-faint)]"
           >
-            {reviewId}
+            {reviewTo == null ? reviewId : `${reviewId} · ${tr("diff.reviewRound", { n: reviewTo })}`}
           </span>
         )}
         <div className="ml-auto flex items-center gap-1">

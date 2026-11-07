@@ -23,12 +23,14 @@ function locLabel(start: number | null, end: number | null, file: string): strin
 
 /** Where a comment goes: the task, its file, and the surface that made it
  *  (decides how the batch is worded to the agent, see composeCommentsMessage).
- *  `reviewId` when the file is a `review:` diff: the comment joins that review. */
+ *  `reviewId` when the file is a `review:` diff: the comment joins that review,
+ *  written on its round `reviewRound`. */
 export interface CommentTarget {
   taskId: string;
   file: string;
   source: "diff" | "editor";
   reviewId?: string;
+  reviewRound?: number;
 }
 
 /** A comment being written. `id` is set when it edits a queued one, and
@@ -235,19 +237,24 @@ export function buildThreadCard(thread: ReviewThread, expanded: boolean, host: {
   const head = el("div", "tc-comment-card-head");
   const loc = locLabel(thread.start_line, thread.end_line, thread.file);
   const resolved = thread.resolved;
+  const lead = el("span", "");
   if (resolved) {
     wrap.dataset.collapsed = String(!expanded);
     const toggle = steadyButton("tc-comment-loc tc-thread-toggle", `${expanded ? "▾" : "▸"} ${loc}`, host.onToggle);
     toggle.setAttribute("aria-expanded", String(expanded));
-    const lead = el("span", "");
     lead.appendChild(toggle);
     const chip = el("span", "tc-thread-chip", t("resolved"));
     chip.title = t("resolvedBy", { who: resolved.by === "user" ? t("you") : resolved.author });
     lead.appendChild(chip);
-    head.appendChild(lead);
   } else {
-    head.appendChild(el("span", "tc-comment-loc", loc));
+    lead.appendChild(el("span", "tc-comment-loc", loc));
   }
+  if (thread.outdated) {
+    const chip = el("span", "tc-thread-chip tc-thread-chip-outdated", t("outdatedIn", { n: thread.outdated }));
+    chip.title = t("outdatedTip", { round: thread.round });
+    lead.appendChild(chip);
+  }
+  head.appendChild(lead);
   const tools = el("div", "tc-comment-tools");
   tools.appendChild(button("tc-icon-btn tc-btn-reply", t("replyAction"), host.onReply));
   const resolve = steadyButton("tc-icon-btn tc-btn-resolve", resolved ? t("unresolveAction") : t("resolveAction"), () => {

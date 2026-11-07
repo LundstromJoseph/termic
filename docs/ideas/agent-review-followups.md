@@ -15,11 +15,12 @@ docs/cli-agent-instructions.md (agent briefing).
 
 ## Features
 
-1. **Rounds: move a review's head.** `present update <id> --head <rev>`
-   after an amend, rebase or new commit. Re-anchor threads by their stored
-   quote, mark the ones that no longer match as `outdated`. Today a new
-   round means a new review, and old threads stay on the old one.
-   `outdated` is its own thread field, independent of `resolved`.
+1. **Rounds: the From/To picker.** Rounds shipped on `present-v2`
+   (`present update`, hidden refs, re-anchoring, outdated threads, older-round
+   views). Left: a From/To picker in Compare so "Round K -> latest" and
+   "latest vs base" are each one click, honouring `default_from`, with the
+   `git merge-tree` replay interdiff (per-file and whole-view fallbacks) so
+   a rebase between rounds does not list upstream changes.
 2. **Comments on the old side.** `--side old` and a commentable left pane,
    so deleted lines can carry a comment. The file format already has
    `side`.

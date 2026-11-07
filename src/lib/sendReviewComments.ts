@@ -34,6 +34,7 @@ export async function sendReviewComments(taskId: string, reviewId: string, draft
       end_line: d.endLine,
       quote: d.quote || null,
       body: d.body,
+      round: d.reviewRound ?? null,
     });
 
   let result: Awaited<ReturnType<typeof reviewPost>>;

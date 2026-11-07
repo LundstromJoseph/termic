@@ -948,9 +948,16 @@ export const taskGitBranches = (id: string, dirName: string) =>
  *  the default) over a literal tip-to-tree diff. */
 export const taskGitCompare = (id: string, dirName: string, base: string, mergeBase: boolean) =>
   invoke<GitCompare>("task_git_compare", { id, dirName, base, mergeBase });
-/** A review's committed `base..head` (full shas): no untracked rows, `fp` "". */
-export const taskGitRange = (id: string, dirName: string, base: string, head: string) =>
-  invoke<GitCompare>("task_git_range", { id, dirName, base, head });
+/** A review round's file list. `mode` and `upstream` belong to the From/To
+ *  picker's replayed interdiff; a plain round range is "plain" with none. */
+export interface ReviewRange {
+  compare: GitCompare;
+  mode: "plain" | "replay" | "fallback";
+  upstream: string[];
+}
+/** Round `to` of a review (the latest when null): committed rows only, `fp` "". */
+export const taskReviewRange = (taskId: string, reviewId: string, to: number | null) =>
+  invoke<ReviewRange>("task_review_range", { taskId, reviewId, to });
 export const reviewList = (taskId: string) => invoke<Review[]>("review_list", { taskId });
 /** Does not push `review_changed`: apply the returned review yourself. */
 export const reviewPost = (taskId: string, reviewId: string, items: ReviewPostItem[]) =>

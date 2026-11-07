@@ -1849,6 +1849,30 @@ const TOOLS: &[ToolDef] = &[
         }),
     },
     ToolDef {
+        name: "present_update",
+        cli_verb: "present update",
+        description: "Start a review's next round; reports outdated threads.",
+        params: &[
+            P_PAD_TASK,
+            P_PROJECT,
+            ParamDef { name: "review", json_type: "string", required: true, description: "r1", cli_flag: Some("review") },
+            ParamDef { name: "head", json_type: "string", required: true, description: "New head rev.", cli_flag: Some("--head") },
+            ParamDef { name: "base", json_type: "string", required: false, description: "New base rev.", cli_flag: Some("--base") },
+            ParamDef { name: "show", json_type: "string", required: false, description: "full or a round number.", cli_flag: Some("--show") },
+        ],
+        destructive: false,
+        read_only: false,
+        build: |a| Ok(Command::PresentUpdate {
+            task: arg_str(a, "task")?,
+            project: arg_str(a, "project")?,
+            review: need_str(a, "review")?,
+            head: need_str(a, "head")?,
+            base: arg_str(a, "base")?,
+            show: arg_str(a, "show")?,
+            cwd: None,
+        }),
+    },
+    ToolDef {
         name: "task_agents",
         cli_verb: "agents",
         description: "List the agent CLIs this app can run: the ids task_new and task_tab accept, with whether each is installed and usable, and each agent's named accounts (what task_new's account takes) with the default. Without this a caller has to guess an agent id and read the refusal.",
@@ -2298,7 +2322,7 @@ const SELF_DEFAULT_TOOLS: &[&str] = &[
     "task_rename", "task_group", "task_tab", "task_prop",
     "task_badge_set", "task_badge_remove", "task_badge_list",
     "present_new", "present_comment", "present_reply", "present_show", "present_list", "present_claim",
-    "present_resolve", "present_unresolve",
+    "present_resolve", "present_unresolve", "present_update",
     "scratchpad_new", "scratchpad_write", "scratchpad_read", "scratchpad_list",
     "scratchpad_remove", "scratchpad_clear",
     "schedule_show", "schedule_set", "schedule_run", "schedule_delete",
@@ -4234,7 +4258,10 @@ mod tests {
         // 34100: present_resolve / present_unresolve, parity with `termic
         // present resolve|unresolve`. Two tools for two CLI verbs; the one
         // thread param and a clause each. Also lands on a round number.
-        const RECORDED: usize = 34100;
+        // 34737: present_update, parity with `termic present update`. Its
+        // head/base/show params are a few words each; the round model lives
+        // in `termic present --help`.
+        const RECORDED: usize = 34737;
         assert!(
             size <= RECORDED,
             "serialized tools/list grew to {size} bytes (recorded {RECORDED}); grow it consciously"
@@ -4443,6 +4470,8 @@ mod tests {
         let claim_no_tab = call("present_claim", serde_json::json!({ "review": "r1" }));
         let resolve = call("present_resolve", serde_json::json!({ "thread": "r1-t2" })).unwrap();
         let unresolve = call("present_unresolve", serde_json::json!({ "thread": "r1-t2" })).unwrap();
+        let update = call("present_update", serde_json::json!({ "review": "r1", "head": "HEAD", "show": "1" })).unwrap();
+        let update_no_head = call("present_update", serde_json::json!({ "review": "r1" }));
 
         assert!(matches!(&new, Command::PresentNew { task: Some(t), range, tab: Some(tab), title: Some(ti), author: None, repo: None, cwd: None, .. }
             if t == "me" && range == "main..HEAD" && tab == "tab-1" && ti == "T"));
@@ -4457,10 +4486,13 @@ mod tests {
         assert!(claim_no_tab.unwrap_err().contains("tab"));
         assert!(matches!(&resolve, Command::PresentResolve { task: Some(t), thread, resolved: true, .. } if t == "me" && thread == "r1-t2"));
         assert!(matches!(&unresolve, Command::PresentResolve { task: Some(t), thread, resolved: false, .. } if t == "me" && thread == "r1-t2"));
+        assert!(matches!(&update, Command::PresentUpdate { task: Some(t), review, head, base: None, show: Some(s), cwd: None, .. }
+            if t == "me" && review == "r1" && head == "HEAD" && s == "1"));
+        assert!(update_no_head.unwrap_err().contains("head"));
         for n in ["present_show", "present_list"] {
             assert_eq!(tool_entry(tool(n))["annotations"]["readOnlyHint"], true, "{n}");
         }
-        for n in ["present_new", "present_comment", "present_reply", "present_claim", "present_resolve", "present_unresolve"] {
+        for n in ["present_new", "present_comment", "present_reply", "present_claim", "present_resolve", "present_unresolve", "present_update"] {
             assert_eq!(tool_entry(tool(n))["annotations"]["destructiveHint"], false, "{n}");
         }
     }

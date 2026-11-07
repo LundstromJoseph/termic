@@ -726,6 +726,41 @@ pub fn review_opened_text(r: &termic_proto::Review) -> String {
     out
 }
 
+/// `present update`: the new round, and which threads it outdated.
+pub fn review_updated_text(d: &termic_proto::ReviewUpdateData) -> String {
+    let files = format!("{}{}", d.files, if d.files_truncated { "+" } else { "" });
+    let head = format!(
+        "Review {} is now round {} ({}..{}, {files} files) in the Git tab.",
+        d.review_id,
+        d.round,
+        short(&d.base),
+        short(&d.head)
+    );
+    if d.outdated.is_empty() {
+        return format!("{head}\nNo thread went outdated.");
+    }
+    let list = d
+        .outdated
+        .iter()
+        .map(|o| format!("{} {}", o.thread_id, loc(&o.file, o.start_line, o.end_line)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let n = d.outdated.len();
+    format!(
+        "{head}\n{n} {} went outdated (their lines changed): {list}. Their cards stay in the thread list; \
+         reply in them if this round answers them.",
+        if n == 1 { "thread" } else { "threads" }
+    )
+}
+
+fn loc(file: &str, start: Option<u32>, end: Option<u32>) -> String {
+    match (start, end) {
+        (Some(s), Some(e)) if s != e => format!("{file}:{s}-{e}"),
+        (Some(s), _) => format!("{file}:{s}"),
+        _ => file.to_string(),
+    }
+}
+
 /// `present show`: a header and the commentable files, then each thread
 /// with its quoted lines and its comments (with the seq `--since` takes),
 /// the user's shown as "You".
@@ -745,6 +780,18 @@ pub fn review_text(r: &termic_proto::Review) -> String {
         r.author,
         r.seq
     );
+    if r.rounds.len() >= 2 {
+        for (i, rd) in r.rounds.iter().enumerate() {
+            out.push_str(&format!(
+                "\nRound {}: {}..{} ({}..{})",
+                i + 1,
+                rd.base_ref,
+                rd.head_ref,
+                short(&rd.base),
+                short(&rd.head)
+            ));
+        }
+    }
     out.push_str("\nFiles:");
     for f in &r.files {
         out.push_str(&format!("\n  {f}"));
@@ -756,17 +803,14 @@ pub fn review_text(r: &termic_proto::Review) -> String {
         out.push_str("\nNo comments.");
     }
     for t in &r.threads {
-        let loc = match (t.start_line, t.end_line) {
-            (Some(s), Some(e)) if s != e => format!("{}:{s}-{e}", t.file),
-            (Some(s), _) => format!("{}:{s}", t.file),
-            _ => t.file.clone(),
-        };
+        let loc = loc(&t.file, t.start_line, t.end_line);
         let resolved = match &t.resolved {
             Some(r) if r.by == termic_proto::ReviewBy::User => " (resolved by You)".into(),
             Some(r) => format!(" (resolved by {})", r.author),
             None => String::new(),
         };
-        out.push_str(&format!("\n\n{} {loc}{resolved}", t.id));
+        let outdated = t.outdated.map(|n| format!(" (outdated in round {n}, opened in round {})", t.round)).unwrap_or_default();
+        out.push_str(&format!("\n\n{} {loc}{resolved}{outdated}", t.id));
         for line in t.quote.lines() {
             out.push_str(&format!("\n> {line}"));
         }
@@ -791,8 +835,9 @@ pub fn reviews_text(d: &termic_proto::ReviewsData) -> String {
         .map(|r| {
             let title = r.title.as_deref().map(|t| format!(" \"{t}\"")).unwrap_or_default();
             let tab = r.recipient_tab.as_deref().map(|t| format!("tab {t}")).unwrap_or_else(|| "no tab".into());
+            let round = if r.rounds >= 2 { format!(", round {}", r.rounds) } else { String::new() };
             format!(
-                "{}{title} {}..{} by {}: {} threads, {} comments, seq {}, {tab}",
+                "{}{title} {}..{} by {}{round}: {} threads, {} comments, seq {}, {tab}",
                 r.id, r.base_ref, r.head_ref, r.author, r.threads, r.comments, r.seq
             )
         })
@@ -1076,11 +1121,28 @@ mod tests {
             files: vec!["a.rs".into(), "b.rs".into()],
             files_truncated: false,
             threads,
+            rounds: Vec::new(),
+            default_from: None,
         }
     }
 
     fn comment(seq: u64, by: termic_proto::ReviewBy, author: &str, body: &str) -> termic_proto::ReviewComment {
-        termic_proto::ReviewComment { seq, by, author: author.into(), body: body.into(), at: String::new() }
+        termic_proto::ReviewComment { seq, by, author: author.into(), body: body.into(), at: String::new(), round: 1 }
+    }
+
+    fn thread(id: &str, file: &str, lines: Option<(u32, u32)>) -> termic_proto::ReviewThread {
+        termic_proto::ReviewThread {
+            id: id.into(),
+            file: file.into(),
+            start_line: lines.map(|l| l.0),
+            end_line: lines.map(|l| l.1),
+            quote: String::new(),
+            comments: vec![comment(1, termic_proto::ReviewBy::Agent, "claude", "x")],
+            resolved: None,
+            round: 1,
+            origin: None,
+            outdated: None,
+        }
     }
 
     #[test]
@@ -1108,6 +1170,9 @@ mod tests {
                 quote: "let a = 1;\nlet b = 2;".into(),
                 comments: vec![comment(1, ReviewBy::Agent, "claude", "why two?"), comment(3, ReviewBy::User, "", "one\ntwo")],
                 resolved: None,
+                round: 1,
+                origin: None,
+                outdated: None,
             },
             ReviewThread {
                 id: "r1-t2".into(),
@@ -1117,6 +1182,9 @@ mod tests {
                 quote: "x".into(),
                 comments: vec![comment(2, ReviewBy::Agent, "claude", "line")],
                 resolved: None,
+                round: 1,
+                origin: None,
+                outdated: None,
             },
             ReviewThread {
                 id: "r1-t3".into(),
@@ -1126,6 +1194,9 @@ mod tests {
                 quote: String::new(),
                 comments: vec![comment(4, ReviewBy::Agent, "claude", "generated")],
                 resolved: None,
+                round: 1,
+                origin: None,
+                outdated: None,
             },
         ];
 
@@ -1173,6 +1244,9 @@ mod tests {
             quote: String::new(),
             comments: vec![comment(1, ReviewBy::Agent, "claude", "x")],
             resolved: Some(ReviewResolved { by, author: author.into(), at: String::new() }),
+            round: 1,
+            origin: None,
+            outdated: None,
         };
         let threads = vec![thread("r1-t1", ReviewBy::User, ""), thread("r1-t2", ReviewBy::Agent, "Codex")];
 
@@ -1194,10 +1268,11 @@ mod tests {
             threads: 2,
             comments: 3,
             seq: 3,
+            rounds: 1,
         };
         let mut d = termic_proto::ReviewsData { task_id: "w1".into(), task: "web/x".into(), reviews: Vec::new() };
         let empty = reviews_text(&d);
-        d.reviews = vec![row("r1", Some("Login fix"), Some("t1")), row("r2", None, None)];
+        d.reviews = vec![row("r1", Some("Login fix"), Some("t1")), termic_proto::ReviewSummary { rounds: 3, ..row("r2", None, None) }];
 
         let two = reviews_text(&d);
 
@@ -1205,8 +1280,67 @@ mod tests {
         assert_eq!(
             two,
             "r1 \"Login fix\" main..HEAD by claude: 2 threads, 3 comments, seq 3, tab t1\n\
-             r2 main..HEAD by claude: 2 threads, 3 comments, seq 3, no tab"
+             r2 main..HEAD by claude, round 3: 2 threads, 3 comments, seq 3, no tab"
         );
+    }
+
+    #[test]
+    fn review_text_lists_each_round_once_there_are_two_and_marks_an_outdated_thread_with_both_rounds() {
+        let round = |b: &str, h: &str, head_ref: &str| termic_proto::ReviewRound {
+            base: b.into(),
+            head: h.into(),
+            base_ref: "main".into(),
+            head_ref: head_ref.into(),
+            at: String::new(),
+        };
+        let mut outdated = thread("r1-t1", "a.rs", Some((3, 4)));
+        outdated.outdated = Some(2);
+        let mut r = review(vec![outdated], Some("t1"));
+        r.rounds = vec![round("aaaaaaa1111", "bbbbbbb2222", "HEAD"), round("aaaaaaa1111", "ccccccc3333", "HEAD")];
+
+        let text = review_text(&r);
+
+        assert!(text.contains("\nRound 1: main..HEAD (aaaaaaa..bbbbbbb)\nRound 2: main..HEAD (aaaaaaa..ccccccc)\nFiles:"), "{text}");
+        assert!(text.contains("\nr1-t1 a.rs:3-4 (outdated in round 2, opened in round 1)\n"), "{text}");
+    }
+
+    #[test]
+    fn review_updated_text_names_the_round_and_lists_outdated_threads_or_says_there_are_none() {
+        let mut d = termic_proto::ReviewUpdateData {
+            task_id: "w1".into(),
+            task: "web/x".into(),
+            review_id: "r1".into(),
+            round: 2,
+            base: "aaaaaaa1111".into(),
+            head: "ccccccc3333".into(),
+            base_ref: "main".into(),
+            head_ref: "HEAD".into(),
+            files: 12,
+            files_truncated: false,
+            default_from: None,
+            outdated: Vec::new(),
+        };
+        let none = review_updated_text(&d);
+        let outdated = |id: &str, file: &str, lines: Option<(u32, u32)>| termic_proto::ReviewOutdated {
+            thread_id: id.into(),
+            file: file.into(),
+            start_line: lines.map(|l| l.0),
+            end_line: lines.map(|l| l.1),
+        };
+        d.outdated = vec![outdated("r1-t1", "a.ts", Some((3, 4))), outdated("r1-t3", "b.ts", None)];
+
+        let two = review_updated_text(&d);
+        d.outdated.truncate(1);
+        let one = review_updated_text(&d);
+
+        assert_eq!(none, "Review r1 is now round 2 (aaaaaaa..ccccccc, 12 files) in the Git tab.\nNo thread went outdated.");
+        assert_eq!(
+            two,
+            "Review r1 is now round 2 (aaaaaaa..ccccccc, 12 files) in the Git tab.\n\
+             2 threads went outdated (their lines changed): r1-t1 a.ts:3-4, r1-t3 b.ts. \
+             Their cards stay in the thread list; reply in them if this round answers them."
+        );
+        assert!(one.contains("\n1 thread went outdated (their lines changed): r1-t1 a.ts:3-4."), "{one}");
     }
 
     #[test]

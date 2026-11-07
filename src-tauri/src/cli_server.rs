@@ -944,7 +944,8 @@ pub(crate) fn dispatch_authenticated(
         | Command::PresentShow { .. }
         | Command::PresentList { .. }
         | Command::PresentClaim { .. }
-        | Command::PresentResolve { .. } => handle_present(&req.id, host, &req.cmd),
+        | Command::PresentResolve { .. }
+        | Command::PresentUpdate { .. } => handle_present(&req.id, host, &req.cmd),
         Command::TabClose { task, project, tab, yes, cwd } => handle_tab_close(
             &req.id,
             host,
@@ -3445,7 +3446,8 @@ fn handle_present(id: &str, host: &dyn CliHost, cmd: &Command) -> Reply {
         | Command::PresentShow { task, project, cwd, .. }
         | Command::PresentList { task, project, cwd }
         | Command::PresentClaim { task, project, cwd, .. }
-        | Command::PresentResolve { task, project, cwd, .. } => (task.as_deref(), project.as_deref(), cwd.as_deref()),
+        | Command::PresentResolve { task, project, cwd, .. }
+        | Command::PresentUpdate { task, project, cwd, .. } => (task.as_deref(), project.as_deref(), cwd.as_deref()),
         _ => unreachable!("dispatch sends only the present verbs here"),
     };
     let (projects, tasks) = host.projects_tasks();
@@ -3510,6 +3512,7 @@ fn review_summary(r: proto::Review) -> proto::ReviewSummary {
         author: r.author,
         recipient_tab: r.recipient_tab,
         seq: r.seq,
+        rounds: r.rounds.len() as u32,
     }
 }
 
@@ -3570,6 +3573,7 @@ fn present(
                 by: proto::ReviewBy::Agent,
                 author,
                 quote: None,
+                round: None,
             };
             let (r, mut posted, _) = reviews::apply(t, review, vec![op])?;
             host.push_review(serde_json::json!({ "taskId": t.id, "review": r }));
@@ -3634,6 +3638,26 @@ fn present(
                 thread_id: thread.clone(),
                 resolved: *resolved,
                 changed,
+            }))
+        }
+        Command::PresentUpdate { review, head, base, show, .. } => {
+            let show = show.as_deref().map(proto::parse_review_show).transpose().map_err(PresentError::Bad)?;
+            let (r, outdated) =
+                reviews::update(t, review, reviews::NewRound { head: head.clone(), base: base.clone(), show })?;
+            host.push_review(serde_json::json!({ "taskId": t.id, "review": r, "reveal": true }));
+            Ok(ReplyData::ReviewUpdate(proto::ReviewUpdateData {
+                task_id: t.id.clone(),
+                task: name.into(),
+                round: r.rounds.len() as u32,
+                files: r.files.len() as u32,
+                files_truncated: r.files_truncated,
+                default_from: r.default_from,
+                review_id: r.id,
+                base: r.base,
+                head: r.head,
+                base_ref: r.base_ref,
+                head_ref: r.head_ref,
+                outdated,
             }))
         }
         _ => unreachable!("dispatch sends only the present verbs here"),
@@ -10180,6 +10204,21 @@ mod tests {
         req(Command::PresentResolve { task: Some("w9".into()), project: None, thread: thread.into(), resolved, cwd: None }, Some("tok"))
     }
 
+    fn present_update(review: &str, show: Option<&str>) -> Request {
+        req(
+            Command::PresentUpdate {
+                task: Some("w9".into()),
+                project: None,
+                review: review.into(),
+                head: "HEAD".into(),
+                base: None,
+                show: show.map(str::to_string),
+                cwd: None,
+            },
+            Some("tok"),
+        )
+    }
+
     fn resolve_of(reply: Reply) -> proto::ReviewResolveData {
         assert!(reply.ok, "{:?}", reply.error);
         let Some(ReplyData::ReviewResolve(d)) = reply.data else { panic!("expected a resolve") };
@@ -10447,6 +10486,75 @@ mod tests {
             let by = stored.threads[0].resolved.as_ref().unwrap();
             assert_eq!((by.by, by.author.as_str()), (proto::ReviewBy::Agent, "Claude"));
             assert_eq!(review_pushes(&host).len(), 4, "new, the comment, the resolve and the reopen; not the repeat");
+        });
+    }
+
+    #[test]
+    fn present_update_replies_the_new_round_with_its_outdated_threads_and_pushes_once_with_reveal() {
+        let repo = present_repo();
+        let p = repo.path();
+        crate::test_support::with_scratch_data_dir(|_| {
+            let host = present_host(p);
+            handle(&present_new(Some("tab-c"), None), &host);
+            handle(&present_comment("r1", "a.txt", Some((2, 2)), "x"), &host);
+            handle(&present_comment("r1", "b.txt", None, "y"), &host);
+            std::fs::write(p.join("a.txt"), "one\nTWO\nthree\nfour\n").unwrap();
+            git_in(p, &["commit", "-qam", "fix"]);
+            let before = review_pushes(&host).len();
+
+            let reply = handle(&present_update("r1", Some("1")), &host);
+
+            assert!(reply.ok, "{:?}", reply.error);
+            let Some(ReplyData::ReviewUpdate(d)) = reply.data else { panic!("expected an update") };
+            assert_eq!((d.task_id.as_str(), d.task.as_str(), d.review_id.as_str()), ("w9", "web/rev", "r1"));
+            assert_eq!((d.round, d.files, d.files_truncated, d.default_from), (2, 2, false, Some(1)));
+            assert_eq!((d.base_ref.as_str(), d.head_ref.as_str()), ("base", "HEAD"));
+            assert_eq!(d.outdated, vec![proto::ReviewOutdated {
+                thread_id: "r1-t1".into(),
+                file: "a.txt".into(),
+                start_line: Some(2),
+                end_line: Some(2),
+            }]);
+            let pushes = review_pushes(&host);
+            assert_eq!(pushes.len(), before + 1);
+            assert_eq!(pushes.last().unwrap()["reveal"], true);
+            assert_eq!(pushes.last().unwrap()["review"]["rounds"].as_array().unwrap().len(), 2);
+        });
+    }
+
+    #[test]
+    fn present_update_of_an_unknown_review_is_not_found_and_a_bad_show_or_same_range_a_bad_request() {
+        let repo = present_repo();
+        crate::test_support::with_scratch_data_dir(|_| {
+            let host = present_host(repo.path());
+            handle(&present_new(Some("tab-c"), None), &host);
+
+            let unknown = err_of(handle(&present_update("r7", None), &host));
+            let bad_show = err_of(handle(&present_update("r1", Some("r1")), &host));
+            let same = err_of(handle(&present_update("r1", None), &host));
+
+            assert_eq!(unknown, (ErrorCode::NotFound, "no such review r7".into()));
+            assert_eq!(bad_show.0, ErrorCode::BadRequest);
+            assert!(bad_show.1.contains("is not a view"), "{}", bad_show.1);
+            assert_eq!(same, (ErrorCode::BadRequest, "round 1 of r1 is already base..main".into()));
+        });
+    }
+
+    #[test]
+    fn present_list_counts_each_reviews_rounds() {
+        let repo = present_repo();
+        let p = repo.path();
+        crate::test_support::with_scratch_data_dir(|_| {
+            let host = present_host(p);
+            handle(&present_new(Some("tab-c"), None), &host);
+            std::fs::write(p.join("b.txt"), "b2\n").unwrap();
+            git_in(p, &["commit", "-qam", "more"]);
+            handle(&present_update("r1", None), &host);
+
+            let reply = handle(&req(Command::PresentList { task: Some("w9".into()), project: None, cwd: None }, Some("tok")), &host);
+
+            let Some(ReplyData::Reviews(d)) = reply.data else { panic!("expected reviews") };
+            assert_eq!(d.reviews[0].rounds, 2);
         });
     }
 

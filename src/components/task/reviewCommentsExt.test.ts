@@ -304,27 +304,28 @@ describe("agent-presented review threads in a review: diff", () => {
 
   function thread(id: string, file: string, lines: [number, number] | null, ...by: ("agent" | "user")[]): ReviewThread {
     return {
-      id, file, start_line: lines?.[0] ?? null, end_line: lines?.[1] ?? null, quote: lines ? "x" : "",
-      comments: by.map((b, i) => ({ seq: i + 1, by: b, author: b === "agent" ? "claude" : "", body: `${b} ${i}`, at: "" })),
+      id, file, start_line: lines?.[0] ?? null, end_line: lines?.[1] ?? null, quote: lines ? "x" : "", round: 1,
+      comments: by.map((b, i) => ({ seq: i + 1, by: b, author: b === "agent" ? "claude" : "", body: `${b} ${i}`, at: "", round: 1 })),
     };
   }
 
-  function putReview(seq: number, threads: ReviewThread[], dirName = "") {
+  function putReview(seq: number, threads: ReviewThread[], dirName = "", rounds = 1) {
     const review: Review = {
       version: 1, id: REVIEW, task_id: TASK, dir_name: dirName, base: "a", head: "b", base_ref: "main",
       head_ref: "HEAD", title: null, author: "claude", recipient_tab: null, created_at: "", seq,
       files: [FILE], files_truncated: false, threads,
+      rounds: Array.from({ length: rounds }, () => ({ base: "a", head: "b", base_ref: "main", head_ref: "HEAD", at: "" })),
     };
     useReviews.getState().apply(TASK, review);
   }
 
-  function mountReview(file = FILE) {
+  function mountReview(file = FILE, surface?: Parameters<typeof reviewCommentsExtension>[2], round?: { to: number | null; round: number }) {
     const parent = document.createElement("div");
     document.body.appendChild(parent);
     const view = new EditorView({
       parent,
       doc: DOC,
-      extensions: [reviewCommentsExtension(TASK, file, undefined, REVIEW)],
+      extensions: [reviewCommentsExtension(TASK, file, surface, REVIEW, round)],
     });
     views.push(view);
     return view;
@@ -662,6 +663,65 @@ describe("agent-presented review threads in a review: diff", () => {
     expect(resolvedState).toEqual({ resolved: "true", stripes: 0 });
     expect(cards(view)[0].dataset.resolved).toBe("false");
     expect(stripedLines(view)).toBe(1);
+  });
+
+  it("moves a card to its new line when a round re-anchors the thread without a new comment", async () => {
+    putReview(1, [thread("r1-t1", FILE, [2, 2], "agent")]);
+    const view = mountReview();
+    await settle();
+    const lineOfCard = () => view.state.doc.lineAt(view.posAtDOM(cards(view)[0])).number;
+    const before = lineOfCard();
+
+    putReview(2, [thread("r1-t1", FILE, [4, 4], "agent")]);
+    await settle();
+
+    expect(before).toBe(2);
+    expect(lineOfCard()).toBe(4);
+    expect(cards(view)[0].querySelector(".tc-comment-loc")!.textContent).toContain("line 4");
+  });
+
+  it("leaves an outdated thread out of the latest round's diff and draws it, chip and all, in the round it was opened on", async () => {
+    putReview(2, [
+      { ...thread("r1-t1", FILE, [2, 2], "agent"), outdated: 2 },
+      thread("r1-t2", FILE, [3, 3], "agent"),
+    ], "", 2);
+
+    const latest = mountReview();
+    const older = mountReview(FILE, undefined, { to: 1, round: 2 });
+    await settle();
+
+    expect(cards(latest).map(c => c.dataset.threadId)).toEqual(["r1-t2"]);
+    expect(cards(older).map(c => c.dataset.threadId)).toEqual(["r1-t1", "r1-t2"]);
+    const chip = cards(older)[0].querySelector(".tc-thread-chip-outdated")!;
+    expect(chip.textContent).toBe("Outdated in round 2");
+    expect(cards(older)[1].querySelector(".tc-thread-chip-outdated")).toBeNull();
+  });
+
+  it("offers no way to start a thread on a reply-only surface, but still takes a reply", async () => {
+    putReview(2, [thread("r1-t1", FILE, [2, 2], "agent")], "", 2);
+    const view = mountReview(FILE, { selection: "none", hoverGutter: false, source: "diff" }, { to: 1, round: 2 });
+    await settle();
+    view.dispatch({ selection: { anchor: view.state.doc.line(1).from, head: view.state.doc.line(2).to } });
+    await settle();
+
+    clickReply(view, "r1-t1");
+    await settle();
+
+    expect(view.dom.querySelector(".tc-add-comment-btn")).toBeNull();
+    expect(view.dom.querySelector(".tc-line-add-btn")).toBeNull();
+    expect(view.contentDOM.querySelector(".tc-comment-composer")).not.toBeNull();
+  });
+
+  it("stamps a new thread with the review's latest round so a stale draft can be refused", async () => {
+    const view = mountReview(FILE, undefined, { to: null, round: 3 });
+    await settle();
+    view.dispatch({ selection: { anchor: view.state.doc.line(2).from, head: view.state.doc.line(2).to } });
+    dispatchSelectionComment(view);
+    await settle();
+
+    typeAndClick(view, "x", ".tc-btn-queue");
+
+    expect(useReviewComments.getState().byTask[TASK]).toEqual([expect.objectContaining({ reviewId: REVIEW, reviewRound: 3 })]);
   });
 
   it("does not dispatch when a push leaves this file's threads unchanged", async () => {

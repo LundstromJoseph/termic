@@ -36,8 +36,9 @@ function review(over: Partial<Review> = {}): Review {
     version: 1, id: "r1", task_id: "ws1", dir_name: "api", base: "aaaaaaa1", head: "bbbbbbb2", base_ref: "main",
     head_ref: "HEAD", title: "Split", author: "claude", recipient_tab: "t-rev", created_at: "", seq: 1,
     files: ["src/a.ts"], files_truncated: false,
-    threads: [{ id: "r1-t1", file: "src/a.ts", start_line: 2, end_line: 2, quote: "beta",
-      comments: [{ seq: 1, by: "agent", author: "claude", body: "why?", at: "" }] }],
+    threads: [{ id: "r1-t1", file: "src/a.ts", start_line: 2, end_line: 2, quote: "beta", round: 1,
+      comments: [{ seq: 1, by: "agent", author: "claude", body: "why?", at: "", round: 1 }] }],
+    rounds: [],
     ...over,
   };
 }
@@ -48,13 +49,13 @@ function answer(items: ReviewPostItem[], over: Partial<Review> = {}): ReviewPost
   const threads = r.threads.map(t => ({ ...t, comments: [...t.comments] }));
   const posted = items.map((it, i) => {
     const seq = r.seq + 1 + i;
-    const c = { seq, by: "user" as const, author: "", body: it.body, at: "" };
+    const c = { seq, by: "user" as const, author: "", body: it.body, at: "", round: 1 };
     if (it.thread_id) {
       threads.find(t => t.id === it.thread_id)!.comments.push(c);
       return { thread_id: it.thread_id, seq, new_thread: false };
     }
     const id = `r1-t${threads.length + 1}`;
-    threads.push({ id, file: it.file!, start_line: it.start_line, end_line: it.end_line, quote: it.quote ?? "", comments: [c] });
+    threads.push({ id, file: it.file!, start_line: it.start_line, end_line: it.end_line, quote: it.quote ?? "", comments: [c], round: 1 });
     return { thread_id: id, seq, new_thread: true };
   });
   return { review: { ...r, seq: r.seq + items.length, threads }, posted };
@@ -66,7 +67,7 @@ const REPLY: ReviewComment = {
 };
 const NEW_THREAD: ReviewComment = {
   id: "c-new", taskId: "ws1", file: "api/src/a.ts", startLine: 4, endLine: 5, quote: "delta\nepsilon", body: "rename",
-  source: "diff", reviewId: "r1",
+  source: "diff", reviewId: "r1", reviewRound: 2,
 };
 const PLAIN: ReviewComment = {
   id: "c-plain", taskId: "ws1", file: "src/b.ts", startLine: 1, endLine: 1, quote: "x", body: "plain one", source: "diff",
@@ -109,7 +110,7 @@ describe("sendReviewComments", () => {
     expect(ok).toBe(true);
     expect(vi.mocked(reviewPost).mock.calls[0]).toEqual(["ws1", "r1", [
       { thread_id: "r1-t1", file: null, start_line: null, end_line: null, quote: null, body: "it was flaky" },
-      { thread_id: null, file: "src/a.ts", start_line: 4, end_line: 5, quote: "delta\nepsilon", body: "rename" },
+      { thread_id: null, file: "src/a.ts", start_line: 4, end_line: 5, quote: "delta\nepsilon", body: "rename", round: 2 },
     ]]);
     expect(deliverMessage).toHaveBeenCalledTimes(1);
     const [pty, text] = vi.mocked(deliverMessage).mock.calls[0];

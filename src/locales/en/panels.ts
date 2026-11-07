@@ -48,6 +48,7 @@ export default {
     viewed: "Viewed",
     comparingWithParent: "Comparing {{sha}} with its parent",
     reviewChipTip: "From the agent's review {{id}}",
+    reviewRound: "Round {{n}}",
   },
 
   binaryDiff: {
@@ -398,6 +399,8 @@ export default {
       awaitingOne: "1 thread awaits your reply",
       awaitingMany: "{{count}} threads await your reply",
       threads: "Threads",
+      outdated: "Outdated",
+      round: "Round {{n}}",
     },
   },
 
@@ -515,6 +518,8 @@ export default {
     unresolveAction: "Unresolve",
     resolved: "Resolved",
     resolvedBy: "Resolved by {{who}}",
+    outdatedIn: "Outdated in round {{n}}",
+    outdatedTip: "Opened on round {{round}}; its lines changed later",
   },
 
   blame: {

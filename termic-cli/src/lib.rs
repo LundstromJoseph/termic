@@ -1683,10 +1683,15 @@ there instead. `present resolve r1-t3` marks a thread settled and \
 `present unresolve r1-t3` reopens it. A reply from either side reopens it \
 too, and neither verb sends the user anything.
 
-The range never moves: after an amend, rebase or new commit, open a new \
-review for the next round. Revs are anything git resolves to a commit \
-(main, HEAD~3, a sha); A..B shows what B adds since it branched from A, and \
-three dots are refused. -m - reads the comment from stdin. Without --task, \
+After an amend, rebase or new commit, `present update r1 --head HEAD` starts \
+the next round of the same review: threads whose lines did not change move \
+with the code, the rest are marked outdated and listed in the reply. Without \
+--base the round's base is the last round's base rev resolved again, so a \
+rebase onto a moved main needs nothing more; pass --base when it was \
+relative (HEAD~3). `--show 1` makes round 1 -> latest the view the user sees \
+first, `--show full` the whole range. Revs are anything git resolves to a \
+commit (main, HEAD~3, a sha); A..B shows what B adds since it branched from \
+A, and three dots are refused. -m - reads the comment from stdin. Without --task, \
 the task is yours ($TERMIC_TASK_ID), then the current directory; without \
 --task, --tab defaults to your own tab ($TERMIC_TAB_ID). A sandboxed \
 (caged) task cannot use this CLI, so it cannot present.
@@ -1696,7 +1701,9 @@ With --output-format json, `new` and `show` print {\"task_id\", \"task\", \
 \"review\"; `comment` and `reply` print {\"task_id\", \"review_id\", \
 \"thread_id\", \"seq\", \"new_thread\"}; `resolve` and `unresolve` print \
 {\"task_id\", \"review_id\", \"thread_id\", \"resolved\", \"changed\"}; `list` \
-prints {\"task_id\", \"task\", \"reviews\"}.
+prints {\"task_id\", \"task\", \"reviews\"}; `update` prints {\"task_id\", \
+\"task\", \"review_id\", \"round\", \"base\", \"head\", \"base_ref\", \
+\"head_ref\", \"files\", \"files_truncated\", \"default_from\", \"outdated\"}.
 
 Exit codes: 0 ok, 1 error (unknown task, review or thread; a range, line, \
 file or comment the review refuses; a tab that is not an agent tab of the \
@@ -1813,6 +1820,24 @@ pub enum PresentCmd {
     Unresolve {
         /// The thread id (r1-t3).
         thread: String,
+        #[command(flatten)]
+        target: PresentTarget,
+    },
+    /// Start a review's next round after an amend, rebase or new commit.
+    #[command(after_help = PRESENT_AFTER_HELP)]
+    Update {
+        /// The review id (r1).
+        review: String,
+        /// The new round's head (e.g. HEAD).
+        #[arg(long, value_name = "REV")]
+        head: String,
+        /// The new round's base. Default: the last round's base rev, resolved again.
+        #[arg(long, value_name = "REV")]
+        base: Option<String>,
+        /// The view the user sees first: full, or a round number to show
+        /// what changed since that round.
+        #[arg(long, value_name = "full|N")]
+        show: Option<String>,
         #[command(flatten)]
         target: PresentTarget,
     },
@@ -2262,6 +2287,8 @@ fn pre_connect_guard(cmd: &Cmd) -> Result<(), CliError> {
             PresentCmd::Resolve { thread, .. } | PresentCmd::Unresolve { thread, .. } => {
                 proto::review_thread_id_problem(thread)
             }
+            PresentCmd::Update { review, show, .. } => proto::review_id_problem(review)
+                .or_else(|| show.as_deref().and_then(|s| proto::parse_review_show(s).err())),
         };
         if let Some(why) = problem {
             return Err(CliError::new(exit_code::ERROR, why));
@@ -3498,6 +3525,15 @@ fn execute_present(
                 cwd,
             }
         }
+        PresentCmd::Update { review, head, base, show, target } => proto::Command::PresentUpdate {
+            task: task_of(target),
+            project: target.project.clone(),
+            review: review.clone(),
+            head: head.clone(),
+            base: base.clone(),
+            show: show.clone(),
+            cwd,
+        },
     };
     let data = client::request(conn, wire, token)?;
     let unexpected = || CliError::new(exit_code::ERROR, "unexpected reply to present");
@@ -3529,6 +3565,9 @@ fn execute_present(
                 (false, false) => format!("{} was already open.", d.thread_id),
             };
             final_stdout(format, &text, &d)
+        }
+        (PresentCmd::Update { .. }, proto::ReplyData::ReviewUpdate(d)) => {
+            final_stdout(format, &output::review_updated_text(&d), &d)
         }
         _ => return Err(unexpected()),
     };
@@ -4508,6 +4547,7 @@ mod tests {
         let claim = parse(&["termic", "present", "claim", "r1", "--author", "Codex"]);
         let resolve = parse(&["termic", "present", "resolve", "r1-t2", "--task", "x"]);
         let unresolve = parse(&["termic", "present", "unresolve", "r1-t3"]);
+        let update = parse(&["termic", "present", "update", "r1", "--head", "HEAD", "--base", "main", "--show", "1"]);
 
         assert!(matches!(&new, Cmd::Present(PresentCmd::New { range, title: Some(t), author: Some(a), repo: Some(r), tab: Some(tab), .. })
             if range == "main..HEAD" && t == "T" && a == "A" && r == "api" && tab == "t1"));
@@ -4521,6 +4561,9 @@ mod tests {
         assert!(matches!(&resolve, Cmd::Present(PresentCmd::Resolve { thread, target })
             if thread == "r1-t2" && target.task.as_deref() == Some("x")));
         assert!(matches!(&unresolve, Cmd::Present(PresentCmd::Unresolve { thread, .. }) if thread == "r1-t3"));
+        assert!(matches!(&update, Cmd::Present(PresentCmd::Update { review, head, base: Some(b), show: Some(s), .. })
+            if review == "r1" && head == "HEAD" && b == "main" && s == "1"));
+        assert!(Cli::try_parse_from(["termic", "present", "update", "r1"]).is_err(), "--head is required");
         assert!(Cli::try_parse_from(["termic", "present", "comment", "r1", "-m", "x"]).is_err(), "--file is required");
         assert!(Cli::try_parse_from(["termic", "present"]).is_err(), "a subcommand is required");
     }
@@ -4554,12 +4597,16 @@ mod tests {
             &["termic", "present", "claim", "r0"][..],
             &["termic", "present", "resolve", "r1"][..],
             &["termic", "present", "unresolve", "t1"][..],
+            &["termic", "present", "update", "x", "--head", "HEAD"][..],
+            &["termic", "present", "update", "r1", "--head", "HEAD", "--show", "0"][..],
+            &["termic", "present", "update", "r1", "--head", "HEAD", "--show", "abc"][..],
         ];
         let allowed = [
             &["termic", "present", "new", "HEAD~2..HEAD", "--title", "T"][..],
             &["termic", "present", "comment", "r1", "--file", "a", "--line", "2", "-m", "-"][..],
             &["termic", "present", "reply", "r1-t1", "-m", "-"][..],
             &["termic", "present", "list"][..],
+            &["termic", "present", "update", "r1", "--head", "HEAD", "--show", "full"][..],
         ];
 
         for args in refused {
@@ -5207,7 +5254,7 @@ mod tests {
             "scratchpad rm", "scratchpad clear",
             "badge set", "badge rm", "badge list",
             "present new", "present comment", "present reply", "present show", "present list",
-            "present claim", "present resolve", "present unresolve",
+            "present claim", "present resolve", "present unresolve", "present update",
             "schedule list", "schedule show", "schedule set", "schedule run", "schedule delete",
         ] {
             assert!(names.contains(&expected), "missing {expected} in {names:?}");

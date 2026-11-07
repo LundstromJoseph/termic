@@ -24,6 +24,7 @@ import { StateField, StateEffect, type EditorState, RangeSet, type Range } from 
 import { useReviewComments, type ReviewComment } from "@/store/reviewComments";
 import { useReviews, selectReview } from "@/store/reviews";
 import type { ReviewThread } from "@/lib/types";
+import { threadsInView } from "@/lib/reviewScope";
 import { resolveReviewThread } from "@/lib/sendReviewComments";
 import { buildCard, buildComposer, buildThreadCard, type CommentTarget, type ComposerSpec } from "./commentBoxes";
 import {
@@ -58,8 +59,9 @@ interface CommentData {
  */
 export interface ReviewSurface {
   /** "pill" = labelled button over the selection (diff). "gutter" = a bare
-   *  icon on the selection's first line (editor). */
-  selection: "pill" | "gutter";
+   *  icon on the selection's first line (editor). "none" = no new comments
+   *  (an older round of a review, which takes replies only). */
+  selection: "pill" | "gutter" | "none";
   /** Per-line "＋ comment" button that follows the mouse. Diff only. */
   hoverGutter: boolean;
   /** Tags every comment made here, which decides how the batch is worded to
@@ -273,11 +275,15 @@ class ThreadCardWidget extends WidgetType {
   constructor(readonly thread: ReviewThread, readonly expanded: boolean, readonly ctx: CommentTarget) { super(); }
 
   // A thread changes by growing (comments are appended, never edited), by
-  // being resolved or reopened, or by the user expanding or collapsing it.
+  // being resolved or reopened, by moving or going outdated in a new round
+  // (the card shows its lines), or by the user expanding or collapsing it.
   eq(other: ThreadCardWidget) {
-    return other.thread.id === this.thread.id
-      && other.thread.comments.length === this.thread.comments.length
-      && !!other.thread.resolved === !!this.thread.resolved
+    const a = other.thread, b = this.thread;
+    return a.id === b.id
+      && a.comments.length === b.comments.length
+      && !!a.resolved === !!b.resolved
+      && a.file === b.file && a.start_line === b.start_line && a.end_line === b.end_line
+      && a.outdated === b.outdated
       && other.expanded === this.expanded;
   }
 
@@ -445,19 +451,20 @@ function storeSyncPlugin(ctx: CommentTarget) {
   });
 }
 
-/** The shown review's threads on `file`, kept in step with the reviews store.
- *  Same two guards as storeSyncPlugin; the signature is id + comment count +
- *  resolved, because a thread changes by growing or by being resolved. */
-function reviewSyncPlugin(taskId: string, reviewId: string, file: string) {
+/** The shown review's threads on `file` in round `to` (the latest when null),
+ *  kept in step with the reviews store. Same two guards as storeSyncPlugin.
+ *  The signature carries what a card shows besides its comments: a new round
+ *  moves lines or outdates a thread without adding a comment. */
+function reviewSyncPlugin(taskId: string, reviewId: string, file: string, to: number | null) {
   return ViewPlugin.define((view): PluginValue => {
     let destroyed = false;
     let lastSig = "[]";
     const push = () => {
       if (destroyed) return;
       const review = selectReview(taskId, reviewId)(useReviews.getState());
-      const pfx = review?.dir_name ? `${review.dir_name}/` : "";
-      const threads = review ? review.threads.filter(t => pfx + t.file === file) : [];
-      const sig = JSON.stringify(threads.map(t => [t.id, t.comments.length, !!t.resolved]));
+      const threads = review ? threadsInView(review, file, to) : [];
+      const sig = JSON.stringify(threads.map(t =>
+        [t.id, t.comments.length, !!t.resolved, t.file, t.start_line, t.end_line, t.outdated ?? 0]));
       if (sig === lastSig) return;
       lastSig = sig;
       view.dispatch({ effects: setThreads.of(threads) });
@@ -689,11 +696,18 @@ function hoverTrackPlugin() {
 /** Build the review-comments extension for one file in one task. `surface`
  *  defaults to the diff pane's loud affordances; editors pass the quiet set.
  *  With `reviewId` (a `review:` diff) it also shows that review's threads, and
- *  every comment written here joins that review instead of the plain list. */
+ *  every comment written here joins that review instead of the plain list.
+ *  `view.to` is the round shown (null = latest) and `view.round` the review's
+ *  latest round, which new threads are stamped with. */
 export function reviewCommentsExtension(
   taskId: string, file: string, surface: ReviewSurface = DIFF_SURFACE, reviewId?: string,
+  view: { to: number | null; round: number } = { to: null, round: 0 },
 ) {
-  const ctx: CommentTarget = { taskId, file, source: surface.source, ...(reviewId ? { reviewId } : {}) };
+  const ctx: CommentTarget = {
+    taskId, file, source: surface.source,
+    ...(reviewId ? { reviewId } : {}),
+    ...(reviewId && view.round ? { reviewRound: view.round } : {}),
+  };
 
   const decoField = StateField.define<DecorationSet>({
     create: (state) => buildDeco(state, ctx),
@@ -716,7 +730,7 @@ export function reviewCommentsExtension(
   });
 
   return [
-    ...(reviewId ? [reviewSyncPlugin(taskId, reviewId, file)] : []),
+    ...(reviewId ? [reviewSyncPlugin(taskId, reviewId, file, view.to)] : []),
     dataField,
     hoverLineField,
     decoField,

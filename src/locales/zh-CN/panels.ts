@@ -45,6 +45,7 @@ export default {
     viewed: "已查看",
     comparingWithParent: "正在将 {{sha}} 与其父提交比较",
     reviewChipTip: "来自智能体的评审 {{id}}",
+    reviewRound: "第 {{n}} 轮",
   },
 
   binaryDiff: {
@@ -393,6 +394,8 @@ export default {
       awaitingOne: "1 个讨论等待你回复",
       awaitingMany: "{{count}} 个讨论等待你回复",
       threads: "讨论",
+      outdated: "已过时",
+      round: "第 {{n}} 轮",
     },
   },
 
@@ -510,6 +513,8 @@ export default {
     unresolveAction: "重新打开",
     resolved: "已解决",
     resolvedBy: "由{{who}}标记为已解决",
+    outdatedIn: "第 {{n}} 轮起已过时",
+    outdatedTip: "在第 {{round}} 轮提出，相关行后来已改动",
   },
 
   blame: {

@@ -86,6 +86,7 @@ mod docker;
 mod agent_dirs;
 mod profiles;
 mod reviews;
+mod review_rounds;
 mod schedules;
 mod sudo_touchid;
 mod caffeinate;
@@ -2925,7 +2926,7 @@ fn git_command() -> std::process::Command {
     cmd
 }
 
-fn git_bytes(args: &[&str], cwd: &Path) -> Result<Vec<u8>> {
+fn git_cmd(args: &[&str], cwd: &Path) -> std::process::Command {
     let mut cmd = git_command();
     // Windows: worktrees live under `%USERPROFILE%\termic\tasks\<project>\<task>`
     // and routinely hold `node_modules` / `target`, past the 260-character
@@ -2946,6 +2947,25 @@ fn git_bytes(args: &[&str], cwd: &Path) -> Result<Vec<u8>> {
     for (k, v) in inject {
         cmd.env(k, v);
     }
+    cmd
+}
+
+/// Runs git and returns its output for ANY exit status, for the callers
+/// that read stdout or the exit code of a non-zero run (`git_bytes` drops both).
+pub(crate) fn git_output(args: &[&str], cwd: &Path, stdin: Option<&[u8]>) -> Result<std::process::Output> {
+    let mut cmd = git_cmd(args, cwd);
+    let Some(input) = stdin else {
+        return cmd.output().with_context(|| format!("git {}", args.join(" ")));
+    };
+    use std::io::Write;
+    cmd.stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+    let mut child = cmd.spawn().with_context(|| format!("git {}", args.join(" ")))?;
+    child.stdin.take().expect("piped").write_all(input)?;
+    Ok(child.wait_with_output()?)
+}
+
+fn git_bytes(args: &[&str], cwd: &Path) -> Result<Vec<u8>> {
+    let mut cmd = git_cmd(args, cwd);
     // Space-joined, not {:?}: Debug escapes `\` to `\\`, so on Windows the
     // error showed every path doubled and read as the cause of the
     // failure. Whitespace-containing args get quoted so the join stays
@@ -6630,6 +6650,7 @@ async fn project_remove(state: State<'_, PtyManager>, id: String) -> Result<(), 
             }
             // Hard-delete the JSON so it doesn't linger as a ghost archived
             // entry pointing at a non-existent project.
+            reviews::drop_refs(&w, &load_projects_all());
             let _ = delete_task_file(&w.id);
         }
         let mut list = load_projects_all();
@@ -12235,13 +12256,17 @@ async fn task_delete(state: State<'_, PtyManager>, id: String) -> Result<(), Str
         // again ran its archive script a second time and walked git's
         // teardown for a worktree that no longer exists, per task, one after
         // another: emptying a long History took longer than the page waits.
-        let torn_down = load_tasks_all().iter()
-            .find(|w| w.id == id2)
+        let task = load_tasks_all().into_iter().find(|w| w.id == id2);
+        let torn_down = task.as_ref()
             // A main checkout's path is the repo itself and stays; archiving
             // it only unlinked members, which are gone already.
             .is_some_and(|w| w.archived && (w.is_main_checkout || !Path::new(&w.path).exists()));
         if !torn_down {
             let _ = task_archive_sync(id2.clone(), false, false);
+        }
+        // Archive keeps review refs; only a hard delete drops them.
+        if let Some(w) = &task {
+            reviews::drop_refs(w, &load_projects_all());
         }
         delete_task_file(&id2).map_err(|e| e.to_string())
     }).await.map_err(|e| e.to_string())?
@@ -14807,16 +14832,27 @@ fn git_range(cwd: &Path, base_sha: &str, head_sha: &str) -> Result<GitCompare, S
     Ok(compare_result(base_sha.to_string(), base_sha.to_string(), String::new(), false, files))
 }
 
+/// A review round's file list for Compare. `mode` and `upstream` are for the
+/// From/To picker's replayed interdiff; a plain round range is "plain" with
+/// no upstream paths.
+#[derive(Serialize)]
+struct ReviewRange {
+    compare: GitCompare,
+    mode: &'static str,
+    upstream: Vec<String>,
+}
+
+/// Round `to` of a review (the latest when None), read from the stored shas
+/// so the caller never passes a rev.
 #[tauri::command]
-async fn task_git_range(id: String, dir_name: String, base: String, head: String) -> Result<GitCompare, String> {
-    // The caller passes a review's stored full shas, never a typed ref.
-    if !is_commit_ish(&base) || !is_commit_ish(&head) {
-        return Err("base and head must be commit shas".into());
-    }
-    tauri::async_runtime::spawn_blocking(move || -> Result<GitCompare, String> {
-        let w = load_tasks_all().into_iter().find(|w| w.id == id).ok_or("no task")?;
-        let cwd = repo_cwd(&w, &dir_name)?;
-        git_range(&cwd, &base, &head)
+async fn task_review_range(task_id: String, review_id: String, to: Option<u32>) -> Result<ReviewRange, String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<ReviewRange, String> {
+        let w = load_tasks_all().into_iter().find(|w| w.id == task_id).ok_or("no task")?;
+        let r = reviews::load(&w, &review_id).map_err(|e| e.to_string())?;
+        let cwd = repo_cwd(&w, &r.dir_name)?;
+        let rd = review_rounds::round(&r, to)?;
+        let compare = git_range(&cwd, &rd.base, &rd.head)?;
+        Ok(ReviewRange { compare, mode: "plain", upstream: Vec::new() })
     })
     .await
     .map_err(|e| e.to_string())?
@@ -17282,7 +17318,8 @@ fn task_file_diff_sides_for_task(w: &Task, path: &str, scope: Option<&str>) -> R
     //   "unstaged"  → index vs working tree  (what `git diff` shows)
     //   "commit:SHA"→ SHA^ vs SHA            (History tab, issue #199)
     //   "base:SHA"  → SHA vs working tree    (History › Compare, issue #208)
-    //   "review:ID" → the review's base vs head (agent-presented reviews)
+    //   "review:ID" → the review's latest round, base vs head (agent-
+    //                 presented reviews); "review:ID:to:N" → round N's
     //   None       → HEAD vs working tree   (full uncommitted delta; the
     //                 pre-#122 behavior, kept for callers with no pane)
     //
@@ -17323,22 +17360,24 @@ fn task_file_diff_sides_for_task(w: &Task, path: &str, scope: Option<&str>) -> R
     let commit_sha = scope.and_then(|s| s.strip_prefix("commit:")).filter(|s| is_commit_ish(s));
     let base_sha = scope.and_then(|s| s.strip_prefix("base:")).filter(|s| is_commit_ish(s));
     let review = match scope.and_then(|s| s.strip_prefix("review:")) {
-        Some(rid) => {
+        Some(rest) => {
+            let (rid, to) = review_rounds::parse_scope(rest)?;
             let r = reviews::load(w, rid).map_err(|e| e.to_string())?;
+            let rd = review_rounds::round(&r, to)?;
             // Rust wrote both shas from rev-parse; checked anyway, like every
             // other revision that reaches `git show` here.
-            if !is_commit_ish(&r.base) || !is_commit_ish(&r.head) {
+            if !is_commit_ish(&rd.base) || !is_commit_ish(&rd.head) {
                 return Err(format!("review {rid} holds a malformed sha"));
             }
             if cwd != repo_cwd(w, &r.dir_name)? {
                 return Err(format!("{path} is not in review {rid}'s repo"));
             }
-            Some(r)
+            Some((rd.base.clone(), rd.head.clone()))
         }
         None => None,
     };
     let (original, modified) = match (&review, commit_sha, base_sha, scope) {
-        (Some(r), _, _, _) => (show_at(&r.base), show_at(&r.head)),
+        (Some((base, head)), _, _, _) => (show_at(base), show_at(head)),
         (None, Some(sha), _, _) => (show_at(&format!("{sha}^")), show_at(sha)),
         (None, None, Some(sha), _) => (show_at(sha), read_worktree()),
         (None, None, None, Some("staged")) => (show_head(), show_index()),
@@ -27437,7 +27476,7 @@ pub fn run() {
             task_diff, task_diff_stat, task_files,
             desktop_integration_status, desktop_integration_add, desktop_integration_remove, task_list_files_for_finder, task_match_ignored_files, task_send_diff_to_main,
             task_changes, task_git_status, task_git_branches, project_git_branches, project_branch_context, project_git_current_branch, task_git_checkout, task_git_update, task_git_update_all, task_git_update_info, task_stage, task_unstage, task_commit, task_discard,
-            task_git_log, task_git_refs, task_git_push, task_git_commit_files, task_git_compare, task_git_range, review_list, review_post, review_resolve, task_git_blame, task_git_commit_meta, task_git_commit_offset,
+            task_git_log, task_git_refs, task_git_push, task_git_commit_files, task_git_compare, task_review_range, review_list, review_post, review_resolve, task_git_blame, task_git_commit_meta, task_git_commit_offset,
             detect_forges, task_pr_status, task_member_pr_status, task_pr_create, task_pr_comments, task_set_pr_watch, task_set_pr_comments_seen,
             project_forge_issues, project_forge_provider, project_forge_prs, project_fetch_pr_branch, project_git_checkout,
             task_file_diff, task_file_diff_sides, task_file_read, file_read_external, clipboard_image_save, clipboard_image_capture, task_file_read_base64, task_file_fp, task_file_write, task_dir_list, task_path_stat,
@@ -35550,6 +35589,34 @@ filename f.rs
             assert_eq!(added.modified, "c\n");
             assert_eq!((shared.original.as_str(), shared.modified.as_str()), ("one\ntwo\n", "one\ntwo\n"));
             assert_eq!(unknown.err().as_deref(), Some("no such review r9"));
+        });
+    }
+
+    #[test]
+    fn review_scoped_diff_sides_with_to_read_that_rounds_blobs_and_refuse_a_round_the_review_lacks() {
+        let dir = tempdir().unwrap();
+        let repo = dir.path().to_path_buf();
+        let main = compare_fixture(&repo);
+        let task = Task { id: "t1".into(), ..task_at(&repo) };
+        crate::test_support::with_scratch_data_dir(|_| {
+            reviews::create(&task, reviews::NewReview {
+                range: format!("{main}..topic"),
+                title: None,
+                author: "claude".into(),
+                recipient_tab: None,
+                dir_name: String::new(),
+            })
+            .unwrap();
+            git_commit_file(&repo, "committed.txt", "c2\n", "round 2");
+            reviews::update(&task, "r1", reviews::NewRound { head: "HEAD".into(), base: None, show: None }).unwrap();
+
+            let round1 = task_file_diff_sides_for_task(&task, "committed.txt", Some("review:r1:to:1")).unwrap();
+            let latest = task_file_diff_sides_for_task(&task, "committed.txt", Some("review:r1")).unwrap();
+            let missing = task_file_diff_sides_for_task(&task, "committed.txt", Some("review:r1:to:3"));
+
+            assert_eq!(round1.modified, "c\n");
+            assert_eq!(latest.modified, "c2\n");
+            assert_eq!(missing.err().as_deref(), Some("review r1 has no round 3"));
         });
     }
 
