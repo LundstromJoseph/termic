@@ -495,6 +495,7 @@ export default {
     line: "第 {{start}} 行",
     replyTo: "回复 {{thread}}",
     sendsToReviews: "发送给各评审的智能体",
+    staleDraft: "写于第 {{round}} 轮，评审已进入新一轮。请在新的 diff 上重写，此条不会发送。",
   },
 
   reviewExt: {
@@ -523,7 +524,7 @@ export default {
     resolved: "已解决",
     resolvedBy: "由{{who}}标记为已解决",
     outdatedIn: "第 {{n}} 轮起已过时",
-    outdatedTip: "在第 {{round}} 轮提出，相关行后来已改动",
+    outdatedTip: "在第 {{round}} 轮提出，相关行后来已改动或移除",
   },
 
   blame: {

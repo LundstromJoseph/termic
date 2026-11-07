@@ -742,12 +742,12 @@ pub fn review_updated_text(d: &termic_proto::ReviewUpdateData) -> String {
     let list = d
         .outdated
         .iter()
-        .map(|o| format!("{} {}", o.thread_id, loc(&o.file, o.start_line, o.end_line)))
+        .map(|o| format!("{} {} in round {}", o.thread_id, loc(&o.file, o.start_line, o.end_line), o.round))
         .collect::<Vec<_>>()
         .join(", ");
     let n = d.outdated.len();
     format!(
-        "{head}\n{n} {} went outdated (their lines changed): {list}. Their cards stay in the thread list; \
+        "{head}\n{n} {} went outdated, shown where they were opened: {list}. Their cards stay in the thread list; \
          reply in them if this round answers them.",
         if n == 1 { "thread" } else { "threads" }
     )
@@ -803,13 +803,20 @@ pub fn review_text(r: &termic_proto::Review) -> String {
         out.push_str("\nNo comments.");
     }
     for t in &r.threads {
-        let loc = loc(&t.file, t.start_line, t.end_line);
+        // An outdated thread's lines are gone from the head, so it is named where it was opened.
+        let loc = match t.outdated {
+            Some(_) => {
+                let at = t.origin_anchor();
+                loc(&at.file, at.start_line, at.end_line)
+            }
+            None => loc(&t.file, t.start_line, t.end_line),
+        };
         let resolved = match &t.resolved {
             Some(r) if r.by == termic_proto::ReviewBy::User => " (resolved by You)".into(),
             Some(r) => format!(" (resolved by {})", r.author),
             None => String::new(),
         };
-        let outdated = t.outdated.map(|n| format!(" (outdated in round {n}, opened in round {})", t.round)).unwrap_or_default();
+        let outdated = t.outdated.map(|n| format!(" (opened in round {}, outdated in round {n})", t.round)).unwrap_or_default();
         out.push_str(&format!("\n\n{} {loc}{resolved}{outdated}", t.id));
         for line in t.quote.lines() {
             out.push_str(&format!("\n> {line}"));
@@ -1285,7 +1292,7 @@ mod tests {
     }
 
     #[test]
-    fn review_text_lists_each_round_once_there_are_two_and_marks_an_outdated_thread_with_both_rounds() {
+    fn review_text_lists_each_round_once_there_are_two_and_names_an_outdated_thread_at_its_origin_with_both_rounds() {
         let round = |b: &str, h: &str, head_ref: &str| termic_proto::ReviewRound {
             base: b.into(),
             head: h.into(),
@@ -1293,15 +1300,16 @@ mod tests {
             head_ref: head_ref.into(),
             at: String::new(),
         };
-        let mut outdated = thread("r1-t1", "a.rs", Some((3, 4)));
-        outdated.outdated = Some(2);
+        let mut outdated = thread("r1-t1", "a.rs", Some((8, 9)));
+        outdated.outdated = Some(3);
+        outdated.origin = Some(termic_proto::ReviewAnchor { file: "a.rs".into(), start_line: Some(3), end_line: Some(4) });
         let mut r = review(vec![outdated], Some("t1"));
         r.rounds = vec![round("aaaaaaa1111", "bbbbbbb2222", "HEAD"), round("aaaaaaa1111", "ccccccc3333", "HEAD")];
 
         let text = review_text(&r);
 
         assert!(text.contains("\nRound 1: main..HEAD (aaaaaaa..bbbbbbb)\nRound 2: main..HEAD (aaaaaaa..ccccccc)\nFiles:"), "{text}");
-        assert!(text.contains("\nr1-t1 a.rs:3-4 (outdated in round 2, opened in round 1)\n"), "{text}");
+        assert!(text.contains("\nr1-t1 a.rs:3-4 (opened in round 1, outdated in round 3)\n"), "{text}");
     }
 
     #[test]
@@ -1326,6 +1334,7 @@ mod tests {
             file: file.into(),
             start_line: lines.map(|l| l.0),
             end_line: lines.map(|l| l.1),
+            round: 1,
         };
         d.outdated = vec![outdated("r1-t1", "a.ts", Some((3, 4))), outdated("r1-t3", "b.ts", None)];
 
@@ -1337,10 +1346,10 @@ mod tests {
         assert_eq!(
             two,
             "Review r1 is now round 2 (aaaaaaa..ccccccc, 12 files) in the Git tab.\n\
-             2 threads went outdated (their lines changed): r1-t1 a.ts:3-4, r1-t3 b.ts. \
+             2 threads went outdated, shown where they were opened: r1-t1 a.ts:3-4 in round 1, r1-t3 b.ts in round 1. \
              Their cards stay in the thread list; reply in them if this round answers them."
         );
-        assert!(one.contains("\n1 thread went outdated (their lines changed): r1-t1 a.ts:3-4."), "{one}");
+        assert!(one.contains("\n1 thread went outdated, shown where they were opened: r1-t1 a.ts:3-4 in round 1."), "{one}");
     }
 
     #[test]

@@ -26,7 +26,8 @@ export function composeReviewMessage(review: Review, posted: PostedItem[]): stri
     // An outdated thread's lines are gone from the head, so it is named where it was opened.
     const { file, start_line: s, end_line: e } = thread.outdated ? threadAnchor(thread) : thread;
     const loc = s == null ? file : e != null && e !== s ? `${file}:${s}-${e}` : `${file}:${s}`;
-    const note = newThread ? ", new thread" : thread.outdated ? `, outdated in round ${thread.outdated}` : "";
+    const note = newThread ? ", new thread"
+      : thread.outdated ? `, opened in round ${thread.round}, outdated in round ${thread.outdated}` : "";
     let block = `${loc} (thread ${thread.id}${note})`;
     if (thread.quote.trim()) block += `\n${fenceQuote(thread.quote)}`;
     return `${block}\n${comment.body}`;

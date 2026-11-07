@@ -64,7 +64,7 @@ describe("composeReviewMessage", () => {
 
     expect(one.split("\n")[0]).toMatch(/^\[Termic review r1 "Split/);
     expect(two.split("\n")[0]).toMatch(/^\[Termic review r1 round 2 "Split the parser" /);
-    expect(two).toContain("\n\nsrc/old.ts:3-4 (thread r1-t2, outdated in round 2)\n");
+    expect(two).toContain("\n\nsrc/old.ts:3-4 (thread r1-t2, opened in round 1, outdated in round 2)\n");
   });
 
   it("outruns backticks inside the quote", () => {

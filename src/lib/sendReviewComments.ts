@@ -10,6 +10,7 @@ import { composeReviewMessage } from "./reviewMessage";
 import { agentTargets, sendCommentsToAgent } from "./sendComments";
 import { i18n } from "./i18n";
 import { useReviews, selectReview } from "@/store/reviews";
+import { isStaleDraft } from "./reviewScope";
 import { useUI } from "@/store/ui";
 import type { ReviewComment } from "@/store/reviewComments";
 import type { ReviewPostItem } from "./types";
@@ -80,13 +81,16 @@ export async function resolveReviewThread(taskId: string, threadId: string, reso
 /**
  * Send the pending list: plain comments as one message to `tabId` (the bar's
  * pick), and each review's comments as one message to that review's agent.
- * Returns the ids that left the list, so a failed group stays pending.
+ * Returns the ids that left the list, so a failed group stays pending. A
+ * stale draft stays too: Rust would refuse it, and with it the whole batch.
  */
 export async function sendPendingComments(taskId: string, comments: ReviewComment[], tabId: string | null): Promise<string[]> {
   const plain = comments.filter(c => !c.reviewId);
   const byReview = new Map<string, ReviewComment[]>();
+  const reviews = useReviews.getState();
   for (const c of comments) {
-    if (c.reviewId) byReview.set(c.reviewId, [...(byReview.get(c.reviewId) ?? []), c]);
+    if (!c.reviewId || isStaleDraft(c, selectReview(taskId, c.reviewId)(reviews))) continue;
+    byReview.set(c.reviewId, [...(byReview.get(c.reviewId) ?? []), c]);
   }
   const sent: string[] = [];
   if (plain.length && await sendCommentsToAgent(taskId, plain, { tabId })) sent.push(...plain.map(c => c.id));

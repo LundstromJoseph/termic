@@ -19,7 +19,8 @@ import { Button } from "@/components/ui/Button";
 import { Tip } from "@/components/ui/Tooltip";
 import { CliIcon, CLI_BRAND_COLOR, resolveIconId } from "@/icons/cli";
 import { sendPendingComments } from "@/lib/sendReviewComments";
-import { useReview } from "@/store/reviews";
+import { useReview, useReviews, selectReview } from "@/store/reviews";
+import { isStaleDraft } from "@/lib/reviewScope";
 import { isTerminalCli } from "@/lib/agents";
 import { cn } from "@/lib/utils";
 import { MessagesSquare, X, Send, Trash2 } from "lucide-react";
@@ -51,6 +52,12 @@ export function ReviewCommentsBar({ taskId, compact = false, className }: {
   const activeTabId = useApp(s => s.activeTab[taskId]);
   const openPreviewTab = useApp(s => s.openPreviewTab);
   const pushToast = useUI(s => s.pushToast);
+  // A string, so the selector stays equal while no draft's staleness moves.
+  const staleIds = useReviews(s => comments
+    .filter(c => c.reviewId && isStaleDraft(c, selectReview(taskId, c.reviewId)(s)))
+    .map(c => c.id)
+    .join("\0"));
+  const stale = useMemo(() => new Set(staleIds ? staleIds.split("\0") : []), [staleIds]);
 
   // Send targets: live AGENT terminals only. isTerminalCli excludes plain
   // shells, custom-command tabs, and registry "terminal"-kind entries — review
@@ -89,7 +96,7 @@ export function ReviewCommentsBar({ taskId, compact = false, className }: {
   // Review drafts go to their review's agent, so the pick only matters for
   // plain ones.
   const hasPlain = comments.some(c => !c.reviewId);
-  const hasReview = comments.some(c => c.reviewId);
+  const hasReview = comments.some(c => c.reviewId && !stale.has(c.id));
 
   function jumpTo(file: string, reviewId?: string) {
     const base = `Δ ${file.split("/").pop() || file}`;
@@ -100,7 +107,7 @@ export function ReviewCommentsBar({ taskId, compact = false, className }: {
   }
 
   async function send() {
-    if (sending || (!hasReview && !target?.ptyId)) return;
+    if (sending || (!hasReview && !(hasPlain && target?.ptyId))) return;
     setSending(true);
     // Shared with the composer's own Send button (lib/sendComments.ts,
     // lib/sendReviewComments.ts): one delivery path, so target resolution,
@@ -185,6 +192,7 @@ export function ReviewCommentsBar({ taskId, compact = false, className }: {
               {list.map(c => (
                 <div
                   key={c.id}
+                  data-state={stale.has(c.id) ? "stale" : undefined}
                   className="group flex items-start gap-2 rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1.5"
                 >
                   <div className="min-w-0 flex-1">
@@ -200,6 +208,11 @@ export function ReviewCommentsBar({ taskId, compact = false, className }: {
                     )}>
                       {c.body.trim() || t("reviewBar.selectionOnly")}
                     </div>
+                    {stale.has(c.id) && (
+                      <div className="mt-1 text-[11px] leading-snug text-[var(--color-warn)]">
+                        {t("reviewBar.staleDraft", { round: c.reviewRound })}
+                      </div>
+                    )}
                   </div>
                   <button
                     onClick={() => remove(taskId, c.id)}
@@ -249,7 +262,7 @@ export function ReviewCommentsBar({ taskId, compact = false, className }: {
               : t("reviewBar.noAgent")}
           </span>
           <Button variant="primary" size="sm" className="gap-1.5" data-testid="review-comments-send"
-                  disabled={(!target && !hasReview) || sending} onClick={send}>
+                  disabled={(!hasReview && !(hasPlain && target)) || sending} onClick={send}>
             <Send className="h-3.5 w-3.5" /> {sending ? t("reviewBar.sending") : t("reviewBar.send")}
           </Button>
         </div>

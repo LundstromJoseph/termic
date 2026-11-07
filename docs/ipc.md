@@ -256,11 +256,15 @@ moved main needs no flag. `show` is `full` or a round number below the new
 one (`parse_review_show`) and sets `default_from`. It replies
 `ReplyData::ReviewUpdate` (`{ task_id, task, review_id, round, base, head,
 base_ref, head_ref, files, files_truncated, default_from?, outdated }`,
-`outdated` listing each thread the round outdated at its previous anchor),
+`outdated` listing each thread the round outdated where it was opened: its
+origin anchor and `round`, the one location the CLI, the user's message and
+the UI all use),
 and refuses a range equal to the last round's, an empty range and a 101st
-round. It holds `REVIEW_LOCK` across the re-anchoring git calls (one
-name-status pass plus one `-U0` diff per commented file), deliberately,
-so the thread set cannot change mid-update. `new` and
+round. The rename pass (`git diff --name-status -M` from the last head,
+which after a rebase spans all of upstream's churn) runs before the lock;
+the round-count recheck under the lock keeps it valid. It holds
+`REVIEW_LOCK` across the rest (one `-U0` diff per changed file a line
+thread sits on), deliberately, so the thread set cannot change mid-update. `new` and
 `show` reply `ReplyData::Review` (`{ task_id, task, review }`), `claim`
 `ReplyData::ReviewClaim` (the same with the review's summary row, since
 threads can outgrow the 1 MB reply line), `comment` and `reply`

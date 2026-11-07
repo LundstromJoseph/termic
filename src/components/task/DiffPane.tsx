@@ -161,8 +161,33 @@ export function DiffPane({ task, tab }: { task: Task; tab: DiffTab }) {
   const reviewRounds = useReviews(s => reviewId ? s.byKey[`${task.id}/${reviewId}`]?.rounds.length ?? 0 : 0);
   // The one live-update exception to GH #266: a diff following a review's
   // latest round rebuilds on a new round, or the moved cards would sit on the
-  // old head's lines. A pinned round never changes.
-  const latestRound = reviewTo == null ? reviewRounds : 0;
+  // old head's lines. A pinned round never changes, and the store loading
+  // (0 -> N) is no new round. An open composer holds the rebuild until it
+  // closes: a rebuild would take its unsent text with the view.
+  const [roundBuild, setRoundBuild] = useState(0);
+  const roundSeen = useRef({ reviewId, n: reviewRounds });
+  const roundHeld = useRef(false);
+  const roundRebuild = useRef(false);
+  const composerOpen = useRef(false);
+  const rebuildForRound = () => {
+    roundRebuild.current = true;
+    setRoundBuild(n => n + 1);
+  };
+  useEffect(() => {
+    const prev = roundSeen.current;
+    roundSeen.current = { reviewId, n: reviewRounds };
+    // Another review in a recycled tab rebuilds through its scope already.
+    if (prev.reviewId !== reviewId || reviewTo != null || !prev.n || !reviewRounds || prev.n === reviewRounds) return;
+    if (composerOpen.current) roundHeld.current = true;
+    else rebuildForRound();
+  }, [reviewId, reviewRounds, reviewTo]);
+  const onComposer = (open: boolean) => {
+    composerOpen.current = open;
+    if (!open && roundHeld.current) {
+      roundHeld.current = false;
+      rebuildForRound();
+    }
+  };
   const hostRef = useRef<HTMLDivElement>(null);
   // The host div is the scroll container for both modes; its position
   // dies with the box when a hidden task/tab goes display:none in
@@ -301,7 +326,13 @@ export function DiffPane({ task, tab }: { task: Task; tab: DiffTab }) {
   useEffect(() => {
     let alive = true;
     setErr(null);
-    setCommentable(false);
+    // A new round rebuilds the same file with the same affordances; the
+    // button only no-ops until the view is back, so it stays put.
+    if (!roundRebuild.current) setCommentable(false);
+    roundRebuild.current = false;
+    // A fresh view has no composer, and its sides already are the latest round.
+    composerOpen.current = false;
+    roundHeld.current = false;
     setBinary(null);
     setStale(false);
     setNewText(null);
@@ -451,7 +482,7 @@ export function DiffPane({ task, tab }: { task: Task; tab: DiffTab }) {
       const olderRound = reviewTo != null;
       const commentExt = isCommitScope ? [] : reviewCommentsExtension(
         task.id, tab.path, olderRound ? REPLY_ONLY_SURFACE : undefined, reviewId ?? undefined,
-        { to: reviewTo, round: reviewRounds },
+        { to: reviewTo, round: reviewRounds, onComposer },
       );
       // A review diff takes comments too: they join the review's threads.
       const canComment = !isCommitScope && !olderRound;
@@ -515,7 +546,7 @@ export function DiffPane({ task, tab }: { task: Task; tab: DiffTab }) {
       mergeRef.current?.destroy(); mergeRef.current = null;
       editorRef.current?.destroy(); editorRef.current = null;
     };
-  }, [task.id, tab.path, tab.scope, editorFontSize, mode, editorThemeId, appIsLight, tab.reloadNonce, latestRound]);
+  }, [task.id, tab.path, tab.scope, editorFontSize, mode, editorThemeId, appIsLight, tab.reloadNonce, roundBuild]);
 
   const effectiveMode: Mode = oneSided ? "unified" : mode;
 

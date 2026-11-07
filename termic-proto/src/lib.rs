@@ -1776,13 +1776,15 @@ pub struct ReviewUpdateData {
     pub outdated: Vec<ReviewOutdated>,
 }
 
-/// A thread a new round outdated, at its anchor in the previous round.
+/// A thread a new round outdated, where it was opened: its origin anchor
+/// on round `round`, which is what the UI draws and opens for it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ReviewOutdated {
     pub thread_id: String,
     pub file: String,
     pub start_line: Option<u32>,
     pub end_line: Option<u32>,
+    pub round: u32,
 }
 
 /// `present claim`'s reply: the review's list row, not its threads, which
@@ -3639,6 +3641,7 @@ mod tests {
                     file: "src/a.rs".into(),
                     start_line: Some(3),
                     end_line: Some(4),
+                    round: 1,
                 }],
             }),
             ReplyData::ReviewUpdate(ReviewUpdateData {

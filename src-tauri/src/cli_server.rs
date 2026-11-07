@@ -10514,6 +10514,7 @@ mod tests {
                 file: "a.txt".into(),
                 start_line: Some(2),
                 end_line: Some(2),
+                round: 1,
             }]);
             let pushes = review_pushes(&host);
             assert_eq!(pushes.len(), before + 1);

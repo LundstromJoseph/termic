@@ -14,7 +14,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { EditorView } from "@codemirror/view";
 import { reviewCommentsExtension, dispatchFileComment, dispatchSelectionComment } from "./reviewCommentsExt";
 import { sendReviewComments, resolveReviewThread } from "@/lib/sendReviewComments";
-import { useReviewComments } from "@/store/reviewComments";
+import { useReviewComments, type ReviewComment } from "@/store/reviewComments";
 import { useReviews } from "@/store/reviews";
 import type { Review, ReviewThread } from "@/lib/types";
 
@@ -319,7 +319,7 @@ describe("agent-presented review threads in a review: diff", () => {
     useReviews.getState().apply(TASK, review);
   }
 
-  function mountReview(file = FILE, surface?: Parameters<typeof reviewCommentsExtension>[2], round?: { to: number | null; round: number }) {
+  function mountReview(file = FILE, surface?: Parameters<typeof reviewCommentsExtension>[2], round?: Parameters<typeof reviewCommentsExtension>[4]) {
     const parent = document.createElement("div");
     document.body.appendChild(parent);
     const view = new EditorView({
@@ -722,6 +722,34 @@ describe("agent-presented review threads in a review: diff", () => {
     typeAndClick(view, "x", ".tc-btn-queue");
 
     expect(useReviewComments.getState().byTask[TASK]).toEqual([expect.objectContaining({ reviewId: REVIEW, reviewRound: 3 })]);
+  });
+
+  it("leaves a new-thread draft from another round out of the view but still draws a reply draft", async () => {
+    putReview(1, [thread("r1-t1", FILE, [4, 4], "agent")], "", 3);
+    const add = (body: string, over: Partial<ReviewComment>) => useReviewComments.getState().add({
+      taskId: TASK, file: FILE, startLine: 3, endLine: 3, quote: "x", body, reviewId: REVIEW, ...over,
+    });
+    add("round 2's lines", { reviewRound: 2 });
+    add("round 3's lines", { reviewRound: 3 });
+    add("a reply", { reviewRound: 2, threadId: "r1-t1" });
+
+    const view = mountReview(FILE, undefined, { to: null, round: 3 });
+    await settle();
+
+    expect(draftCards(view).map(c => c.querySelector(".tc-comment-body")!.textContent).sort()).toEqual(["a reply", "round 3's lines"]);
+  });
+
+  it("tells the host when a composer opens and when it closes", async () => {
+    const heard: boolean[] = [];
+    const view = mountReview(FILE, undefined, { to: null, round: 1, onComposer: open => heard.push(open) });
+    await settle();
+    view.dispatch({ selection: { anchor: view.state.doc.line(2).from, head: view.state.doc.line(2).to } });
+
+    dispatchSelectionComment(view);
+    await settle();
+    view.contentDOM.querySelector<HTMLButtonElement>(".tc-btn-cancel")!.click();
+
+    expect(heard).toEqual([true, false]);
   });
 
   it("does not dispatch when a push leaves this file's threads unchanged", async () => {

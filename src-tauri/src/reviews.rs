@@ -501,14 +501,33 @@ fn with_quotes(task: &Task, r: &Review, ops: Vec<ReviewOp>) -> Result<(Vec<Revie
 }
 
 /// Starts the review's next round. Threads move to the new head or go
-/// outdated; the reply lists the outdated ones at their previous anchor.
+/// outdated; the reply lists the outdated ones where they were opened.
 pub(crate) fn update(task: &Task, review_id: &str, req: NewRound) -> Result<(Review, Vec<ReviewOutdated>), ReviewError> {
+    let next = prepare_update(task, review_id, req)?;
+    finish_update(task, review_id, next)
+}
+
+/// What `update` resolves before taking the lock.
+struct NextRound {
+    snap: Review,
+    cwd: PathBuf,
+    req: NewRound,
+    base: String,
+    head: String,
+    base_ref: String,
+    files: Vec<String>,
+    files_truncated: bool,
+    moves: crate::review_rounds::Moves,
+}
+
+/// Everything that runs git but the per-file diffs, outside the lock like
+/// quotes: revs, the file list, and the rename pass, which after a rebase
+/// spans all of upstream's churn.
+fn prepare_update(task: &Task, review_id: &str, req: NewRound) -> Result<NextRound, ReviewError> {
     if let Some(p) = review_id_problem(review_id) {
         return Err(ReviewError::Invalid(p));
     }
-    let dir = reviews_dir(task)?;
-    // Revs and the file list are resolved before the lock, like quotes.
-    let snap = read(&dir, review_id)?;
+    let snap = read(&reviews_dir(task)?, review_id)?;
     let cwd = crate::repo_cwd(task, &snap.dir_name).map_err(ReviewError::Invalid)?;
     let head = resolve_commit(&cwd, &req.head)?;
     let base_ref = req.base.clone().unwrap_or_else(|| snap.base_ref.clone());
@@ -517,10 +536,18 @@ pub(crate) fn update(task: &Task, review_id: &str, req: NewRound) -> Result<(Rev
     if files.is_empty() {
         return Err(ReviewError::Invalid(format!("nothing changed in {base_ref}..{}", req.head)));
     }
+    let last_head = &snap.rounds.last().expect("read fills round 1").head;
+    let moves = crate::review_rounds::moves(&cwd, last_head, &head).map_err(ReviewError::Git)?;
+    Ok(NextRound { snap, cwd, req, base, head, base_ref, files, files_truncated, moves })
+}
 
+fn finish_update(task: &Task, review_id: &str, next: NextRound) -> Result<(Review, Vec<ReviewOutdated>), ReviewError> {
+    let NextRound { snap, cwd, req, base, head, base_ref, files, files_truncated, moves } = next;
+    let dir = reviews_dir(task)?;
     let _g = REVIEW_LOCK.lock();
     let stored = read(&dir, review_id)?;
     let n = stored.rounds.len() + 1;
+    // Also what keeps `moves` valid: same round count, same last head.
     if stored.rounds.len() != snap.rounds.len() {
         return Err(ReviewError::Invalid(format!("review {review_id} moved to round {} meanwhile; update it again", n - 1)));
     }
@@ -552,11 +579,10 @@ pub(crate) fn update(task: &Task, review_id: &str, req: NewRound) -> Result<(Rev
 
     let mut r = stored;
     // Under the lock on purpose: the thread set must not change mid-update.
-    // That is one name-status pass plus one diff per commented file, and
+    // That is one `-U0` diff per changed file a line thread sits on, and
     // updates are rare.
     let in_range: HashSet<String> = files.iter().cloned().collect();
-    let outdated = crate::review_rounds::reanchor(&cwd, &last.head, &head, &mut r.threads, &in_range, n as u32)
-        .map_err(ReviewError::Git)?;
+    let outdated = crate::review_rounds::reanchor(&cwd, &last.head, &head, &moves, &mut r.threads, &in_range, n as u32);
     r.rounds.push(ReviewRound {
         base: base.clone(),
         head: head.clone(),
@@ -1420,7 +1446,7 @@ mod tests {
             assert_eq!(anchor(th(2)), ("code.txt", Some(3), Some(4)));
             let ids: Vec<&str> = outdated.iter().map(|o| o.thread_id.as_str()).collect();
             assert_eq!(ids, vec!["r1-t2", "r1-t3", "r1-t6"]);
-            assert_eq!(outdated[0], ReviewOutdated { thread_id: "r1-t2".into(), file: "code.txt".into(), start_line: Some(3), end_line: Some(4) });
+            assert_eq!(outdated[0], ReviewOutdated { thread_id: "r1-t2".into(), file: "code.txt".into(), start_line: Some(3), end_line: Some(4), round: 1 });
             assert_eq!(load(&t, "r1").unwrap(), r);
         });
     }
@@ -1463,6 +1489,40 @@ mod tests {
             assert_eq!(r.threads[1].outdated, Some(2));
             assert_eq!(r.threads[0].outdated, Some(3));
             assert!(!outdated.iter().any(|o| o.thread_id == "r1-t2"));
+        });
+    }
+
+    #[test]
+    fn a_thread_moved_in_one_round_and_outdated_in_the_next_is_reported_where_it_was_opened() {
+        with_scratch_data_dir(|_| {
+            let dir = rounds_repo();
+            let p = dir.path();
+            let t = task(p);
+            round_two_commit(p);
+            update(&t, "r1", head_update()).unwrap();
+            commit(p, "code.txt", "rewritten\n");
+
+            let (_, outdated) = update(&t, "r1", head_update()).unwrap();
+
+            let t1 = outdated.iter().find(|o| o.thread_id == "r1-t1").unwrap();
+            assert_eq!((t1.file.as_str(), t1.start_line, t1.end_line, t1.round), ("code.txt", Some(10), Some(10), 1));
+        });
+    }
+
+    #[test]
+    fn update_refuses_when_another_round_landed_between_its_snapshot_and_the_lock() {
+        with_scratch_data_dir(|_| {
+            let dir = rounds_repo();
+            let p = dir.path();
+            let t = task(p);
+            round_two_commit(p);
+            let slow = prepare_update(&t, "r1", head_update()).unwrap();
+            update(&t, "r1", head_update()).unwrap();
+
+            let late = finish_update(&t, "r1", slow);
+
+            assert_eq!(late.unwrap_err(), ReviewError::Invalid("review r1 moved to round 2 meanwhile; update it again".into()));
+            assert_eq!(load(&t, "r1").unwrap().rounds.len(), 2);
         });
     }
 
@@ -1567,7 +1627,7 @@ mod tests {
     }
 
     #[test]
-    fn a_user_comment_written_on_an_older_round_is_refused_and_a_reply_is_not() {
+    fn a_user_comment_written_on_an_older_round_is_refused_and_an_unstamped_one_or_a_reply_is_not() {
         with_scratch_data_dir(|_| {
             let dir = rounds_repo();
             let t = task(dir.path());
@@ -1585,6 +1645,7 @@ mod tests {
 
             let stale = post(&t, "r1", vec![item(None, Some(1))]);
             let current = post(&t, "r1", vec![item(None, Some(2))]);
+            let unstamped = post(&t, "r1", vec![item(None, None)]);
             let reply = post(&t, "r1", vec![item(Some("r1-t2"), Some(1))]);
 
             assert_eq!(
@@ -1592,6 +1653,7 @@ mod tests {
                 Some(ReviewError::Invalid("this comment was written on round 1 of r1, which is now on round 2; comment on the new diff".into()))
             );
             assert!(current.is_ok());
+            assert_eq!(unstamped.unwrap().review.threads.last().unwrap().round, 2, "no round is the latest");
             assert!(reply.is_ok());
         });
     }
@@ -1614,17 +1676,31 @@ mod tests {
     }
 
     #[test]
-    fn deleting_the_task_file_removes_its_reviews() {
+    fn deleting_a_task_for_good_removes_its_reviews_and_their_round_refs() {
         let dir = repo();
-        let t = task(dir.path());
+        let p = dir.path();
+        let t = Task { project_id: "p1".into(), ..task(p) };
+        let project = crate::Project { id: "p1".into(), root_path: p.to_string_lossy().into_owned(), ..Default::default() };
         with_scratch_data_dir(|data| {
             new_review(&t);
             assert!(data.join("scratch/t1/reviews/r1.json").is_file());
+            assert!(ref_sha(p, "refs/termic/reviews/t1/r1/1/head").is_some());
 
-            crate::delete_task_file("t1").unwrap();
+            crate::delete_task_for_good(&t, &[project]).unwrap();
 
             assert!(!data.join("scratch/t1").exists());
             assert!(list(&t).is_empty());
+            assert_eq!(ref_sha(p, "refs/termic/reviews/t1/r1/1/head"), None);
         });
+    }
+
+    #[test]
+    fn task_delete_and_project_remove_both_delete_through_the_helper_that_drops_refs() {
+        let src = include_str!("lib.rs");
+        for f in ["async fn task_delete(", "async fn project_remove("] {
+            let body = src.split_once(f).expect("command exists").1;
+            let body = &body[..body.find("\n}\n").expect("function ends")];
+            assert!(body.contains("delete_task_for_good("), "{f} skips the review refs");
+        }
     }
 }

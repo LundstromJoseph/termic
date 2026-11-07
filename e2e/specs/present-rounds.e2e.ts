@@ -121,7 +121,7 @@ describe("review rounds", () => {
 
     expect(r.ok).toBe(true);
     expect(r.data.round).toBe(2);
-    expect(r.data.outdated.map((o: any) => [o.thread_id, o.start_line, o.end_line])).toEqual([[tChanged, 3, 4]]);
+    expect(r.data.outdated.map((o: any) => [o.thread_id, o.start_line, o.end_line, o.round])).toEqual([[tChanged, 3, 4, 1]]);
     const stored = await show();
     const shifted = stored.threads.find((t: any) => t.id === tShifted);
     expect([shifted.start_line, shifted.origin?.start_line]).toEqual([12, 10]);
@@ -212,6 +212,70 @@ describe("review rounds", () => {
     expect(r.ok).toBe(false);
     expect(r.error.message).toContain(`round 2 of ${reviewId} is already`);
     expect((await show()).rounds).toHaveLength(2);
+  });
+
+  it("holds a new round's rebuild while a composer is open, then queues its draft as stale", async () => {
+    /** The visible diff's line count, and whether it draws a draft card. */
+    const pane = () => browser.execute((tid) => {
+      const p = [...document.querySelectorAll(`[data-task-id="${tid}"] [data-testid="diff-pane"]`)]
+        .find(e => (e as HTMLElement).offsetParent !== null);
+      const v = (p?.querySelector(".cm-content") as any)?.cmTile?.root?.view;
+      return { lines: v?.state.doc.lines ?? null, draft: !!p?.querySelector(".tc-comment-card:not(.tc-thread-card)") };
+    }, taskId) as Promise<{ lines: number | null; draft: boolean }>;
+    await clickIn(`[data-testid="compare-file-row"][data-path="${FILE}"]`);
+    await browser.waitUntil(async () => (await activeScope()) === `review:${reviewId}`, {
+      timeout: 10_000, timeoutMsg: "the row did not open the latest round",
+    });
+    await browser.waitUntil(async () => (await cards()).length === 2, {
+      timeout: 15_000, timeoutMsg: "round 2's diff never built",
+    });
+    const before = (await pane()).lines!;
+    await browser.execute((tid) => {
+      const p = [...document.querySelectorAll(`[data-task-id="${tid}"] [data-testid="diff-pane"]`)]
+        .find(e => (e as HTMLElement).offsetParent !== null)!;
+      const v = (p.querySelector(".cm-content") as any).cmTile.root.view;
+      v.dispatch({ selection: { anchor: 0, head: v.state.doc.line(1).to } });
+    }, taskId);
+    await waitVisible(".tc-add-comment-btn");
+    await browser.execute(() =>
+      document.querySelector(".tc-add-comment-btn")!.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true })));
+    await waitVisible(".tc-comment-composer .tc-comment-textarea");
+    const typed = `half typed ${stamp}`;
+    await browser.execute((body) => {
+      (document.querySelector(".tc-comment-composer .tc-comment-textarea") as HTMLTextAreaElement).value = body;
+    }, typed);
+
+    const next = numbered(13);
+    next[3] = "line four, rewritten";
+    writeFileSync(path.join(cwd, FILE), ["top 1", "top 2", ...next].join("\n") + "\n");
+    execGit(`git -C "${cwd}" commit -qam "rounds 3 ${stamp}"`);
+    const r = await cliRpc({ cmd: "present_update", task: taskId, review: reviewId, head: "HEAD" });
+    expect(r.ok).toBe(true);
+    await browser.waitUntil(async () => browser.execute(() =>
+      (document.querySelector('[data-testid="compare-review-round"]') as HTMLElement | null)?.innerText === "Round 3"),
+    { timeout: 10_000, timeoutMsg: "the webview never saw round 3" });
+
+    // The store is on round 3; the open view is still round 2's, text and all.
+    expect((await pane()).lines).toBe(before);
+    expect(await browser.execute(() =>
+      (document.querySelector(".tc-comment-composer .tc-comment-textarea") as HTMLTextAreaElement | null)?.value ?? null)).toBe(typed);
+
+    await browser.execute(() => (document.querySelector(".tc-comment-composer .tc-btn-queue") as HTMLElement).click());
+
+    await browser.waitUntil(async () => (await pane()).lines === before + 1, {
+      timeout: 15_000, timeoutMsg: "closing the composer did not rebuild on round 3",
+    });
+    await flushEditorMeasure();
+    expect((await pane()).draft).toBe(false);
+    await clickIn('[data-testid="review-comments-pill"]');
+    await waitVisible('[data-state="stale"]');
+    const row = await browser.execute(() => (document.querySelector('[data-state="stale"]') as HTMLElement).innerText);
+    expect(row).toContain(typed);
+    expect(row).toContain("Written on round 2");
+    expect(await browser.execute(() =>
+      (document.querySelector('[data-testid="review-comments-send"]') as HTMLButtonElement).disabled)).toBe(true);
+    await browser.execute(() =>
+      ([...document.querySelectorAll("button")].find(b => b.textContent?.includes("Discard all")) as HTMLElement).click());
   });
 });
 

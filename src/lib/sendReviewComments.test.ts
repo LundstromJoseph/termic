@@ -240,4 +240,17 @@ describe("sendPendingComments", () => {
 
     expect(sent).toEqual(["c-plain"]);
   });
+
+  it("leaves a draft written on an older round pending and posts the fresh drafts and replies of its review", async () => {
+    seed();
+    const round = { base: "a", head: "b", base_ref: "main", head_ref: "HEAD", at: "" };
+    useReviews.getState().apply("ws1", review({ seq: 5, rounds: [round, round] }));
+    const stale: ReviewComment = { ...NEW_THREAD, id: "c-stale", body: "old lines", reviewRound: 1 };
+
+    const sent = await sendPendingComments("ws1", [stale, NEW_THREAD, REPLY], "t-main");
+
+    expect(sent.sort()).toEqual(["c-new", "c-reply"]);
+    const items = vi.mocked(reviewPost).mock.calls[0][2];
+    expect(items.map(i => i.body)).toEqual(["rename", "it was flaky"]);
+  });
 });

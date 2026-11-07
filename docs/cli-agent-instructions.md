@@ -393,8 +393,8 @@ MCP the same verbs are `present_new`, `present_comment`, `present_reply`,
 - `"$TERMIC_CLI" present update r1 --head HEAD` - after an amend, rebase
   or new commit, start the review's next round instead of opening a new
   review. Threads whose lines did not change move with the code; the rest
-  go outdated, and the reply lists them so you can answer each in its
-  thread. Without `--base` the base is the last round's base rev resolved
+  go outdated, and the reply lists them where they were opened so you
+  can answer each in its thread. Without `--base` the base is the last round's base rev resolved
   again (a rebase onto a moved main needs nothing more); pass `--base` when
   it was relative, like `HEAD~3`. `--show 1` makes "what changed since
   round 1" the view the user sees first, `--show full` the whole range.

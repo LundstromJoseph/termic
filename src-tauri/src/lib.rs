@@ -2489,6 +2489,13 @@ fn save_task(w: &Task) -> Result<()> {
     note_task_window(&w.id, w.profile.window_label());
     Ok(())
 }
+
+/// A hard delete's last step. Archive keeps review refs; only this drops them.
+fn delete_task_for_good(w: &Task, projects: &[Project]) -> Result<()> {
+    reviews::drop_refs(w, projects);
+    delete_task_file(&w.id)
+}
+
 fn delete_task_file(id: &str) -> Result<()> {
     // Sweep every profile rather than guessing: the caller has only an id, and
     // an unlink of a path that does not exist is free.
@@ -2960,8 +2967,11 @@ pub(crate) fn git_output(args: &[&str], cwd: &Path, stdin: Option<&[u8]>) -> Res
     use std::io::Write;
     cmd.stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
     let mut child = cmd.spawn().with_context(|| format!("git {}", args.join(" ")))?;
-    child.stdin.take().expect("piped").write_all(input)?;
-    Ok(child.wait_with_output()?)
+    // Reap the child before reporting a failed write.
+    let written = child.stdin.take().expect("piped").write_all(input);
+    let out = child.wait_with_output()?;
+    written?;
+    Ok(out)
 }
 
 fn git_bytes(args: &[&str], cwd: &Path) -> Result<Vec<u8>> {
@@ -6638,6 +6648,7 @@ async fn project_remove(state: State<'_, PtyManager>, id: String) -> Result<(), 
     tauri::async_runtime::spawn_blocking(move || {
         let tasks: Vec<Task> = load_tasks_all()
             .into_iter().filter(|w| w.project_id == id).collect();
+        let projects = load_projects_all();
         for w in tasks {
             // As task_archive: nothing may still run in the worktree.
             stop_every_task_pty(&ptys, &w.id);
@@ -6650,8 +6661,7 @@ async fn project_remove(state: State<'_, PtyManager>, id: String) -> Result<(), 
             }
             // Hard-delete the JSON so it doesn't linger as a ghost archived
             // entry pointing at a non-existent project.
-            reviews::drop_refs(&w, &load_projects_all());
-            let _ = delete_task_file(&w.id);
+            let _ = delete_task_for_good(&w, &projects);
         }
         let mut list = load_projects_all();
         // A synced profile publishes the removal as a tombstone on its next
@@ -12264,11 +12274,11 @@ async fn task_delete(state: State<'_, PtyManager>, id: String) -> Result<(), Str
         if !torn_down {
             let _ = task_archive_sync(id2.clone(), false, false);
         }
-        // Archive keeps review refs; only a hard delete drops them.
-        if let Some(w) = &task {
-            reviews::drop_refs(w, &load_projects_all());
+        match &task {
+            Some(w) => delete_task_for_good(w, &load_projects_all()),
+            None => delete_task_file(&id2),
         }
-        delete_task_file(&id2).map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())
     }).await.map_err(|e| e.to_string())?
 }
 
@@ -14140,6 +14150,9 @@ fn git_log_page(
     // never be read as one of the flags above.
     let picked = if all_branches { Vec::new() } else { allowed_refs(cwd, refs) };
     if all_branches {
+        // Review round refs pin heads an amend or rebase left behind; they
+        // are not branches. `--exclude` only applies to the `--all` after it.
+        args.push("--exclude=refs/termic/*");
         args.push("--all");
     } else {
         // Every requested ref was unknown (deleted branch, stale UI). Falling
@@ -14851,10 +14864,14 @@ struct ReviewRange {
 /// Round `to` of `r` (the latest when None), or from round `from`'s head to it.
 fn review_range(cwd: &Path, r: &termic_proto::Review, from: Option<u32>, to: Option<u32>) -> Result<ReviewRange, String> {
     let n = review_rounds::round(r, to)?;
-    let Some(from) = from else {
+    let k = from.map(|f| review_rounds::from_round(r, f, to)).transpose()?;
+    // The stored shas reach git as revs, so a hand-edited file must not slip in a flag.
+    if ![&n.base, &n.head].into_iter().chain(k.iter().flat_map(|k| [&k.base, &k.head])).all(|s| is_commit_ish(s)) {
+        return Err("review rounds must be commit shas".into());
+    }
+    let Some(k) = k else {
         return Ok(ReviewRange { compare: git_range(cwd, &n.base, &n.head)?, mode: "plain", upstream: Vec::new() });
     };
-    let k = review_rounds::from_round(r, from, to)?;
     commits_present(cwd, &[&k.base, &k.head, &n.base, &n.head])?;
     interdiff_range(cwd, k, n, review_rounds::replay(cwd, &k.base, &k.head, &n.base))
 }
@@ -36107,6 +36124,23 @@ filename f.rs
         // all_branches beats a refs list rather than intersecting with it.
         let all_wins = git_log_page(&repo, 0, 50, true, false, "", &[side.clone()]);
         assert_eq!(all_wins.commits.len(), all.commits.len());
+    }
+
+    #[test]
+    fn git_log_page_all_branches_leaves_out_commits_only_a_review_round_ref_reaches() {
+        let dir = tempdir().unwrap();
+        let repo = dir.path().to_path_buf();
+        repo_with_side_branch(&repo);
+        git_commit_file(&repo, "b.txt", "b\n", "amended away");
+        let pinned = git(&["rev-parse", "HEAD"], &repo).unwrap();
+        git_run(&repo, &["update-ref", "refs/termic/reviews/t1/r1/1/head", pinned.trim()]);
+        git_run(&repo, &["reset", "-q", "--hard", "HEAD~1"]);
+
+        let all = git_log_page(&repo, 0, 50, true, false, "", &[]);
+
+        let subjects: Vec<&str> = all.commits.iter().map(|c| c.subject.as_str()).collect();
+        assert!(subjects.contains(&"only on side"));
+        assert!(!subjects.contains(&"amended away"));
     }
 
     #[test]

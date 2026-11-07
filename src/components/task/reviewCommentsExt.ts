@@ -20,7 +20,7 @@ import {
   EditorView, WidgetType, Decoration, type DecorationSet, showTooltip, type Tooltip,
   ViewPlugin, type PluginValue, gutter, GutterMarker,
 } from "@codemirror/view";
-import { StateField, StateEffect, type EditorState, RangeSet, type Range } from "@codemirror/state";
+import { StateField, StateEffect, type EditorState, type Extension, RangeSet, type Range } from "@codemirror/state";
 import { useReviewComments, type ReviewComment } from "@/store/reviewComments";
 import { useReviews, selectReview } from "@/store/reviews";
 import type { ReviewThread } from "@/lib/types";
@@ -407,11 +407,15 @@ function commentTooltips(state: EditorState, surface: ReviewSurface): readonly T
 
 // ── Store subscription plugin ────────────────────────────────────────────────
 
-/** A review diff holds only that review's drafts, a plain diff only plain ones. */
+/** A review diff holds only that review's drafts, a plain diff only plain ones.
+ *  A new-thread draft written on another round than the view's is left out:
+ *  its lines belong to that round's head. */
 function commentsForFile(ctx: CommentTarget): ReviewComment[] {
   const all = useReviewComments.getState().byTask[ctx.taskId] ?? [];
+  const otherRound = (c: ReviewComment) =>
+    !c.threadId && c.reviewRound != null && ctx.reviewRound != null && c.reviewRound !== ctx.reviewRound;
   return all
-    .filter((c) => c.file === ctx.file && c.reviewId === ctx.reviewId)
+    .filter((c) => c.file === ctx.file && c.reviewId === ctx.reviewId && !otherRound(c))
     .slice()
     // Sort by line, then by id as a stable tiebreaker so comments sharing a
     // line (or both file-level) keep a deterministic order — otherwise the
@@ -691,6 +695,13 @@ function hoverTrackPlugin() {
   });
 }
 
+function composerListener(onComposer: (open: boolean) => void): Extension {
+  return EditorView.updateListener.of(u => {
+    const open = !!u.state.field(dataField).composer;
+    if (open !== !!u.startState.field(dataField).composer) onComposer(open);
+  });
+}
+
 // ── Public extension factory ─────────────────────────────────────────────────
 
 /** Build the review-comments extension for one file in one task. `surface`
@@ -698,10 +709,11 @@ function hoverTrackPlugin() {
  *  With `reviewId` (a `review:` diff) it also shows that review's threads, and
  *  every comment written here joins that review instead of the plain list.
  *  `view.to` is the round shown (null = latest) and `view.round` the review's
- *  latest round, which new threads are stamped with. */
+ *  latest round, which new threads are stamped with. `view.onComposer` hears
+ *  a composer open and close. */
 export function reviewCommentsExtension(
   taskId: string, file: string, surface: ReviewSurface = DIFF_SURFACE, reviewId?: string,
-  view: { to: number | null; round: number } = { to: null, round: 0 },
+  view: { to: number | null; round: number; onComposer?: (open: boolean) => void } = { to: null, round: 0 },
 ) {
   const ctx: CommentTarget = {
     taskId, file, source: surface.source,
@@ -737,6 +749,7 @@ export function reviewCommentsExtension(
     tooltipField,
     commentGutter(ctx, surface),
     ...(surface.hoverGutter ? [hoverTrackPlugin()] : []),
+    ...(view.onComposer ? [composerListener(view.onComposer)] : []),
     storeSyncPlugin(ctx),
     anchorSyncPlugin(ctx),
     baseTheme,

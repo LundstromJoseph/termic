@@ -500,6 +500,7 @@ export default {
     line: "line {{start}}",
     replyTo: "reply to {{thread}}",
     sendsToReviews: "Sends to each review's agent",
+    staleDraft: "Written on round {{round}}, which the review has moved past. Rewrite it on the new diff; it will not be sent.",
   },
 
   reviewExt: {
@@ -528,7 +529,7 @@ export default {
     resolved: "Resolved",
     resolvedBy: "Resolved by {{who}}",
     outdatedIn: "Outdated in round {{n}}",
-    outdatedTip: "Opened on round {{round}}; its lines changed later",
+    outdatedTip: "Opened on round {{round}}; a later round changed or removed its lines",
   },
 
   blame: {

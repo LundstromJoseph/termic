@@ -42,6 +42,13 @@ export function effectiveView(review: Review, pick?: ReviewView & { rounds: numb
   return { from, to };
 }
 
+/** A new-thread draft written on a round the review has since moved past.
+ *  Its lines are that round's head's, so it waits to be rewritten on the new
+ *  diff and is never sent. A reply has no lines and is never stale. */
+export function isStaleDraft(c: { threadId?: string; reviewRound?: number }, review: Review | null | undefined): boolean {
+  return !c.threadId && c.reviewRound != null && !!review && c.reviewRound < review.rounds.length;
+}
+
 /** Where a thread was opened. */
 export function threadAnchor(th: ReviewThread): ReviewAnchor {
   return th.origin ?? { file: th.file, start_line: th.start_line, end_line: th.end_line };

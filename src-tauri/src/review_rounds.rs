@@ -238,10 +238,20 @@ fn shift(hunks: &[Hunk], s: u32, e: u32) -> Option<(u32, u32)> {
     Some(((s as i64 + offset) as u32, (e as i64 + offset) as u32))
 }
 
-/// `git diff --name-status -M -z` as old path -> (status letter, new path).
-/// Unlike `parse_name_status_z`, which keeps only the new path, this keeps
-/// both ends of a rename.
-fn parse_moves(out: &str) -> HashMap<String, (char, String)> {
+/// Old path -> (status letter, new path) between two heads. Unlike
+/// `parse_name_status_z`, which keeps only the new path, this keeps both
+/// ends of a rename.
+pub(crate) type Moves = HashMap<String, (char, String)>;
+
+/// `git diff --name-status -M` from `old_head` to `new_head`. After a rebase
+/// this spans all of upstream's churn, so `update` runs it before the lock.
+pub(crate) fn moves(cwd: &Path, old_head: &str, new_head: &str) -> Result<Moves, String> {
+    crate::git(&["--no-pager", "diff", "--name-status", "-M", "-z", "--relative", old_head, new_head], cwd)
+        .map(|out| parse_moves(&out))
+        .map_err(|e| e.to_string())
+}
+
+fn parse_moves(out: &str) -> Moves {
     let f: Vec<&str> = out.split('\0').collect();
     let mut moves = HashMap::new();
     let mut i = 0;
@@ -255,31 +265,33 @@ fn parse_moves(out: &str) -> HashMap<String, (char, String)> {
     moves
 }
 
-/// Moves each live thread from `old_head` to `new_head`: renames follow, line
-/// threads shift past changes above them, and anything whose lines or file
-/// changed goes outdated in `round`. Returns the threads it outdated, at
-/// their anchor before the move. Never touches `resolved`.
+/// Moves each live thread from `old_head` to `new_head` along `moves`:
+/// renames follow, line threads shift past changes above them, and a thread
+/// goes outdated in `round` when a change touches its lines, or its file is
+/// deleted, changes type, can't be diffed, or leaves the range. Returns the
+/// threads it outdated. Never touches `resolved`.
 pub(crate) fn reanchor(
     cwd: &Path,
     old_head: &str,
     new_head: &str,
+    moves: &Moves,
     threads: &mut [ReviewThread],
     new_files: &HashSet<String>,
     round: u32,
-) -> Result<Vec<ReviewOutdated>, String> {
-    let names = crate::git(&["--no-pager", "diff", "--name-status", "-M", "-z", "--relative", old_head, new_head], cwd)
-        .map_err(|e| e.to_string())?;
-    let moves = parse_moves(&names);
+) -> Vec<ReviewOutdated> {
     let mut hunks: HashMap<String, Option<Vec<Hunk>>> = HashMap::new();
     let mut outdated = Vec::new();
     for th in threads.iter_mut().filter(|t| t.outdated.is_none()) {
         let lines = th.start_line.zip(th.end_line);
-        let moved = match moves.get(&th.file) {
-            None => Some((th.file.clone(), lines)),
-            Some((letter, new)) if matches!(letter, 'M' | 'T' | 'R') => {
+        let moved = match (moves.get(&th.file), lines) {
+            (None, _) => Some((th.file.clone(), lines)),
+            (Some(('M' | 'R', new)), None) => Some((new.clone(), None)),
+            (Some(('M' | 'R', new)), Some((s, e))) => {
                 let key = format!("{}\0{new}", th.file);
-                if !hunks.contains_key(&key) {
-                    let diff = crate::git(
+                // A failed diff (a submodule pointer, say) outdates this
+                // thread rather than failing the whole update.
+                let h = hunks.entry(key).or_insert_with(|| {
+                    crate::git(
                         &[
                             "--no-pager", "diff", "-U0", "--no-color", "--no-ext-diff",
                             &format!("{old_head}:./{}", th.file),
@@ -287,16 +299,12 @@ pub(crate) fn reanchor(
                         ],
                         cwd,
                     )
-                    .map_err(|e| e.to_string())?;
-                    hunks.insert(key.clone(), parse_hunks(&diff));
-                }
-                match (lines, &hunks[&key]) {
-                    (None, _) => Some((new.clone(), None)),
-                    (Some(_), None) => None,
-                    (Some((s, e)), Some(h)) => shift(h, s, e).map(|l| (new.clone(), Some(l))),
-                }
+                    .ok()
+                    .and_then(|d| parse_hunks(&d))
+                });
+                h.as_deref().and_then(|h| shift(h, s, e)).map(|l| (new.clone(), Some(l)))
             }
-            Some(_) => None,
+            (Some(_), _) => None,
         };
         // A file that left the range has no diff to draw the thread in.
         match moved.filter(|(file, _)| new_files.contains(file)) {
@@ -310,17 +318,19 @@ pub(crate) fn reanchor(
                 }
             }
             None => {
+                let at = th.origin_anchor();
                 outdated.push(ReviewOutdated {
                     thread_id: th.id.clone(),
-                    file: th.file.clone(),
-                    start_line: th.start_line,
-                    end_line: th.end_line,
+                    file: at.file,
+                    start_line: at.start_line,
+                    end_line: at.end_line,
+                    round: th.round,
                 });
                 th.outdated = Some(round);
             }
         }
     }
-    Ok(outdated)
+    outdated
 }
 
 #[cfg(test)]
@@ -479,5 +489,49 @@ mod tests {
         assert_eq!(from_round(&r, 3, None).err().as_deref(), Some("round 3 of r1 is not before round 3"));
         assert!(from_round(&r, 2, Some(2)).is_err());
         assert!(from_round(&r, 0, None).is_err());
+    }
+
+    fn thread(id: &str, file: &str, lines: Option<(u32, u32)>) -> ReviewThread {
+        ReviewThread {
+            id: id.into(), file: file.into(), start_line: lines.map(|l| l.0), end_line: lines.map(|l| l.1),
+            quote: String::new(), comments: vec![], resolved: None, round: 1, origin: None, outdated: None,
+        }
+    }
+
+    #[test]
+    fn reanchor_keeps_a_file_level_thread_on_a_changed_file_and_outdates_a_type_change_and_a_failed_diff() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        git(p, &["init", "-q", "-b", "main"]);
+        for (k, v) in [("user.name", "Test"), ("user.email", "t@t"), ("core.autocrlf", "false")] {
+            git(p, &["config", k, v]);
+        }
+        std::fs::write(p.join("b.txt"), "b\n").unwrap();
+        let old = commit(p, "a.txt", "a\n");
+        std::fs::write(p.join("a.txt"), "a2\n").unwrap();
+        git(p, &["add", "a.txt"]);
+        // b.txt becomes a symlink in the index only, so no symlink support is needed.
+        let blob = git(p, &["rev-parse", "HEAD:b.txt"]);
+        git(p, &["update-index", "--cacheinfo", &format!("120000,{blob},b.txt")]);
+        git(p, &["commit", "-q", "-m", "round 2"]);
+        let new = git(p, &["rev-parse", "HEAD"]);
+        let mut moves = moves(p, &old, &new).unwrap();
+        // A path git cannot diff, as a submodule pointer would be.
+        moves.insert("c.txt".into(), ('M', "missing.txt".into()));
+        let mut threads = vec![
+            thread("r1-t1", "a.txt", None),
+            thread("r1-t2", "b.txt", Some((1, 1))),
+            thread("r1-t3", "b.txt", None),
+            thread("r1-t4", "c.txt", Some((1, 1))),
+        ];
+        let in_range: HashSet<String> = ["a.txt", "b.txt", "missing.txt"].map(String::from).into();
+
+        let outdated = reanchor(p, &old, &new, &moves, &mut threads, &in_range, 2);
+
+        assert_eq!(moves["b.txt"].0, 'T');
+        assert_eq!(threads[0].outdated, None);
+        let ids: Vec<&str> = outdated.iter().map(|o| o.thread_id.as_str()).collect();
+        assert_eq!(ids, vec!["r1-t2", "r1-t3", "r1-t4"]);
+        assert!(threads[1..].iter().all(|t| t.outdated == Some(2)));
     }
 }
