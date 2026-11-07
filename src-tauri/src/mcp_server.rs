@@ -1688,7 +1688,7 @@ const TOOLS: &[ToolDef] = &[
     ToolDef {
         name: "present_new",
         cli_verb: "present new",
-        description: "Show the user a commit range as a review in the Git tab; returns its id. The user's comments arrive in the tab's terminal; answer with present_reply. New round, new review.",
+        description: "Show the user a commit range as a review in the Git tab; returns its id. The user's comments arrive in the tab's terminal; answer with present_reply. After an amend or new commit, present_update starts its next iteration.",
         params: &[
             P_PAD_TASK,
             P_PROJECT,
@@ -4262,7 +4262,9 @@ mod tests {
         // head/base/show params are a few words each; the iteration model lives
         // in `termic present --help`.
         // 34746: rounds renamed to iterations, which is the longer word.
-        const RECORDED: usize = 34746;
+        // 34795: present_new points at present_update for later iterations,
+        // replacing the pre-iterations "New round, new review."
+        const RECORDED: usize = 34795;
         assert!(
             size <= RECORDED,
             "serialized tools/list grew to {size} bytes (recorded {RECORDED}); grow it consciously"
