@@ -422,11 +422,17 @@ describe("review rounds picker", () => {
     };
     const shownTo = () => browser.execute(() =>
       document.querySelector('[data-testid="compare-round-to"]')?.getAttribute("data-to") ?? null);
+    /** Rows can be the previous view's until the new range lands, so wait on
+     *  the shown range's own from/to (the tail of its key). */
+    const waitRange = (fromTo: string, msg: string) => browser.waitUntil(async () => browser.execute((ft) =>
+      !!document.querySelector('[data-testid="compare-panel"]')?.getAttribute("data-range-key")?.endsWith(ft), fromTo),
+    { timeout: 10_000, timeoutMsg: msg });
 
     await pickTo(2);
 
     await browser.waitUntil(async () => (await shownTo()) === "2" && (await pressedFrom()) === "1",
       { timeout: 10_000, timeoutMsg: "To round 2 did not keep From round 1" });
+    await waitRange("/1/2", "the Round 1 -> 2 range never landed");
     await waitRows([`${FILE} M`], "Round 1 -> 2 was not listed after picking To round 2");
 
     await pickTo(1);
@@ -434,6 +440,7 @@ describe("review rounds picker", () => {
     await browser.waitUntil(async () => (await shownTo()) === "1" && (await pressedFrom()) === "base",
       { timeout: 10_000, timeoutMsg: "To round 1 did not reset From round 1 to Base" });
     // Round 1 against its own base, from before the rebase.
+    await waitRange("//1", "the round 1 range never landed");
     await waitRows([`${FILE} A`], "round 1 against its base was not listed");
   });
 });

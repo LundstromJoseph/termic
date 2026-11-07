@@ -14882,13 +14882,14 @@ fn interdiff_range(cwd: &Path, k: &termic_proto::ReviewRound, n: &termic_proto::
             let mut fell_back: std::collections::HashMap<String, GitFile> =
                 plain().into_iter().filter(|f| conflicted.contains(&f.path)).map(|f| (f.path.clone(), f)).collect();
             // A resolution that kept round K's content has no K.head..N.head
-            // row but still dropped upstream's side, so it is listed at 0/0.
+            // row but still dropped upstream's side, so it is listed at 0/0:
+            // as deleted when K's deletion won over upstream's edit.
             // merge-tree names a conflict outside the project as `../`.
             let mut upstream: Vec<String> = conflicted.into_iter().filter(|p| !p.starts_with("../")).collect();
             upstream.sort();
             files.extend(upstream.iter().map(|p| {
                 fell_back.remove(p).unwrap_or_else(|| GitFile {
-                    status: "M".into(),
+                    status: if git(&["cat-file", "-e", &format!("{}:./{p}", n.head)], cwd).is_ok() { "M" } else { "D" }.into(),
                     path: p.clone(),
                     added: Some(0),
                     removed: Some(0),
@@ -35702,7 +35703,9 @@ filename f.rs
     /// the author's). Round 2 is the rebase onto the new main with c.txt
     /// resolved to `resolution` and a second author change to a.txt line 6.
     /// Returns the task.
-    fn rebased_review_fixture(repo: &Path, resolution: &str) -> Task {
+    /// `resolution` is round 2's c.txt; None means round 1 deleted c.txt and
+    /// the rebase kept the deletion over upstream's edit.
+    fn rebased_review_fixture(repo: &Path, resolution: Option<&str>) -> Task {
         git_init_with_commit(repo);
         git_set_identity(repo);
         let lines = |edits: &[(usize, &str)]| {
@@ -35716,8 +35719,16 @@ filename f.rs
         git_commit_file(repo, "c.txt", "c\n", "base");
         let main = git_branch(repo);
         git_run(repo, &["checkout", "-q", "-b", "topic"]);
+        let commit_c = |content: Option<&str>, msg: &str| match content {
+            Some(c) => git_commit_file(repo, "c.txt", c, msg),
+            None => {
+                let _ = fs::remove_file(repo.join("c.txt"));
+                git_run(repo, &["add", "."]);
+                git_run(repo, &["commit", "-m", msg]);
+            }
+        };
         fs::write(repo.join("a.txt"), lines(&[(2, "A2")])).unwrap();
-        git_commit_file(repo, "c.txt", "c author\n", "round 1");
+        commit_c(resolution.map(|_| "c author\n"), "round 1");
         let task = Task { id: "t1".into(), ..task_at(repo) };
         reviews::create(&task, reviews::NewReview {
             range: format!("{main}..topic"),
@@ -35733,7 +35744,7 @@ filename f.rs
         git_commit_file(repo, "c.txt", "c upstream\n", "upstream");
         git_run(repo, &["checkout", "-q", "-B", "topic"]);
         fs::write(repo.join("a.txt"), lines(&[(2, "A2"), (5, "U5"), (6, "A6")])).unwrap();
-        git_commit_file(repo, "c.txt", resolution, "round 2");
+        commit_c(resolution, "round 2");
         reviews::update(&task, "r1", reviews::NewRound { head: "HEAD".into(), base: None, show: None }).unwrap();
         task
     }
@@ -35746,7 +35757,7 @@ filename f.rs
     fn review_range_from_round_1_after_a_rebase_lists_only_the_authors_changes_and_flags_the_conflicted_file() {
         let dir = tempdir().unwrap();
         crate::test_support::with_scratch_data_dir(|_| {
-            let task = rebased_review_fixture(dir.path(), "c resolved\n");
+            let task = rebased_review_fixture(dir.path(), Some("c resolved\n"));
             let r = reviews::load(&task, "r1").unwrap();
 
             let full = review_range(dir.path(), &r, None, None).unwrap();
@@ -35766,7 +35777,7 @@ filename f.rs
     fn review_range_from_round_1_lists_a_conflicted_file_resolved_back_to_round_1s_content_at_zero_churn() {
         let dir = tempdir().unwrap();
         crate::test_support::with_scratch_data_dir(|_| {
-            let task = rebased_review_fixture(dir.path(), "c author\n");
+            let task = rebased_review_fixture(dir.path(), Some("c author\n"));
             let r = reviews::load(&task, "r1").unwrap();
 
             let interdiff = review_range(dir.path(), &r, Some(1), None).unwrap();
@@ -35778,10 +35789,25 @@ filename f.rs
     }
 
     #[test]
+    fn review_range_from_round_1_lists_a_conflicted_file_whose_deletion_won_over_upstreams_edit_as_deleted() {
+        let dir = tempdir().unwrap();
+        crate::test_support::with_scratch_data_dir(|_| {
+            let task = rebased_review_fixture(dir.path(), None);
+            let r = reviews::load(&task, "r1").unwrap();
+
+            let interdiff = review_range(dir.path(), &r, Some(1), None).unwrap();
+
+            let rows: Vec<(&str, &str)> = interdiff.compare.files.iter().map(|f| (f.path.as_str(), f.status.as_str())).collect();
+            assert_eq!(rows, vec![("a.txt", "M"), ("c.txt", "D")]);
+            assert_eq!(interdiff.upstream, vec!["c.txt"]);
+        });
+    }
+
+    #[test]
     fn review_range_without_a_replay_lists_the_plain_head_to_head_rows_of_files_either_round_touched() {
         let dir = tempdir().unwrap();
         crate::test_support::with_scratch_data_dir(|_| {
-            let task = rebased_review_fixture(dir.path(), "c resolved\n");
+            let task = rebased_review_fixture(dir.path(), Some("c resolved\n"));
             let r = reviews::load(&task, "r1").unwrap();
 
             let range = interdiff_range(dir.path(), &r.rounds[0], &r.rounds[1], review_rounds::Replay::Unavailable).unwrap();
@@ -35796,7 +35822,7 @@ filename f.rs
     fn review_range_refuses_a_from_round_not_before_the_to_round() {
         let dir = tempdir().unwrap();
         crate::test_support::with_scratch_data_dir(|_| {
-            let task = rebased_review_fixture(dir.path(), "c resolved\n");
+            let task = rebased_review_fixture(dir.path(), Some("c resolved\n"));
             let r = reviews::load(&task, "r1").unwrap();
 
             let same = review_range(dir.path(), &r, Some(2), Some(2));
@@ -35811,7 +35837,7 @@ filename f.rs
     fn review_scoped_diff_sides_with_from_read_the_replayed_tree_or_round_ks_head_for_a_conflicted_file() {
         let dir = tempdir().unwrap();
         crate::test_support::with_scratch_data_dir(|_| {
-            let task = rebased_review_fixture(dir.path(), "c resolved\n");
+            let task = rebased_review_fixture(dir.path(), Some("c resolved\n"));
 
             let a = task_file_diff_sides_for_task(&task, "a.txt", Some("review:r1:from:1")).unwrap();
             let c = task_file_diff_sides_for_task(&task, "c.txt", Some("review:r1:from:1")).unwrap();

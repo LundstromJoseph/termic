@@ -151,9 +151,12 @@ export function ComparePanel({ task, repoDir, search, viewMode, reloadToken, onO
   const viewTo = rv?.to ?? null;
   const reviewKey = review ? `${task.id}/${review.id}/${review.rounds.length}/${viewFrom ?? ""}/${viewTo ?? ""}` : null;
   /** The shown review's file list, keyed by task/review/round/view. A round's
-   *  range never changes, so it is read on a view change and never on reloadToken. */
+   *  range never changes, so it is read on a view change and never on reloadToken.
+   *  `k` and `n` are the rounds it was read for: kept rows keep their own labels
+   *  while the picker already names the next view. */
   const [range, setRange] = useState<{
-    key: string; cmp: GitCompare | null; err: string | null; fallback: boolean; upstream: ReadonlySet<string>;
+    key: string; k: number | null; n: number;
+    cmp: GitCompare | null; err: string | null; fallback: boolean; upstream: ReadonlySet<string>;
   } | null>(null);
 
   const toggleMergeBase = () => setMergeBase(v => { const n = !v; persist(LS_MERGE_BASE, n ? "1" : "0"); return n; });
@@ -188,11 +191,12 @@ export function ComparePanel({ task, repoDir, search, viewMode, reloadToken, onO
     setSelected(null);
     if (!review || !reviewKey || (range?.key === reviewKey && !range.err)) return;
     let alive = true;
+    const rounds = { key: reviewKey, k: viewFrom, n: viewTo ?? review.rounds.length };
     taskReviewRange(task.id, review.id, viewFrom, viewTo)
       .then(r => {
-        if (alive) setRange({ key: reviewKey, cmp: r.compare, err: null, fallback: r.mode === "fallback", upstream: new Set(r.upstream) });
+        if (alive) setRange({ ...rounds, cmp: r.compare, err: null, fallback: r.mode === "fallback", upstream: new Set(r.upstream) });
       })
-      .catch(e => { if (alive) setRange({ key: reviewKey, cmp: null, err: String(e), fallback: false, upstream: new Set() }); });
+      .catch(e => { if (alive) setRange({ ...rounds, cmp: null, err: String(e), fallback: false, upstream: new Set() }); });
     return () => { alive = false; };
     // A new seq in the same round is a new comment, not a new range.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -312,7 +316,7 @@ export function ComparePanel({ task, repoDir, search, viewMode, reloadToken, onO
   const branchLabel = cmp?.branch || task.branch || t("compare.workingTree");
 
   return (
-    <div className="flex h-full min-h-0 flex-col" data-testid="compare-panel" data-review={review?.id ?? ""}>
+    <div className="flex h-full min-h-0 flex-col" data-testid="compare-panel" data-review={review?.id ?? ""} data-range-key={shownRange?.key ?? ""}>
       {/* 1. Compare bar. Reads left-to-right as the diff does: the base on the
           left is the side being compared FROM, this branch on the right is the
           side being compared TO. Without naming both, a file marked "D" is
@@ -440,10 +444,10 @@ export function ComparePanel({ task, repoDir, search, viewMode, reloadToken, onO
           {t("compare.noMergeBase", { base })}
         </Note>
       )}
-      {review && shownRange?.fallback && (
+      {shownRange?.fallback && (
         <Note testId="compare-review-fallback">
           <AlertTriangle className="h-3 w-3 shrink-0" />
-          {t("compare.review.fallback", { k: viewFrom, n: viewTo ?? review.rounds.length })}
+          {t("compare.review.fallback", { k: shownRange.k, n: shownRange.n })}
         </Note>
       )}
       {view.cmp?.truncated && <Note>{t("compare.truncated")}</Note>}
@@ -481,7 +485,7 @@ export function ComparePanel({ task, repoDir, search, viewMode, reloadToken, onO
             repoDir={dir}
             threads={threadCounts && row.kind === "file" ? threadCounts.get(row.file.path) ?? 0 : undefined}
             upstream={row.kind === "file" && !!shownRange?.upstream.has(row.file.path)
-              ? { k: viewFrom ?? 0, n: viewTo ?? review?.rounds.length ?? 0 } : undefined}
+              ? { k: shownRange.k ?? 0, n: shownRange.n } : undefined}
             selected={row.kind === "file" && selected === row.file.path}
             onOpen={openFile}
             onOpenWholeFile={openWholeFile}
