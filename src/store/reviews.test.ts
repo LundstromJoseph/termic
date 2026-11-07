@@ -167,3 +167,42 @@ describe("useReviews.setView", () => {
     expect(picked.view["t1/r1"]).toEqual({ from: 1, to: null, iterations: 2 });
   });
 });
+
+describe("useReviews.remove", () => {
+  it("drops the review, its id, its awaiting threads, its pick and Compare's showing of it, and keeps the task's other reviews", () => {
+    useReviews.getState().apply("t1", review("r1", 1, { threads: [thread("r1-t1", "agent")] }));
+    useReviews.getState().apply("t1", review("r2", 1, { threads: [thread("r2-t1", "agent")] }));
+    useReviews.getState().setShown("t1", "r2");
+    useReviews.getState().setView("t1", "r2", 1, null, 2);
+
+    useReviews.getState().remove("t1", "r2");
+
+    const s = useReviews.getState();
+    expect(Object.keys(s.byKey)).toEqual(["t1/r1"]);
+    expect(s.idsByTask.t1).toEqual(["r1"]);
+    expect(s.awaiting.t1).toBe(1);
+    expect(s.shown.t1).toBeNull();
+    expect(s.view["t1/r2"]).toBeUndefined();
+  });
+
+  it("returns the same state for a review it does not hold", () => {
+    useReviews.getState().apply("t1", review("r1", 0));
+    const before = useReviews.getState();
+
+    useReviews.getState().remove("t1", "r5");
+
+    expect(useReviews.getState()).toBe(before);
+  });
+
+  it("never stores the deleted review again when a stale copy lands afterwards (a review_list sent before the delete)", () => {
+    useReviews.getState().apply("t1", review("r1", 1));
+    useReviews.getState().remove("t1", "r1");
+    const before = useReviews.getState();
+
+    useReviews.getState().setList("t1", [review("r1", 1)]);
+    useReviews.getState().apply("t1", review("r1", 2));
+
+    expect(useReviews.getState().byKey["t1/r1"]).toBeUndefined();
+    expect(useReviews.getState().idsByTask).toBe(before.idsByTask);
+  });
+});

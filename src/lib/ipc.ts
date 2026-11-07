@@ -966,6 +966,9 @@ export const reviewPost = (taskId: string, reviewId: string, items: ReviewPostIt
 /** Does not push `review_changed`: apply the returned review yourself. */
 export const reviewResolve = (taskId: string, threadId: string, resolved: boolean) =>
   invoke<Review>("review_resolve", { taskId, threadId, resolved });
+/** Deletes the review's file and refs. Does not push `review_changed`: call `dropReview`. */
+export const reviewDelete = (taskId: string, reviewId: string) =>
+  invoke<void>("review_delete", { taskId, reviewId });
 /** Local branch names for a project's repo, before any task exists. Feeds the
  *  New Task dialog's auto-numbering of the proposed branch (issue #129). */
 export const projectGitBranches = (projectId: string) =>

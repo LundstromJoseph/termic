@@ -34,13 +34,16 @@ pub(crate) fn pinned(cwd: &Path, task_id: &str, review_id: &str, n: usize) -> bo
     crate::git_output(&["rev-parse", "--verify", "--quiet", &r], cwd, None).is_ok_and(|o| o.status.success())
 }
 
-/// Deletes every review ref of `task_id` in each of `repos`. Best effort: a
-/// repo that is gone or refuses is logged and skipped.
-pub(crate) fn drop_task_refs(task_id: &str, repos: &[PathBuf]) {
+/// Deletes every review ref of `task_id` in each of `repos`, or only review
+/// `review_id`'s. Best effort: a repo that is gone or refuses is logged and skipped.
+pub(crate) fn drop_refs(task_id: &str, review_id: Option<&str>, repos: &[PathBuf]) {
     if !crate::scratch_id_ok(task_id) {
         return;
     }
-    let p = format!("refs/termic/reviews/{task_id}/");
+    let p = match review_id {
+        Some(r) => prefix(task_id, r),
+        None => format!("refs/termic/reviews/{task_id}/"),
+    };
     for repo in repos {
         let Ok(list) = crate::git(&["for-each-ref", "--format=%(refname)", &p], repo) else {
             eprintln!("[reviews] listing {p} in {} failed", repo.display());

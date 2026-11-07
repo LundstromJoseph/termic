@@ -945,7 +945,8 @@ pub(crate) fn dispatch_authenticated(
         | Command::PresentList { .. }
         | Command::PresentClaim { .. }
         | Command::PresentResolve { .. }
-        | Command::PresentUpdate { .. } => handle_present(&req.id, host, &req.cmd),
+        | Command::PresentUpdate { .. }
+        | Command::PresentDelete { .. } => handle_present(&req.id, host, &req.cmd),
         Command::TabClose { task, project, tab, yes, cwd } => handle_tab_close(
             &req.id,
             host,
@@ -3447,7 +3448,8 @@ fn handle_present(id: &str, host: &dyn CliHost, cmd: &Command) -> Reply {
         | Command::PresentList { task, project, cwd }
         | Command::PresentClaim { task, project, cwd, .. }
         | Command::PresentResolve { task, project, cwd, .. }
-        | Command::PresentUpdate { task, project, cwd, .. } => (task.as_deref(), project.as_deref(), cwd.as_deref()),
+        | Command::PresentUpdate { task, project, cwd, .. }
+        | Command::PresentDelete { task, project, cwd, .. } => (task.as_deref(), project.as_deref(), cwd.as_deref()),
         _ => unreachable!("dispatch sends only the present verbs here"),
     };
     let (projects, tasks) = host.projects_tasks();
@@ -3467,7 +3469,7 @@ fn handle_present(id: &str, host: &dyn CliHost, cmd: &Command) -> Reply {
         Arc::clone(locks.entry(t.id.clone()).or_default())
     });
     let _order = task_lock.as_ref().map(|l| l.lock().unwrap_or_else(|p| p.into_inner()));
-    match present(host, t, &name, host_is_repo, cwd, cmd) {
+    match present(host, &projects, t, &name, host_is_repo, cwd, cmd) {
         Ok(data) => Reply::ok(id, data),
         Err(PresentError::Bad(why)) => Reply::err(id, ErrorCode::BadRequest, why),
         Err(PresentError::Tab(e)) => Reply { id: id.into(), ok: false, data: None, error: Some(e) },
@@ -3518,6 +3520,7 @@ fn review_summary(r: proto::Review) -> proto::ReviewSummary {
 
 fn present(
     host: &dyn CliHost,
+    projects: &[crate::Project],
     t: &Task,
     name: &str,
     host_is_repo: bool,
@@ -3658,6 +3661,15 @@ fn present(
                 base_ref: r.base_ref,
                 head_ref: r.head_ref,
                 outdated,
+            }))
+        }
+        Command::PresentDelete { review, .. } => {
+            reviews::delete(t, review, projects)?;
+            host.push_review(serde_json::json!({ "taskId": t.id, "deleted": review }));
+            Ok(ReplyData::ReviewDelete(proto::ReviewDeleteData {
+                task_id: t.id.clone(),
+                task: name.into(),
+                review_id: review.clone(),
             }))
         }
         _ => unreachable!("dispatch sends only the present verbs here"),
@@ -10219,6 +10231,10 @@ mod tests {
         )
     }
 
+    fn present_delete(review: &str) -> Request {
+        req(Command::PresentDelete { task: Some("w9".into()), project: None, review: review.into(), cwd: None }, Some("tok"))
+    }
+
     fn resolve_of(reply: Reply) -> proto::ReviewResolveData {
         assert!(reply.ok, "{:?}", reply.error);
         let Some(ReplyData::ReviewResolve(d)) = reply.data else { panic!("expected a resolve") };
@@ -10556,6 +10572,40 @@ mod tests {
 
             let Some(ReplyData::Reviews(d)) = reply.data else { panic!("expected reviews") };
             assert_eq!(d.reviews[0].iterations, 2);
+        });
+    }
+
+    #[test]
+    fn present_delete_removes_the_review_and_its_refs_from_the_projects_repo_and_pushes_the_deleted_id() {
+        let repo = present_repo();
+        crate::test_support::with_scratch_data_dir(|_| {
+            let mut host = present_host(repo.path());
+            host.projects[0].root_path = repo.path().to_string_lossy().into_owned();
+            handle(&present_new(Some("tab-c"), None), &host);
+
+            let reply = handle(&present_delete("r1"), &host);
+
+            assert!(reply.ok, "{:?}", reply.error);
+            let Some(ReplyData::ReviewDelete(d)) = reply.data else { panic!("expected a delete") };
+            assert_eq!(d, proto::ReviewDeleteData { task_id: "w9".into(), task: "web/rev".into(), review_id: "r1".into() });
+            assert_eq!(err_of(handle(&present_show("r1", None), &host)), (ErrorCode::NotFound, "no such review r1".into()));
+            let pinned = crate::git(&["for-each-ref", "refs/termic/reviews/w9/"], repo.path()).unwrap();
+            assert_eq!(pinned.trim(), "", "the review's refs are gone");
+            assert_eq!(review_pushes(&host).last().unwrap(), &serde_json::json!({ "taskId": "w9", "deleted": "r1" }));
+        });
+    }
+
+    #[test]
+    fn present_delete_of_an_unknown_review_is_not_found_and_pushes_nothing() {
+        let repo = present_repo();
+        crate::test_support::with_scratch_data_dir(|_| {
+            let host = present_host(repo.path());
+            handle(&present_new(Some("tab-c"), None), &host);
+
+            let unknown = err_of(handle(&present_delete("r4"), &host));
+
+            assert_eq!(unknown, (ErrorCode::NotFound, "no such review r4".into()));
+            assert_eq!(review_pushes(&host).len(), 1, "only present new's");
         });
     }
 

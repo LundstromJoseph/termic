@@ -410,6 +410,11 @@ export default {
       upstream: "upstream",
       upstreamTip: "This file conflicted when iteration {{k}} was replayed onto iteration {{n}}'s base, so its diff runs from iteration {{k}}'s head and includes upstream changes. An empty diff means the resolution dropped them.",
       fallback: "Iteration {{k}} could not be replayed onto iteration {{n}}'s base, so the list includes upstream changes in the files either iteration touched.",
+      delete: "Delete review",
+      deleteTitle: "Delete {{name}}?",
+      deleteMessage: "This deletes the review and all of its threads. It cannot be undone, and the agent can no longer reply to it.",
+      deleteConfirm: "Delete",
+      deleteFailed: "Couldn't delete the review: {{error}}",
     },
   },
 

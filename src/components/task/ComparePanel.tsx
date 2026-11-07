@@ -43,12 +43,14 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   ChevronRight, ChevronDown, Check, Eye, Loader2, GitCompare as GitCompareIcon,
-  ArrowRight, MessageSquare, AlertTriangle, FileText,
+  ArrowRight, MessageSquare, AlertTriangle, FileText, Trash2,
 } from "lucide-react";
 import type { GitCompare, GitFile, Review, ReviewThread, Task } from "@/lib/types";
-import { taskGitCompare, taskReviewRange, taskGitRefs } from "@/lib/ipc";
+import { taskGitCompare, taskReviewRange, taskGitRefs, reviewDelete } from "@/lib/ipc";
+import { dropReview } from "@/lib/reviewsCli";
 import { effectiveView, pickTo, reviewScope, threadAnchor } from "@/lib/reviewScope";
 import { useApp } from "@/store/app";
+import { useUI } from "@/store/ui";
 import { useReviews, useReview, useTaskReviewIds } from "@/store/reviews";
 import { useFileViewed, useIsViewed } from "@/store/fileViewed";
 import { useReviewComments } from "@/store/reviewComments";
@@ -520,6 +522,25 @@ function Note({ children, testId }: { children: React.ReactNode; testId?: string
 const reviewLabel = (r: Review) =>
   r.title || i18n.t("panels:compare.review.untitled", { id: r.id });
 
+/** Deletes `review` after a confirm, since there is no undo. */
+async function confirmDeleteReview(taskId: string, review: Review) {
+  const ui = useUI.getState();
+  const ok = await ui.askConfirm({
+    title: i18n.t("panels:compare.review.deleteTitle", { name: reviewLabel(review) }),
+    message: i18n.t("panels:compare.review.deleteMessage"),
+    confirmLabel: i18n.t("panels:compare.review.deleteConfirm"),
+    destructive: true,
+    checkbox: undefined,
+  });
+  if (!ok) return;
+  try {
+    await reviewDelete(taskId, review.id);
+    dropReview(taskId, review.id);
+  } catch (e) {
+    ui.pushToast(i18n.t("panels:compare.review.deleteFailed", { error: String(e) }), "error");
+  }
+}
+
 /** Review mode's bar: which review, its range, and whose it is. The picker
  *  switches between the task's reviews and back to branch compare. */
 function ReviewBar({ task, review, reviewIds }: { task: Task; review: Review; reviewIds: readonly string[] }) {
@@ -565,6 +586,17 @@ function ReviewBar({ task, review, reviewIds }: { task: Task; review: Review; re
       <span className="ml-auto shrink-0 text-[var(--color-fg-faint)]" data-testid="compare-review-author">
         {t("compare.review.by", { author: review.author })}
       </span>
+      <Tip content={t("compare.review.delete")}>
+        <button
+          type="button"
+          data-testid="compare-review-delete"
+          aria-label={t("compare.review.delete")}
+          onClick={() => void confirmDeleteReview(task.id, review)}
+          className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-[var(--color-fg-faint)] hover:bg-[var(--color-hover)] hover:text-[var(--color-err)]"
+        >
+          <Trash2 className="h-3.5 w-3.5" />
+        </button>
+      </Tip>
     </div>
   );
 }

@@ -366,7 +366,7 @@ and you and the user talk it through in comment threads on its new side.
 Every `present` verb targets your own task unless you pass `--task`. Over
 MCP the same verbs are `present_new`, `present_comment`, `present_reply`,
 `present_show`, `present_list`, `present_claim`, `present_resolve`,
-`present_unresolve` and `present_update`; pass your
+`present_unresolve`, `present_update` and `present_delete`; pass your
 `$TERMIC_TAB_ID` as `tab` to `present_new` and `present_claim`.
 
 - `"$TERMIC_CLI" present new main..HEAD --title "<title>"` - open one and
@@ -398,6 +398,8 @@ MCP the same verbs are `present_new`, `present_comment`, `present_reply`,
   again (a rebase onto a moved main needs nothing more); pass `--base` when
   it was relative, like `HEAD~3`. `--show 1` makes "what changed since
   iteration 1" the view the user sees first, `--show full` the whole range.
+- `"$TERMIC_CLI" present delete r1` - delete a review and its threads for
+  good, when it no longer serves the user. Its id is never reused.
 
 A caged (enforce/enforce-fs) task has no CLI, so it cannot present.
 

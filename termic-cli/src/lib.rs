@@ -1681,7 +1681,8 @@ terminal. `present show r1 --since <seq>` prints only what came after that seq. 
 `present claim r1` from another agent tab sends the user's next comments \
 there instead. `present resolve r1-t3` marks a thread settled and \
 `present unresolve r1-t3` reopens it. A reply from either side reopens it \
-too, and neither verb sends the user anything.
+too, and neither verb sends the user anything. `present delete r1` deletes \
+a review and its threads for good; its id is never reused.
 
 After an amend, rebase or new commit, `present update r1 --head HEAD` starts \
 the next iteration of the same review: threads whose lines did not change move \
@@ -1703,7 +1704,8 @@ With --output-format json, `new` and `show` print {\"task_id\", \"task\", \
 {\"task_id\", \"review_id\", \"thread_id\", \"resolved\", \"changed\"}; `list` \
 prints {\"task_id\", \"task\", \"reviews\"}; `update` prints {\"task_id\", \
 \"task\", \"review_id\", \"iteration\", \"base\", \"head\", \"base_ref\", \
-\"head_ref\", \"files\", \"files_truncated\", \"default_from\", \"outdated\"}.
+\"head_ref\", \"files\", \"files_truncated\", \"default_from\", \"outdated\"}; \
+`delete` prints {\"task_id\", \"task\", \"review_id\"}.
 
 Exit codes: 0 ok, 1 error (unknown task, review or thread; a range, line, \
 file or comment the review refuses; a tab that is not an agent tab of the \
@@ -1838,6 +1840,14 @@ pub enum PresentCmd {
         /// what changed since that iteration.
         #[arg(long, value_name = "full|N")]
         show: Option<String>,
+        #[command(flatten)]
+        target: PresentTarget,
+    },
+    /// Delete a review and its threads. There is no undo.
+    #[command(after_help = PRESENT_AFTER_HELP)]
+    Delete {
+        /// The review id (r1).
+        review: String,
         #[command(flatten)]
         target: PresentTarget,
     },
@@ -2280,7 +2290,7 @@ fn pre_connect_guard(cmd: &Cmd) -> Result<(), CliError> {
             PresentCmd::Reply { thread, message, .. } => {
                 proto::review_thread_id_problem(thread).or_else(|| body(message))
             }
-            PresentCmd::Show { review, .. } => proto::review_id_problem(review),
+            PresentCmd::Show { review, .. } | PresentCmd::Delete { review, .. } => proto::review_id_problem(review),
             PresentCmd::List { .. } => None,
             PresentCmd::Claim { review, author, .. } => proto::review_id_problem(review)
                 .or_else(|| author.as_deref().and_then(proto::review_author_problem)),
@@ -3534,6 +3544,12 @@ fn execute_present(
             show: show.clone(),
             cwd,
         },
+        PresentCmd::Delete { review, target } => proto::Command::PresentDelete {
+            task: task_of(target),
+            project: target.project.clone(),
+            review: review.clone(),
+            cwd,
+        },
     };
     let data = client::request(conn, wire, token)?;
     let unexpected = || CliError::new(exit_code::ERROR, "unexpected reply to present");
@@ -3568,6 +3584,9 @@ fn execute_present(
         }
         (PresentCmd::Update { .. }, proto::ReplyData::ReviewUpdate(d)) => {
             final_stdout(format, &output::review_updated_text(&d), &d)
+        }
+        (PresentCmd::Delete { .. }, proto::ReplyData::ReviewDelete(d)) => {
+            final_stdout(format, &format!("Deleted review {} of {}.", d.review_id, d.task), &d)
         }
         _ => return Err(unexpected()),
     };
@@ -4548,6 +4567,7 @@ mod tests {
         let resolve = parse(&["termic", "present", "resolve", "r1-t2", "--task", "x"]);
         let unresolve = parse(&["termic", "present", "unresolve", "r1-t3"]);
         let update = parse(&["termic", "present", "update", "r1", "--head", "HEAD", "--base", "main", "--show", "1"]);
+        let delete = parse(&["termic", "present", "delete", "r2", "--task", "x"]);
 
         assert!(matches!(&new, Cmd::Present(PresentCmd::New { range, title: Some(t), author: Some(a), repo: Some(r), tab: Some(tab), .. })
             if range == "main..HEAD" && t == "T" && a == "A" && r == "api" && tab == "t1"));
@@ -4563,6 +4583,8 @@ mod tests {
         assert!(matches!(&unresolve, Cmd::Present(PresentCmd::Unresolve { thread, .. }) if thread == "r1-t3"));
         assert!(matches!(&update, Cmd::Present(PresentCmd::Update { review, head, base: Some(b), show: Some(s), .. })
             if review == "r1" && head == "HEAD" && b == "main" && s == "1"));
+        assert!(matches!(&delete, Cmd::Present(PresentCmd::Delete { review, target })
+            if review == "r2" && target.task.as_deref() == Some("x")));
         assert!(Cli::try_parse_from(["termic", "present", "update", "r1"]).is_err(), "--head is required");
         assert!(Cli::try_parse_from(["termic", "present", "comment", "r1", "-m", "x"]).is_err(), "--file is required");
         assert!(Cli::try_parse_from(["termic", "present"]).is_err(), "a subcommand is required");
@@ -4600,6 +4622,7 @@ mod tests {
             &["termic", "present", "update", "x", "--head", "HEAD"][..],
             &["termic", "present", "update", "r1", "--head", "HEAD", "--show", "0"][..],
             &["termic", "present", "update", "r1", "--head", "HEAD", "--show", "abc"][..],
+            &["termic", "present", "delete", "r1-t1"][..],
         ];
         let allowed = [
             &["termic", "present", "new", "HEAD~2..HEAD", "--title", "T"][..],
@@ -5254,7 +5277,7 @@ mod tests {
             "scratchpad rm", "scratchpad clear",
             "badge set", "badge rm", "badge list",
             "present new", "present comment", "present reply", "present show", "present list",
-            "present claim", "present resolve", "present unresolve", "present update",
+            "present claim", "present resolve", "present unresolve", "present update", "present delete",
             "schedule list", "schedule show", "schedule set", "schedule run", "schedule delete",
         ] {
             assert!(names.contains(&expected), "missing {expected} in {names:?}");

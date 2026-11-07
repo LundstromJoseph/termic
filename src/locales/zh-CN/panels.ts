@@ -405,6 +405,11 @@ export default {
       upstream: "上游",
       upstreamTip: "将第 {{k}} 次迭代重放到第 {{n}} 次迭代的基线时此文件有冲突，因此其差异从第 {{k}} 次迭代的 head 开始，包含上游改动。差异为空表示解决冲突时丢弃了这些改动。",
       fallback: "无法将第 {{k}} 次迭代重放到第 {{n}} 次迭代的基线上，因此列表包含两次迭代所改文件中的上游改动。",
+      delete: "删除评审",
+      deleteTitle: "删除 {{name}}？",
+      deleteMessage: "这会删除该评审及其所有讨论。此操作无法撤销，智能体也无法再回复它。",
+      deleteConfirm: "删除",
+      deleteFailed: "无法删除评审：{{error}}",
     },
   },
 

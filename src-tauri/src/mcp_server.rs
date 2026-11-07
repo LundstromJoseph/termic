@@ -1873,6 +1873,24 @@ const TOOLS: &[ToolDef] = &[
         }),
     },
     ToolDef {
+        name: "present_delete",
+        cli_verb: "present delete",
+        description: "Delete a review and its threads. No undo.",
+        params: &[
+            P_PAD_TASK,
+            P_PROJECT,
+            ParamDef { name: "review", json_type: "string", required: true, description: "r1", cli_flag: Some("review") },
+        ],
+        destructive: true,
+        read_only: false,
+        build: |a| Ok(Command::PresentDelete {
+            task: arg_str(a, "task")?,
+            project: arg_str(a, "project")?,
+            review: need_str(a, "review")?,
+            cwd: None,
+        }),
+    },
+    ToolDef {
         name: "task_agents",
         cli_verb: "agents",
         description: "List the agent CLIs this app can run: the ids task_new and task_tab accept, with whether each is installed and usable, and each agent's named accounts (what task_new's account takes) with the default. Without this a caller has to guess an agent id and read the refusal.",
@@ -2322,7 +2340,7 @@ const SELF_DEFAULT_TOOLS: &[&str] = &[
     "task_rename", "task_group", "task_tab", "task_prop",
     "task_badge_set", "task_badge_remove", "task_badge_list",
     "present_new", "present_comment", "present_reply", "present_show", "present_list", "present_claim",
-    "present_resolve", "present_unresolve", "present_update",
+    "present_resolve", "present_unresolve", "present_update", "present_delete",
     "scratchpad_new", "scratchpad_write", "scratchpad_read", "scratchpad_list",
     "scratchpad_remove", "scratchpad_clear",
     "schedule_show", "schedule_set", "schedule_run", "schedule_delete",
@@ -4264,7 +4282,9 @@ mod tests {
         // 34746: rounds renamed to iterations, which is the longer word.
         // 34795: present_new points at present_update for later iterations,
         // replacing the pre-iterations "New round, new review."
-        const RECORDED: usize = 34795;
+        // 35236: present_delete, parity with `termic present delete`. The
+        // review param and one clause.
+        const RECORDED: usize = 35236;
         assert!(
             size <= RECORDED,
             "serialized tools/list grew to {size} bytes (recorded {RECORDED}); grow it consciously"
@@ -4475,6 +4495,7 @@ mod tests {
         let unresolve = call("present_unresolve", serde_json::json!({ "thread": "r1-t2" })).unwrap();
         let update = call("present_update", serde_json::json!({ "review": "r1", "head": "HEAD", "show": "1" })).unwrap();
         let update_no_head = call("present_update", serde_json::json!({ "review": "r1" }));
+        let delete = call("present_delete", serde_json::json!({ "review": "r2" })).unwrap();
 
         assert!(matches!(&new, Command::PresentNew { task: Some(t), range, tab: Some(tab), title: Some(ti), author: None, repo: None, cwd: None, .. }
             if t == "me" && range == "main..HEAD" && tab == "tab-1" && ti == "T"));
@@ -4492,6 +4513,8 @@ mod tests {
         assert!(matches!(&update, Command::PresentUpdate { task: Some(t), review, head, base: None, show: Some(s), cwd: None, .. }
             if t == "me" && review == "r1" && head == "HEAD" && s == "1"));
         assert!(update_no_head.unwrap_err().contains("head"));
+        assert!(matches!(&delete, Command::PresentDelete { task: Some(t), review, cwd: None, .. } if t == "me" && review == "r2"));
+        assert_eq!(tool_entry(tool("present_delete"))["annotations"]["destructiveHint"], true);
         for n in ["present_show", "present_list"] {
             assert_eq!(tool_entry(tool(n))["annotations"]["readOnlyHint"], true, "{n}");
         }

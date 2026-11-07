@@ -14,6 +14,10 @@
 //!
 //! The folder lives inside the task's scratch dir, so `delete_task_file`'s
 //! purge removes it and archiving leaves it alone, like the task's pads.
+//!
+//! An id is never reused within a task: a late agent reply to a deleted r3
+//! must not land on a new one. Deleting a review records its number in
+//! `HIGH_WATER`, and `create` numbers past both that and the files.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -29,6 +33,10 @@ use termic_proto::{
 use crate::Task;
 
 static REVIEW_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
+/// The highest review number a deletion has freed, as decimal text. Absent
+/// until the first delete, so a task without one numbers from its files.
+const HIGH_WATER: &str = "high-water";
 
 pub(crate) struct NewReview {
     /// `A..B` as the agent typed it.
@@ -166,6 +174,10 @@ fn numbers(dir: &Path) -> Vec<u64> {
         .collect()
 }
 
+fn high_water(dir: &Path) -> u64 {
+    fs::read_to_string(dir.join(HIGH_WATER)).ok().and_then(|s| s.trim().parse().ok()).unwrap_or(0)
+}
+
 fn write(dir: &Path, review: &Review) -> Result<(), ReviewError> {
     fs::create_dir_all(dir).map_err(|e| ReviewError::Io(format!("create reviews dir failed: {e}")))?;
     let json = serde_json::to_string_pretty(review).map_err(|e| ReviewError::Io(e.to_string()))?;
@@ -238,7 +250,7 @@ pub(crate) fn create(task: &Task, req: NewReview) -> Result<Review, ReviewError>
     let dir = reviews_dir(task)?;
     let _g = REVIEW_LOCK.lock();
     // Numbered from file NAMES, so a corrupt r3.json still holds r3.
-    let last = numbers(&dir).into_iter().max().unwrap_or(0);
+    let last = numbers(&dir).into_iter().max().unwrap_or(0).max(high_water(&dir));
     let id = format!("r{}", last + 1);
     crate::review_iterations::pin(&cwd, &task.id, &id, 1, &base, &head).map_err(ReviewError::Git)?;
     let created_at = now();
@@ -605,17 +617,45 @@ fn finish_update(task: &Task, review_id: &str, next: NextIteration) -> Result<(R
     Ok((r, outdated))
 }
 
-/// Deletes the task's review refs from every repo it may have pinned them
-/// in: the project's and each member's source repo. The task's own worktree
-/// may already be gone, and all worktrees share their repo's refs anyway.
-pub(crate) fn drop_refs(task: &Task, projects: &[crate::Project]) {
+/// Deletes review `review_id`: its file, then its refs. A file that does
+/// not parse is still deleted. The number goes into `HIGH_WATER` first, so a
+/// crash in between can skip a number but never hand this one out again.
+pub(crate) fn delete(task: &Task, review_id: &str, projects: &[crate::Project]) -> Result<(), ReviewError> {
+    if let Some(p) = review_id_problem(review_id) {
+        return Err(ReviewError::Invalid(p));
+    }
+    let dir = reviews_dir(task)?;
+    let path = dir.join(format!("{review_id}.json"));
+    let _g = REVIEW_LOCK.lock();
+    if !path.is_file() {
+        return Err(ReviewError::NoSuchReview(review_id.to_string()));
+    }
+    let n: u64 = review_id[1..].parse().map_err(|_| ReviewError::Invalid(format!("invalid review id {review_id}")))?;
+    if n > high_water(&dir) {
+        crate::write_atomic(&dir.join(HIGH_WATER), n.to_string().as_bytes())
+            .map_err(|e| ReviewError::Io(format!("review delete failed: {e}")))?;
+    }
+    fs::remove_file(&path).map_err(|e| ReviewError::Io(format!("review delete failed: {e}")))?;
+    crate::review_iterations::drop_refs(&task.id, Some(review_id), &ref_repos(task, projects));
+    Ok(())
+}
+
+/// Every repo the task may have pinned review refs in: the project's and
+/// each member's source repo. The task's own worktree may already be gone,
+/// and all worktrees share their repo's refs anyway.
+fn ref_repos(task: &Task, projects: &[crate::Project]) -> Vec<PathBuf> {
     let mut repos: Vec<PathBuf> = projects
         .iter()
         .filter(|p| p.id == task.project_id && !p.non_git)
         .map(|p| PathBuf::from(&p.root_path))
         .collect();
     repos.extend(task.composition.iter().filter(|m| !m.repo_path.is_empty()).map(|m| PathBuf::from(&m.repo_path)));
-    crate::review_iterations::drop_task_refs(&task.id, &repos);
+    repos
+}
+
+/// Deletes all of the task's review refs.
+pub(crate) fn drop_refs(task: &Task, projects: &[crate::Project]) {
+    crate::review_iterations::drop_refs(&task.id, None, &ref_repos(task, projects));
 }
 
 /// `file`'s lines as the head commit has it.
@@ -1700,7 +1740,7 @@ mod tests {
     }
 
     #[test]
-    fn drop_task_refs_deletes_only_that_tasks_review_refs() {
+    fn drop_refs_of_a_task_deletes_only_that_tasks_review_refs() {
         let dir = repo();
         let p = dir.path();
         let t1 = task(p);
@@ -1709,10 +1749,66 @@ mod tests {
             new_review(&t1);
             new_review(&t2);
 
-            crate::review_iterations::drop_task_refs("t1", &[p.to_path_buf()]);
+            crate::review_iterations::drop_refs("t1", None, &[p.to_path_buf()]);
 
             assert_eq!(ref_sha(p, "refs/termic/reviews/t1/r1/1/head"), None);
             assert!(ref_sha(p, "refs/termic/reviews/t2/r1/1/head").is_some());
+        });
+    }
+
+    /// A task in project p1, whose root is `repo`, and that project.
+    fn project_task(repo: &Path) -> (Task, crate::Project) {
+        let t = Task { project_id: "p1".into(), ..task(repo) };
+        let project = crate::Project { id: "p1".into(), root_path: repo.to_string_lossy().into_owned(), ..Default::default() };
+        (t, project)
+    }
+
+    #[test]
+    fn delete_removes_the_reviews_file_and_its_refs_and_leaves_the_other_reviews_alone() {
+        let dir = repo();
+        let p = dir.path();
+        let (t, project) = project_task(p);
+        with_scratch_data_dir(|data| {
+            new_review(&t);
+            new_review(&t);
+
+            delete(&t, "r1", &[project]).unwrap();
+
+            assert!(!data.join("scratch/t1/reviews/r1.json").exists());
+            assert_eq!(ref_sha(p, "refs/termic/reviews/t1/r1/1/head"), None);
+            assert!(ref_sha(p, "refs/termic/reviews/t1/r2/1/head").is_some());
+            assert_eq!(list(&t).iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), vec!["r2"]);
+        });
+    }
+
+    #[test]
+    fn a_review_created_after_deleting_the_highest_numbered_one_takes_the_next_number_not_the_deleted_one() {
+        let dir = repo();
+        let (t, project) = project_task(dir.path());
+        with_scratch_data_dir(|_| {
+            new_review(&t);
+            new_review(&t);
+            delete(&t, "r2", std::slice::from_ref(&project)).unwrap();
+            delete(&t, "r1", &[project]).unwrap();
+
+            let next = new_review(&t);
+
+            assert_eq!(next.id, "r3");
+        });
+    }
+
+    #[test]
+    fn delete_of_an_unknown_review_is_no_such_review_and_records_no_high_water() {
+        let dir = repo();
+        let (t, project) = project_task(dir.path());
+        with_scratch_data_dir(|data| {
+            new_review(&t);
+
+            let r = delete(&t, "r7", &[project]);
+
+            assert_eq!(r.unwrap_err(), ReviewError::NoSuchReview("r7".into()));
+            assert!(!data.join("scratch/t1/reviews").join(HIGH_WATER).exists());
+            assert_eq!(new_review(&t).id, "r2");
         });
     }
 

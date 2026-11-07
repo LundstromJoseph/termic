@@ -966,4 +966,76 @@ describe("agent-presented review", () => {
       expect(await activeTab()).toBe(before);
     });
   });
+
+  // Last: it deletes reviews the cases above may still point at.
+  describe("deleting a review", () => {
+    const present = async (title: string) => {
+      const r = await cliRpc({ cmd: "present_new", task: taskId, range: "main..HEAD", title, tab: agentTab });
+      expect(r.ok).toBe(true);
+      const id = r.data.review.id as string;
+      await waitForReview(id, `${id} never showed`);
+      return id;
+    };
+    const reviewTabs = (id: string) =>
+      browser.execute((tid, rid) => (window.__termic!.useApp.getState().tabs[tid] ?? [])
+        .filter((t: any) => t.type === "diff" && (t.scope === `review:${rid}` || t.scope?.startsWith(`review:${rid}:`)))
+        .map((t: any) => t.id as string), taskId, id) as Promise<string[]>;
+
+    before(async () => {
+      await ensureActiveTask(taskId);
+      await browser.execute(() => {
+        const ui = window.__termic!.useApp.getState();
+        if (ui.rightPanelHidden) ui.toggleRightPanel();
+      });
+      await openRightTab("Git");
+    });
+
+    it("drops a review the agent deletes from Compare and closes its open diff tab", async () => {
+      const id = await present("Deleted by the agent");
+      await clickIn('[data-testid="compare-file-row"][data-path="present-a.txt"]');
+      await browser.waitUntil(async () => (await reviewTabs(id)).length === 1, {
+        timeout: 10_000, timeoutMsg: "the review diff never opened",
+      });
+
+      const r = await cliRpc({ cmd: "present_delete", task: taskId, review: id });
+
+      expect(r.ok).toBe(true);
+      expect(r.data.review_id).toBe(id);
+      await waitForReview("", "Compare stayed on the deleted review");
+      await browser.waitUntil(async () => (await reviewTabs(id)).length === 0, {
+        timeout: 10_000, timeoutMsg: "the deleted review's diff tab stayed open",
+      });
+      const again = await cliRpc({ cmd: "present_delete", task: taskId, review: id });
+      expect(again.ok).toBe(false);
+      expect(again.error.message).toBe(`no such review ${id}`);
+    });
+
+    it("keeps the review when its Delete confirm is cancelled", async () => {
+      const id = await present("Kept on cancel");
+      await clickIn('[data-testid="compare-review-delete"]');
+      await waitVisible('[data-testid="confirm-cancel"]');
+      await waitForText("Delete Kept on cancel?");
+      await snap("present-delete-confirm.png");
+
+      await clickIn('[data-testid="confirm-cancel"]');
+
+      await waitGone('[data-testid="confirm-cancel"]');
+      expect(await shownReview()).toBe(id);
+      expect((await cliRpc({ cmd: "present_show", task: taskId, review: id })).ok).toBe(true);
+    });
+
+    it("deletes the shown review from its Delete button once confirmed, and never reuses its id", async () => {
+      const id = await shownReview();
+      expect(id).toMatch(/^r\d+$/);
+      await clickIn('[data-testid="compare-review-delete"]');
+
+      await clickIn('[data-testid="confirm-ok"]');
+
+      await waitForReview("", "Compare stayed on the deleted review");
+      const show = await cliRpc({ cmd: "present_show", task: taskId, review: id });
+      expect(show.ok).toBe(false);
+      const next = await cliRpc({ cmd: "present_new", task: taskId, range: "main..HEAD", title: "After delete", tab: agentTab });
+      expect(Number(next.data.review.id.slice(1))).toBe(Number(id!.slice(1)) + 1);
+    });
+  });
 });

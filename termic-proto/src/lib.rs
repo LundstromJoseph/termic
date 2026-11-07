@@ -140,7 +140,10 @@ use std::io::{self, BufRead, Read, Write};
 /// v28: `present_update` starts a review's next iteration, and a review carries
 /// `iterations` while its threads carry `iteration`, `origin` and `outdated`. A v27
 /// server does not know the verb; the bump turns that into "restart the app".
-pub const PROTOCOL_VERSION: u32 = 28;
+///
+/// v29: `present_delete` deletes a review and its hidden refs. A v28 server
+/// does not know the verb; the bump turns that into "restart the app".
+pub const PROTOCOL_VERSION: u32 = 29;
 
 /// A pasted "123", "#123", "!123" or a PR / MR link, reduced to its number.
 /// None for anything else. The webview's `parsePrRef` (src/lib/prReview.ts)
@@ -1138,6 +1141,17 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cwd: Option<String>,
     },
+    /// v29: delete a review, its file and its hidden refs. Its id is never
+    /// reused. Replies `ReplyData::ReviewDelete`.
+    PresentDelete {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project: Option<String>,
+        review: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cwd: Option<String>,
+    },
     /// Close ONE tab of a running task: the GUI's × as a verb (GH #185).
     /// Anything that opens tabs programmatically needs a way to clean
     /// them up; task-level `archive` is the wrong hammer, it takes every
@@ -1631,6 +1645,8 @@ pub enum ReplyData {
     Reviews(ReviewsData),
     /// `present update` (v28).
     ReviewUpdate(ReviewUpdateData),
+    /// `present delete` (v29).
+    ReviewDelete(ReviewDeleteData),
     Quit(QuitData),
     Archive(ArchiveData),
     Rename(RenameData),
@@ -1739,6 +1755,15 @@ pub struct ReviewResolveData {
     pub thread_id: String,
     pub resolved: bool,
     pub changed: bool,
+}
+
+/// A `present delete` (v29).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ReviewDeleteData {
+    pub task_id: String,
+    /// `project/name`.
+    pub task: String,
+    pub review_id: String,
 }
 
 /// One row of `present list` (v26).
@@ -3227,6 +3252,9 @@ mod tests {
                 task: Some("fix-auth".into()), project: Some("web".into()), review: "r2".into(), head: "HEAD".into(),
                 base: Some("main".into()), show: Some("1".into()), cwd: None,
             },
+            // v29: review deletion.
+            Command::PresentDelete { task: None, project: None, review: "r1".into(), cwd: Some("/t".into()) },
+            Command::PresentDelete { task: Some("fix-auth".into()), project: Some("web".into()), review: "r2".into(), cwd: None },
             Command::Agents,
             Command::Prompts { selector: None },
             Command::Prompts { selector: Some("builtin:review".into()) },
@@ -3592,6 +3620,7 @@ mod tests {
             ReplyData::ReviewResolve(ReviewResolveData {
                 task_id: "w1".into(), review_id: "r1".into(), thread_id: "r1-t2".into(), resolved: true, changed: false,
             }),
+            ReplyData::ReviewDelete(ReviewDeleteData { task_id: "w1".into(), task: "web/fix-auth".into(), review_id: "r3".into() }),
             ReplyData::ReviewClaim(ReviewClaimData {
                 task_id: "w1".into(),
                 task: "web/fix-auth".into(),

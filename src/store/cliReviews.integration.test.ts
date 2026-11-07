@@ -19,8 +19,9 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn().mockResolvedValue(null)
 import { reviewChangedHandler } from "@/lib/reviewsCli";
 import { useApp } from "@/store/app";
 import { useReviews } from "@/store/reviews";
+import { useReviewComments } from "@/store/reviewComments";
 import { useUI } from "@/store/ui";
-import type { Review, Task } from "@/lib/types";
+import type { Review, Tab, Task } from "@/lib/types";
 
 function review(seq: number, over: Partial<Review> = {}): Review {
   return {
@@ -101,6 +102,22 @@ describe("reviewChangedHandler", () => {
     await reviewChangedHandler({ taskId: "a", review: review(1) });
 
     expect(useReviews.getState()).toBe(before);
+  });
+
+  it("with deleted: drops the review, the drafts written for it and its diff tabs, and leaves other reviews' drafts and tabs open", async () => {
+    await reviewChangedHandler({ taskId: "a", review: review(0) });
+    const diff = (id: string, scope: string) => ({ id, type: "diff", path: "a.ts", scope, title: id }) as Tab;
+    useApp.setState({ tabs: { a: [diff("d1", "review:r1"), diff("d2", "review:r1:to:1"), diff("d3", "review:r2"), diff("d4", "base:abc")] } });
+    const draft = { taskId: "a", file: "a.ts", startLine: 1, endLine: 1, quote: "x", body: "b" };
+    useReviewComments.setState({ byTask: {} });
+    useReviewComments.getState().add({ ...draft, reviewId: "r1" });
+    const kept = useReviewComments.getState().add({ ...draft, reviewId: "r2" });
+
+    await reviewChangedHandler({ taskId: "a", deleted: "r1" });
+
+    expect(useReviews.getState().byKey["a/r1"]).toBeUndefined();
+    expect(useReviewComments.getState().byTask.a.map(c => c.id)).toEqual([kept]);
+    expect(useApp.getState().tabs.a.map(t => t.id)).toEqual(["d3", "d4"]);
   });
 
   it("refuses params without a taskId or a review with an id and seq", async () => {
