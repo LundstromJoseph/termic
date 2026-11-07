@@ -392,6 +392,7 @@ export default {
       threadMany: "{{count}} 个评审讨论",
       awaitingOne: "1 个讨论等待你回复",
       awaitingMany: "{{count}} 个讨论等待你回复",
+      threads: "讨论",
     },
   },
 

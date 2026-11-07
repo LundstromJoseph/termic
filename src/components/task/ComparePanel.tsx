@@ -43,7 +43,7 @@ import {
   ChevronRight, ChevronDown, Check, Eye, Loader2, GitCompare as GitCompareIcon,
   ArrowRight, MessageSquare, AlertTriangle, FileText,
 } from "lucide-react";
-import type { GitCompare, GitFile, Review, Task } from "@/lib/types";
+import type { GitCompare, GitFile, Review, ReviewThread, Task } from "@/lib/types";
 import { taskGitCompare, taskGitRange, taskGitRefs } from "@/lib/ipc";
 import { useApp } from "@/store/app";
 import { useReviews, useReview, useTaskReviewIds } from "@/store/reviews";
@@ -67,6 +67,7 @@ import { i18n } from "@/lib/i18n";
 /** Whether the compare runs from the merge base. Global rather than per task:
  *  it expresses how someone reads a diff, not anything about one branch. */
 const LS_MERGE_BASE = "gitCompareMergeBase";
+const LS_THREADS_OPEN = "compareThreadsOpen";
 const ROW_H = 26;
 
 function readMergeBase(): boolean {
@@ -240,14 +241,25 @@ export function ComparePanel({ task, repoDir, search, viewMode, reloadToken, onO
     { added: 0, removed: 0 },
   ), [files]);
 
+  const openReviewDiff = useCallback((review: Review, path: string, revealThread?: string) => {
+    useApp.getState().openPreviewTab(task.id, {
+      type: "diff", path: dir ? `${dir}/${path}` : path, scope: `review:${review.id}`,
+      title: `Δ ${path.split("/").pop()} · ${review.id}`, revealThread,
+    });
+  }, [dir, task.id]);
+
   const openFile = useCallback((path: string) => {
     if (!view.cmp) return;
     setSelected(path);
-    const full = dir ? `${dir}/${path}` : path;
-    const title = `Δ ${path.split("/").pop()}`;
-    if (review) useApp.getState().openPreviewTab(task.id, { type: "diff", path: full, scope: `review:${review.id}`, title: `${title} · ${review.id}` });
-    else onOpenDiff(full, view.cmp.base_sha, title);
-  }, [view.cmp, dir, review, task.id, onOpenDiff]);
+    if (review) openReviewDiff(review, path);
+    else onOpenDiff(dir ? `${dir}/${path}` : path, view.cmp.base_sha, `Δ ${path.split("/").pop()}`);
+  }, [view.cmp, dir, review, openReviewDiff, onOpenDiff]);
+
+  const openThread = useCallback((th: ReviewThread) => {
+    if (!review) return;
+    setSelected(th.file);
+    openReviewDiff(review, th.file, th.id);
+  }, [review, openReviewDiff]);
 
   // The other reading of the same row: the file itself, not the comparison.
   // Selection moves either way, so the list keeps your place when you switch.
@@ -365,6 +377,7 @@ export function ComparePanel({ task, repoDir, search, viewMode, reloadToken, onO
         )}
       </div>
       )}
+      {review && review.threads.length > 0 && <ThreadList review={review} onOpen={openThread} />}
 
       {/* 2. Summary strip. The whole reason someone opens this tab is to judge
           size and impact before reading a single file, so the count and the
@@ -503,6 +516,85 @@ function ReviewBar({ task, review, reviewIds }: { task: Task; review: Review; re
         {t("compare.review.by", { author: review.author })}
       </span>
     </div>
+  );
+}
+
+/** Review mode: every thread of the shown review, in creation order. A click
+ *  opens its file's diff scrolled to the thread. */
+function ThreadList({ review, onOpen }: { review: Review; onOpen: (th: ReviewThread) => void }) {
+  const { t } = useTranslation("panels");
+  const [open, setOpen] = useState(() => { try { return localStorage.getItem(LS_THREADS_OPEN) !== "0"; } catch { return true; } });
+  const toggle = () => setOpen(v => {
+    try { localStorage.setItem(LS_THREADS_OPEN, v ? "0" : "1"); } catch {}
+    return !v;
+  });
+  const Chevron = open ? ChevronDown : ChevronRight;
+  return (
+    <div className="shrink-0 border-b border-[var(--color-border-soft)]" data-testid="compare-threads">
+      <button
+        type="button"
+        data-testid="compare-threads-toggle"
+        aria-expanded={open}
+        onClick={toggle}
+        className="flex h-6 w-full items-center gap-1 px-2 text-[11px] font-medium uppercase tracking-wider text-[var(--color-fg-dim)] hover:text-[var(--color-fg)]"
+      >
+        <Chevron className="h-3 w-3 shrink-0" />
+        {t("compare.review.threads")}
+        <span className="tabular-nums text-[var(--color-fg-faint)]">{review.threads.length}</span>
+      </button>
+      {open && (
+        <div className="max-h-[168px] overflow-auto pb-1">
+          {review.threads.map(th => <ThreadRow key={th.id} thread={th} onOpen={onOpen} />)}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ThreadRow({ thread, onOpen }: { thread: ReviewThread; onOpen: (th: ReviewThread) => void }) {
+  const { t } = useTranslation("panels");
+  const last = thread.comments[thread.comments.length - 1];
+  const resolved = !!thread.resolved;
+  const base = thread.file.split("/").pop() ?? thread.file;
+  const lines = thread.start_line === null ? ""
+    : thread.end_line === null || thread.end_line === thread.start_line ? `:${thread.start_line}`
+    : `:${thread.start_line}–${thread.end_line}`;
+  return (
+    <button
+      type="button"
+      data-testid="compare-thread-row"
+      data-thread={thread.id}
+      data-awaiting={!resolved && last?.by === "agent" ? "1" : "0"}
+      data-resolved={resolved ? "1" : "0"}
+      title={thread.file}
+      onClick={() => onOpen(thread)}
+      className={cn(
+        "flex h-[22px] w-full items-center gap-2 px-2.5 text-left text-[11.5px] hover:bg-[var(--color-hover)]",
+        resolved && "opacity-60",
+      )}
+    >
+      <span className="shrink-0 font-mono text-[var(--color-fg-faint)]" data-testid="compare-thread-id">{thread.id}</span>
+      {/* The line suffix never truncates: it is what tells two rows on one file apart. */}
+      <span className="flex min-w-0 flex-1 font-mono text-[var(--color-fg)]" data-testid="compare-thread-loc">
+        <span className="truncate">{base}</span>
+        <span className="shrink-0">{lines}</span>
+      </span>
+      {resolved && (
+        <Check className="h-3 w-3 shrink-0 text-[var(--color-fg-faint)]" data-testid="compare-thread-resolved" aria-label={t("reviewExt.resolved")} />
+      )}
+      {last && (
+        <span
+          data-testid="compare-thread-author"
+          className={cn("max-w-[40%] shrink-0 truncate", last.by === "agent" ? "text-[var(--color-accent)]" : "text-[var(--color-fg-dim)]")}
+        >
+          {last.by === "user" ? t("reviewExt.you") : last.author}
+        </span>
+      )}
+      <span data-testid="compare-thread-comments" className="flex shrink-0 items-center gap-0.5 rounded bg-[var(--color-bg-3)] px-1 text-[10.5px] tabular-nums text-[var(--color-fg-dim)]">
+        <MessageSquare className="h-2.5 w-2.5" />
+        {thread.comments.length}
+      </span>
+    </button>
   );
 }
 

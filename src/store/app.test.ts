@@ -624,6 +624,56 @@ describe("openPreviewTab", () => {
     expect(tab.revealHeading).toBeUndefined();
   });
 
+  it("carries revealThread onto a new review diff tab", () => {
+    const wsId = "ws1";
+    useApp.setState({ tabs: { [wsId]: [] } });
+
+    useApp.getState().openPreviewTab(wsId, { type: "diff", path: "a.ts", title: "a.ts", scope: "review:r1", revealThread: "r1-t2" });
+
+    expect((useApp.getState().tabs[wsId][0] as any).revealThread).toBe("r1-t2");
+  });
+
+  it("sets revealThread again on an already-open review diff tab after consumeReveal cleared it", () => {
+    const wsId = "ws1";
+    const diff: Tab = { id: "d1", type: "diff", title: "a.ts", path: "a.ts", scope: "review:r1", preview: false } as any;
+    useApp.setState({ tabs: { [wsId]: [diff] }, activeTab: { [wsId]: "d1" } });
+    const open = () => useApp.getState().openPreviewTab(wsId, { type: "diff", path: "a.ts", title: "a.ts", scope: "review:r1", revealThread: "r1-t1" });
+    const reveal = () => (useApp.getState().tabs[wsId][0] as any).revealThread;
+
+    open();
+    const first = reveal();
+    useApp.getState().consumeReveal(wsId, "d1");
+    const consumed = reveal();
+    open();
+
+    expect(first).toBe("r1-t1");
+    expect(consumed).toBeUndefined();
+    expect(reveal()).toBe("r1-t1");
+  });
+
+  it("drops a pending revealThread when the preview slot is recycled to a diff without one", () => {
+    const wsId = "ws1";
+    const preview: Tab = { id: "p1", type: "diff", title: "a.ts", path: "a.ts", scope: "review:r1", preview: true, revealThread: "r1-t1" } as any;
+    useApp.setState({ tabs: { [wsId]: [preview] }, activeTab: { [wsId]: "p1" } });
+
+    useApp.getState().openPreviewTab(wsId, { type: "diff", path: "b.ts", title: "b.ts", scope: "review:r1" });
+
+    const tab = useApp.getState().tabs[wsId][0] as any;
+    expect(tab.path).toBe("b.ts");
+    expect(tab.revealThread).toBeUndefined();
+  });
+
+  it("consumeReveal returns the same state when the tab has no pending reveal", () => {
+    const wsId = "ws1";
+    const diff: Tab = { id: "d1", type: "diff", title: "a.ts", path: "a.ts", scope: "review:r1", preview: false } as any;
+    useApp.setState({ tabs: { [wsId]: [diff] }, activeTab: { [wsId]: "d1" } });
+    const before = useApp.getState();
+
+    useApp.getState().consumeReveal(wsId, "d1");
+
+    expect(useApp.getState()).toBe(before);
+  });
+
   it("clears a stale revealHeading when the preview tab is recycled without a fragment", () => {
     // A file.md#missing-heading link set revealHeading but it was never
     // consumed (no heading matched); reusing the preview tab for another

@@ -25,6 +25,8 @@ import { cn } from "@/lib/utils";
 import { langForPath } from "@/lib/languageExts";
 import { resolveEditorTheme, editorSurfaceTheme } from "@/lib/editorTheme";
 import { reviewCommentsExtension, dispatchFileComment } from "./reviewCommentsExt";
+import { revealThread } from "./revealThread";
+import { useReviews, selectReview } from "@/store/reviews";
 import { MessageSquarePlus } from "lucide-react";
 import { ContextMenuRoot, ContextMenuTrigger, ContextMenuContent } from "@/components/ui/ContextMenu";
 import { CopyPathItems } from "./CopyPathItems";
@@ -98,6 +100,8 @@ export function DiffPane({ task, tab }: { task: Task; tab: DiffTab }) {
   // True once a comment-bearing editor is mounted (either mode). Gates the
   // header "Comment" button so it never fires into a not-yet-built view.
   const [commentable, setCommentable] = useState(false);
+  // Bumped after each view build, so a pending thread reveal runs against the new view.
+  const [built, setBuilt] = useState(0);
   // Working-tree fingerprint of this file (from the diff load), so the
   // header's "Viewed" toggle anchors to the same fp the Git panel rows use
   // (GH #42). Empty for a deletion → the toggle is hidden.
@@ -481,6 +485,7 @@ export function DiffPane({ task, tab }: { task: Task; tab: DiffTab }) {
         });
         setCommentable(canComment);
       }
+      setBuilt(n => n + 1);
     }).catch(e => alive && setErr(String(e)));
     return () => {
       alive = false;
@@ -497,6 +502,21 @@ export function DiffPane({ task, tab }: { task: Task; tab: DiffTab }) {
   const loadRemoteImages = usePrefs(s => s.loadRemoteImages);
   const reader = usePrefs(s => s.markdownReader);
   const memberDirs = useMemo(() => task.composition?.map(m => m.dir_name), [task.composition]);
+
+  // A Compare thread-list click. A previewed new file has no card to scroll
+  // to, so it flips to source first, without persisting that choice.
+  useEffect(() => {
+    const id = tab.revealThread;
+    const view = mergeRef.current?.b ?? editorRef.current;
+    if (!id || !view) return;
+    if (showingPreview) { setNewView("source"); return; }
+    useApp.getState().consumeReveal(task.id, tab.id);
+    const th = reviewId ? selectReview(task.id, reviewId)(useReviews.getState())?.threads.find(t => t.id === id) : undefined;
+    // A file-level card sits above line 1. Side-by-side scrolls the merge
+    // view's own box; unified scrolls the editor.
+    if (th && !revealThread(view, th)) (mergeRef.current?.dom ?? view.scrollDOM).scrollTop = 0;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab.revealThread, built, showingPreview]);
 
   return (
     // bg MUST be opaque: tab swap keeps the codex/claude terminal
@@ -606,6 +626,7 @@ export function DiffPane({ task, tab }: { task: Task; tab: DiffTab }) {
           )}>
             <button
               type="button"
+              data-testid="diff-mode-unified"
               title={tr("diff.unifiedTip")}
               onClick={() => setModeAndPersist("unified")}
               className={cn(
@@ -617,6 +638,7 @@ export function DiffPane({ task, tab }: { task: Task; tab: DiffTab }) {
             ><AlignJustify className="h-3.5 w-3.5" /></button>
             <button
               type="button"
+              data-testid="diff-mode-side"
               title={oneSided ? tr("diff.sideBySideUnavailable") : tr("diff.sideBySideTip")}
               disabled={oneSided}
               onClick={() => setModeAndPersist("side")}

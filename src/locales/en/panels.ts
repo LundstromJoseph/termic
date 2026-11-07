@@ -397,6 +397,7 @@ export default {
       threadMany: "{{count}} review threads",
       awaitingOne: "1 thread awaits your reply",
       awaitingMany: "{{count}} threads await your reply",
+      threads: "Threads",
     },
   },
 

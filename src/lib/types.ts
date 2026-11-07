@@ -1912,6 +1912,9 @@ export interface DiffTab extends BaseTab {
    *  Git panel is the other way to ask, which is why this lives on the tab
    *  rather than inside the pane. Transient. */
   reloadNonce?: number;
+  /** Thread id to scroll to once the diff renders. Review diffs only. Set by
+   *  a Compare thread-list click, consumed via `consumeReveal`. Transient. */
+  revealThread?: string;
 }
 
 /** The complete delta a task produced vs its base (`task_diff`). `diff` folds

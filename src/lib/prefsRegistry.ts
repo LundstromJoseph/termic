@@ -195,6 +195,7 @@ export const PREF_KEYS: readonly PrefKey[] = [
   { key: "gitHideUntracked", scoped: false, class: "local", reason: "last-used toggle in the Git panel" },
   { key: "gitPushDefault", scoped: false, class: "local", reason: "last-used commit button (commit, or commit and push)" },
   { key: "gitCompareMergeBase", scoped: false, class: "local", reason: "last-used toggle in Compare" },
+  { key: "compareThreadsOpen", scoped: false, class: "local", reason: "collapse state" },
   { key: "gitSplitRatio", scoped: false, class: "local", reason: "panel size" },
   { key: "gitUnstagedCollapsed", scoped: false, class: "local", reason: "collapse state" },
   { key: "gitStagedCollapsed", scoped: false, class: "local", reason: "collapse state" },

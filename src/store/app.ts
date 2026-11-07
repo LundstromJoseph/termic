@@ -419,9 +419,9 @@ export interface AppState {
    *  in place, the preview slot is never recycled, and a new tab is created
    *  non-preview. For deliberate opens (cmd+click in a terminal, the file
    *  finder), where the user asked for THAT file and expects it to stay. */
-  openPreviewTab: (taskId: string, data: { type: "edit" | "diff" | "dir" | "external"; path: string; title: string; scope?: DiffTab["scope"]; revealAt?: { line: number; col?: number }; revealHeading?: string; permanent?: boolean }) => void;
-  /** Clear an edit tab's `revealAt` after EditorPane has consumed it,
-   *  so a re-render doesn't re-jump the cursor. */
+  openPreviewTab: (taskId: string, data: { type: "edit" | "diff" | "dir" | "external"; path: string; title: string; scope?: DiffTab["scope"]; revealThread?: string; revealAt?: { line: number; col?: number }; revealHeading?: string; permanent?: boolean }) => void;
+  /** Clear an edit tab's `revealAt` (or a diff tab's `revealThread`) once
+   *  its pane has consumed it, so a re-render doesn't re-jump the scroll. */
   consumeReveal: (taskId: string, tabId: string) => void;
   patchTab: (taskId: string, tabId: string, patch: Partial<Tab>) => void;
   /** Turn a promoted scratchpad (GH #244) into an ordinary `edit` tab on
@@ -2807,6 +2807,7 @@ export const useApp = create<AppState>((set, get) => ({
       // a preview slot to another file (or the same file from the other
       // Git pane) must adopt the new scope, never keep the old one.
       scope: data.type === "diff" ? data.scope : undefined,
+      revealThread: data.type === "diff" ? data.revealThread : undefined,
       // Folder history (issue #151) is per-tab-occupant, exactly like the
       // reveal targets above: a recycled slot starts a fresh trail at the
       // folder it just landed on, so ⌘[ can never walk back into whatever
@@ -2823,9 +2824,10 @@ export const useApp = create<AppState>((set, get) => ({
     // jump whose EditorPane effect hasn't run yet when a second, unrelated
     // openPreviewTab call for the same file lands first).
     const withNewRevealOnly = (existing: Tab) => {
-      const patch: { revealAt?: unknown; revealHeading?: unknown; reloadNonce?: number } = {};
+      const patch: { revealAt?: unknown; revealHeading?: unknown; revealThread?: string; reloadNonce?: number } = {};
       if ((data.type === "edit" || data.type === "external") && data.revealAt !== undefined) patch.revealAt = data.revealAt;
       if (data.type === "edit" && data.revealHeading !== undefined) patch.revealHeading = data.revealHeading;
+      if (data.type === "diff" && data.revealThread !== undefined) patch.revealThread = data.revealThread;
       // Opening a diff that is ALREADY open re-reads it (GH #266). Clicking
       // the file in the Git panel used to just focus the tab, so a file the
       // agent had rewritten kept showing the old content and closing and
@@ -2935,10 +2937,12 @@ export const useApp = create<AppState>((set, get) => ({
 
   consumeReveal: (taskId, tabId) => set(s => {
     const list = s.tabs[taskId] || [];
-    if (!list.some(t => t.id === tabId && t.type === "edit" && (t as any).revealAt)) return s;
-    const next = list.map(t => t.id === tabId && t.type === "edit"
-      ? { ...t, revealAt: undefined } as Tab
-      : t);
+    const tab = list.find(t => t.id === tabId);
+    const patch = tab?.type === "edit" && tab.revealAt ? { revealAt: undefined }
+      : tab?.type === "diff" && tab.revealThread ? { revealThread: undefined }
+      : null;
+    if (!patch) return s;
+    const next = list.map(t => t === tab ? { ...t, ...patch } as Tab : t);
     return { tabs: { ...s.tabs, [taskId]: next } };
   }),
 

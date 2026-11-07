@@ -4,7 +4,8 @@ Status: idea. Nothing here is decided or scheduled. The MVP (`termic present
 new|comment|reply|show|list|claim`, Compare review mode, thread cards,
 single and batch Send through the agent queue) shipped on the
 `review-improvements` branch, and resolve / unresolve (`present
-resolve|unresolve`, the Resolved chip, collapsed cards) on `present-v2`.
+resolve|unresolve`, the Resolved chip, collapsed cards) and the Compare
+thread list on `present-v2`.
 This file lists what was deliberately left
 out of it, plus gaps found while building and smoke-testing it.
 
@@ -14,43 +15,36 @@ docs/cli-agent-instructions.md (agent briefing).
 
 ## Features
 
-1. **Thread list.** The UI has no review-wide list of threads: Compare's
-   review mode only shows a per-file thread count, and threads appear
-   inline in each diff. `termic present show <id>` is the only full list.
-   Sketch: a collapsible section under the review bar in Compare, one row
-   per thread (id, `file:line`, last author, comment count), click opens
-   the `review:<id>` diff scrolled to the thread. Raised by the user
-   during the smoke test.
-2. **Rounds: move a review's head.** `present update <id> --head <rev>`
+1. **Rounds: move a review's head.** `present update <id> --head <rev>`
    after an amend, rebase or new commit. Re-anchor threads by their stored
    quote, mark the ones that no longer match as `outdated`. Today a new
    round means a new review, and old threads stay on the old one.
    `outdated` is its own thread field, independent of `resolved`.
-3. **Comments on the old side.** `--side old` and a commentable left pane,
+2. **Comments on the old side.** `--side old` and a commentable left pane,
    so deleted lines can carry a comment. The file format already has
    `side`.
-4. **Bounded `present wait <id> --timeout`.** Block until the user posts,
+3. **Bounded `present wait <id> --timeout`.** Block until the user posts,
    on the AgentCache seq+condvar pattern (cli_server.rs `watch_agent`),
    clamped like the MCP wait cap. Push stays the primary path; this is for
    agents that want to idle on a review.
-5. **Cross-task claim.** Let a tab in another task take over a review.
+4. **Cross-task claim.** Let a tab in another task take over a review.
    Needs `recipient_task_id` on the review. MVP restricts claim to the
    review's own task.
-6. **User-started reviews.** Pick a range in Compare and start commenting
+5. **User-started reviews.** Pick a range in Compare and start commenting
    without an agent having presented it. Open question: which tab
    receives the comments.
-7. **Author name setting.** MVP uses `--author`, defaulting to the
+6. **Author name setting.** MVP uses `--author`, defaulting to the
    agent's display name (e.g. `lead`). A per-agent or per-project setting
    would save passing the flag every time.
-8. **One message per recipient.** The pending bar sends one message per
+7. **One message per recipient.** The pending bar sends one message per
    review, so two reviews with the same recipient tab produce two
    messages. Merge them if that turns out noisy.
-9. **GitHub-style multi-file view.** One scrolling diff of the whole
-    range instead of Compare rows plus per-file tabs. Much bigger than the
-    rest of this list.
-10. **Caged / Docker agents.** No CLI socket, so they cannot use
-    `present`. A worktree-file route would work, but it is a second realm
-    to keep in step (docs/gotchas.md "Docker is a SECOND REALM").
+8. **GitHub-style multi-file view.** One scrolling diff of the whole
+   range instead of Compare rows plus per-file tabs. Much bigger than the
+   rest of this list.
+9. **Caged / Docker agents.** No CLI socket, so they cannot use
+   `present`. A worktree-file route would work, but it is a second realm
+   to keep in step (docs/gotchas.md "Docker is a SECOND REALM").
 
 ## Gaps and checks
 
@@ -65,6 +59,10 @@ docs/cli-agent-instructions.md (agent briefing).
   unpinned by a test).
 - **Diff open time unmeasured** for `review:` diffs (the <100ms editor
   open budget).
+- **Opening from a file row hides some threads.** Only a thread-list
+  click reveals a thread. A file row opens the diff at the top, so a
+  thread inside an "N unchanged lines" fold stays folded, and one on a new
+  markdown/HTML/SVG file stays behind the rendered preview.
 - **Refused post toast.** When `review_post` refuses a composer Send, the
   text goes back into the pending list as a draft, but the toast does not
   say so.

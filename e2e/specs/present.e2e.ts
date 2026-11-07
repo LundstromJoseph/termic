@@ -694,4 +694,215 @@ describe("agent-presented review", () => {
     await browser.waitUntil(async () => (await awaiting()) === open,
       { timeout: 10_000, timeoutMsg: "the awaiting count never came back after the agent's reply" });
   });
+
+  // ── Thread list ─────────────────────────────────────────────────────────
+
+  /** The Compare thread list's rows as drawn. */
+  const threadRows = () =>
+    browser.execute(() => [...document.querySelectorAll<HTMLElement>('[data-testid="compare-thread-row"]')].map(r => ({
+      id: r.dataset.thread!,
+      loc: r.querySelector('[data-testid="compare-thread-loc"]')?.textContent ?? null,
+      author: r.querySelector('[data-testid="compare-thread-author"]')?.textContent ?? null,
+      comments: r.querySelector('[data-testid="compare-thread-comments"]')?.textContent ?? null,
+      awaiting: r.dataset.awaiting!,
+      resolved: r.dataset.resolved!,
+    }))) as Promise<{ id: string; loc: string | null; author: string | null; comments: string | null; awaiting: string; resolved: string }[]>;
+
+  /** Row lists compared field by field: objects back from WebKit come in any key order. */
+  const same = (a: Record<string, unknown>[], b: Record<string, unknown>[]) =>
+    a.length === b.length && a.every((r, i) => Object.keys(b[i]).every(k => r[k] === b[i][k]));
+
+  /** The rows the list should draw, derived from the stored review rather than hardcoded. */
+  const expectedRows = async (reviewId: string) => {
+    const r = await cliRpc({ cmd: "present_show", task: taskId, review: reviewId });
+    expect(r.ok).toBe(true);
+    return (r.data.review.threads as any[]).map((th) => {
+      const last = th.comments[th.comments.length - 1];
+      const base = th.file.split("/").pop();
+      const loc = th.start_line === null ? base
+        : th.end_line === null || th.end_line === th.start_line ? `${base}:${th.start_line}`
+        : `${base}:${th.start_line}–${th.end_line}`;
+      return {
+        id: th.id, loc, author: last.by === "user" ? "You" : last.author, comments: String(th.comments.length),
+        awaiting: !th.resolved && last.by === "agent" ? "1" : "0", resolved: th.resolved ? "1" : "0",
+      };
+    });
+  };
+
+  it("lists the shown review's threads with id, place, last author and comment count", async () => {
+    await waitForReview("r1", "the panel is not on r1");
+    await browser.waitUntil(async () => same(await threadRows(), await expectedRows("r1")),
+      { timeout: 10_000, timeoutMsg: "the thread list never matched r1's threads" });
+    const before = (await threadRows()).find(r => r.id === "r1-t2")!;
+
+    const r = await cliRpc({ cmd: "present_reply", task: taskId, thread: "r1-t2", body: `listed ${stamp}` });
+
+    expect(r.ok).toBe(true);
+    await browser.waitUntil(async () => (await threadRows()).find(r => r.id === "r1-t2")?.comments === String(Number(before.comments) + 1),
+      { timeout: 10_000, timeoutMsg: "the row never counted the agent's reply" });
+    expect((await threadRows()).find(r => r.id === "r1-t2")).toMatchObject({ author: "FakeAgent", awaiting: "1" });
+    expect(await threadRows()).toEqual(await expectedRows("r1"));
+    await snap("present-thread-list.png");
+
+    await clickIn('[data-testid="compare-threads-toggle"]');
+    const hidden = (await threadRows()).length;
+    await clickIn('[data-testid="compare-threads-toggle"]');
+    expect(hidden).toBe(0);
+    expect((await threadRows()).length).toBe((await expectedRows("r1")).length);
+  });
+
+  describe("revealing a thread from the list", () => {
+    let reviewId = "";
+    const thread = async (file: string, lines?: [number, number]) => {
+      const r = await cliRpc({
+        cmd: "present_comment", task: taskId, review: reviewId, file, body: `on ${file} ${lines?.[0] ?? "file"}`,
+        ...(lines ? { start_line: lines[0], end_line: lines[1] } : {}),
+      });
+      expect(r.ok).toBe(true);
+      return r.data.thread_id as string;
+    };
+    let t20 = "", t190 = "", tLong = "", tNotes = "";
+
+    /** The visible review diff: whether `threadId`'s card sits inside its scroll
+     *  host, the folds on each merge pane, and the new-file preview. */
+    const revealState = (threadId: string) =>
+      browser.execute((tid, th) => {
+        const pane = [...document.querySelectorAll(`[data-task-id="${tid}"] [data-testid="diff-pane"]`)]
+          .find(e => (e as HTMLElement).offsetParent !== null);
+        // Side-by-side scrolls the merge view's box, unified the editor's scroller.
+        const host = (pane?.querySelector(".cm-mergeView") ?? pane?.querySelector(".cm-scroller")) as HTMLElement | null;
+        const card = pane?.querySelector<HTMLElement>(`.tc-thread-card[data-thread-id="${th}"]`);
+        const h = host?.getBoundingClientRect();
+        const c = card?.getBoundingClientRect();
+        const entry = card?.querySelector(".tc-thread-entry");
+        const preview = pane?.querySelector('[data-testid="diff-new-preview"]') as HTMLElement | null;
+        return {
+          scope: (window.__termic!.useApp.getState().tabs[tid] ?? [])
+            .find((t: any) => t.id === window.__termic!.useApp.getState().activeTab[tid])?.scope ?? null,
+          visible: !!(h && c && c.height > 0 && c.top >= h.top && c.top < h.bottom),
+          expanded: entry ? getComputedStyle(entry).display !== "none" : null,
+          foldsA: pane?.querySelectorAll(".cm-merge-a .cm-collapsedLines").length ?? 0,
+          foldsB: pane?.querySelectorAll(".cm-merge-b .cm-collapsedLines").length ?? 0,
+          preview: !!preview && preview.offsetParent !== null,
+          scrollTop: host?.scrollTop ?? 0,
+        };
+      }, taskId, threadId);
+
+    /** Scrolls the visible diff to the bottom until `threadId`'s card is out of view. */
+    const scrollAwayFrom = (threadId: string) =>
+      browser.waitUntil(async () => {
+        await browser.execute((tid) => {
+          const pane = [...document.querySelectorAll(`[data-task-id="${tid}"] [data-testid="diff-pane"]`)]
+            .find(e => (e as HTMLElement).offsetParent !== null)!;
+          const host = (pane.querySelector(".cm-mergeView") ?? pane.querySelector(".cm-scroller")) as HTMLElement;
+          host.scrollTop = host.scrollHeight;
+        }, taskId);
+        await flushEditorMeasure();
+        return !(await revealState(threadId)).visible;
+      }, { timeout: 10_000, timeoutMsg: `the diff never scrolled away from ${threadId}` });
+
+    const waitRevealed = (threadId: string, msg: string) =>
+      browser.waitUntil(async () => { await flushEditorMeasure(); return (await revealState(threadId)).visible; },
+        { timeout: 10_000, timeoutMsg: msg });
+
+    before(async () => {
+      const cwd = await browser.execute((id) =>
+        window.__termic!.useApp.getState().tasks.find((t: any) => t.id === id).path as string, taskId);
+      const lines = Array.from({ length: 200 }, (_, i) => `long ${i + 1}`);
+      writeFileSync(path.join(cwd, "present-long.txt"), `${lines.join("\n")}\n`);
+      execGit(`git -C "${cwd}" add present-long.txt`);
+      execGit(`git -C "${cwd}" commit -q -m "e2e present long ${stamp}"`);
+      lines[189] = "long 190 edited";
+      writeFileSync(path.join(cwd, "present-long.txt"), `${lines.join("\n")}\n`);
+      writeFileSync(path.join(cwd, "present-notes.md"), "# Notes\n\nSome notes.\n");
+      execGit(`git -C "${cwd}" add present-long.txt present-notes.md`);
+      execGit(`git -C "${cwd}" commit -q -m "e2e present edit ${stamp}"`);
+      const r = await cliRpc({ cmd: "present_new", task: taskId, range: "HEAD~1..HEAD", title: "Long file", tab: agentTab });
+      expect(r.ok).toBe(true);
+      reviewId = r.data.review.id;
+      await waitForReview(reviewId, "the long-file review never showed");
+      t20 = await thread("present-long.txt", [20, 20]);
+      t190 = await thread("present-long.txt", [190, 190]);
+      tLong = await thread("present-long.txt");
+      tNotes = await thread("present-notes.md");
+      await browser.execute(() => {
+        localStorage.setItem("diffMode", "unified");
+        localStorage.setItem("diffNewFileView", "preview");
+      });
+      await waitVisible(`[data-testid="compare-thread-row"][data-thread="${t20}"]`);
+    });
+
+    after(async () => {
+      await browser.execute(() => localStorage.setItem("diffMode", "unified")).catch(() => {});
+    });
+
+    it("keeps a row's line suffix whole when its file name truncates", async () => {
+      const suffixes = await browser.execute((ids) => ids.map((id) => {
+        const loc = document.querySelector(`[data-testid="compare-thread-row"][data-thread="${id}"] [data-testid="compare-thread-loc"]`)!;
+        const [name, suffix] = [...loc.children] as HTMLElement[];
+        return { text: suffix.textContent, whole: suffix.scrollWidth <= suffix.clientWidth && suffix.getBoundingClientRect().right <= loc.getBoundingClientRect().right + 0.5, name: name.textContent };
+      }), [t20, t190]);
+
+      expect(suffixes).toEqual([
+        { text: ":20", whole: true, name: "present-long.txt" },
+        { text: ":190", whole: true, name: "present-long.txt" },
+      ]);
+    });
+
+    it("opens a thread's diff scrolled to it, expanding the fold it sits in", async () => {
+      await clickIn(`[data-testid="compare-thread-row"][data-thread="${t20}"]`);
+
+      await waitRevealed(t20, "the line-20 card never came into view on open");
+      expect((await revealState(t20)).scope).toBe(`review:${reviewId}`);
+      await snap("present-thread-reveal.png");
+
+      await scrollAwayFrom(t20);
+      await clickIn(`[data-testid="compare-thread-row"][data-thread="${t20}"]`);
+
+      await waitRevealed(t20, "a second click on the open diff never scrolled back to the card");
+    });
+
+    it("scrolls back to the top for a file-level thread", async () => {
+      await clickIn(`[data-testid="compare-thread-row"][data-thread="${t20}"]`);
+      await waitRevealed(t20, "the line-20 card never came into view");
+      await scrollAwayFrom(tLong);
+
+      await clickIn(`[data-testid="compare-thread-row"][data-thread="${tLong}"]`);
+
+      await waitRevealed(tLong, "the file-level card never came back into view");
+    });
+
+    it("expands the fold on both sides in side-by-side", async () => {
+      await clickIn('[data-testid="diff-mode-side"]');
+      await browser.waitUntil(async () => (await revealState(t20)).foldsA > 0,
+        { timeout: 10_000, timeoutMsg: "side-by-side never rebuilt with folds" });
+
+      await clickIn(`[data-testid="compare-thread-row"][data-thread="${t20}"]`);
+
+      await waitRevealed(t20, "the line-20 card never came into view in side-by-side");
+      const s = await revealState(t20);
+      expect(s.foldsA).toBe(s.foldsB);
+      await clickIn('[data-testid="diff-mode-unified"]');
+    });
+
+    it("expands a resolved thread's card when revealing it", async () => {
+      const r = await cliRpc({ cmd: "present_resolve", task: taskId, thread: t190, resolved: true });
+      expect(r.ok).toBe(true);
+      await browser.waitUntil(async () => (await revealState(t190)).expanded === false,
+        { timeout: 10_000, timeoutMsg: "the resolved card never collapsed" });
+
+      await clickIn(`[data-testid="compare-thread-row"][data-thread="${t190}"]`);
+
+      await waitRevealed(t190, "the resolved card never came into view");
+      expect((await revealState(t190)).expanded).toBe(true);
+    });
+
+    it("shows a new markdown file's thread in source, not preview", async () => {
+      await clickIn(`[data-testid="compare-thread-row"][data-thread="${tNotes}"]`);
+
+      await waitRevealed(tNotes, "the markdown file's thread never showed");
+      expect((await revealState(tNotes)).preview).toBe(false);
+      expect(await browser.execute(() => localStorage.getItem("diffNewFileView"))).toBe("preview");
+    });
+  });
 });
