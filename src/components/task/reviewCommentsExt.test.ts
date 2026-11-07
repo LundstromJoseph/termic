@@ -764,6 +764,18 @@ describe("agent-presented review threads in a review: diff", () => {
     expect(view.state.doc.lineAt(view.posAtDOM(cards(view)[0])).number).toBe(2);
   });
 
+  it("holds a view mounted before the review loaded on the first round it sees when a newer round lands", async () => {
+    const view = mountReview(FILE, undefined, { to: null, round: 0 });
+    await settle();
+    putReview(1, [thread("r1-t1", FILE, [2, 2], "agent")]);
+    await settle();
+
+    putReview(2, [thread("r1-t1", FILE, [4, 4], "agent")], "", 2);
+    await settle();
+
+    expect(view.state.doc.lineAt(view.posAtDOM(cards(view)[0])).number).toBe(2);
+  });
+
   it("tells the host when a composer opens and when it closes", async () => {
     const heard: boolean[] = [];
     const view = mountReview(FILE, undefined, { to: null, round: 1, onComposer: open => heard.push(open) });

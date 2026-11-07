@@ -466,10 +466,14 @@ function reviewSyncPlugin(taskId: string, reviewId: string, file: string, to: nu
   return ViewPlugin.define((view): PluginValue => {
     let destroyed = false;
     let lastSig = "[]";
+    let shown = built;
     const push = () => {
       if (destroyed) return;
       const review = selectReview(taskId, reviewId)(useReviews.getState());
-      if (review && to == null && built && review.rounds.length !== built) return;
+      // Mounted before the store loaded: the host does not rebuild on that
+      // load, so the view shows the round the first push sees.
+      if (review && to == null && !shown) shown = review.rounds.length;
+      if (review && to == null && review.rounds.length !== shown) return;
       const threads = review ? threadsInView(review, file, to) : [];
       const sig = JSON.stringify(threads.map(t =>
         [t.id, t.comments.length, !!t.resolved, t.file, t.start_line, t.end_line, t.outdated ?? 0]));

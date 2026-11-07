@@ -35887,7 +35887,7 @@ filename f.rs
             let other_repo = task_file_diff_sides_for_task(&task, "frontend/committed.txt", Some("review:r1"));
 
             assert!(malformed_id.is_err());
-            assert!(malformed_sha.as_ref().is_err_and(|e| e.ends_with("r2.json: review rounds must be commit shas")), "{:?}", malformed_sha.err());
+            assert!(malformed_sha.as_ref().is_err_and(|e| e.ends_with("r2.json: review ranges must be commit shas")), "{:?}", malformed_sha.err());
             assert_eq!(other_repo.err().as_deref(), Some("frontend/committed.txt is not in review r1's repo"));
         });
     }
