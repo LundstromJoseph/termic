@@ -1,6 +1,6 @@
 // Which round a review diff shows, and which threads it draws there.
 import { describe, it, expect } from "vitest";
-import { effectiveView, parseReviewScope, reviewScope, threadAnchor, threadsInView } from "./reviewScope";
+import { effectiveView, parseReviewScope, pickTo, reviewScope, threadAnchor, threadsInView } from "./reviewScope";
 import type { Review, ReviewRound, ReviewThread } from "./types";
 
 const ROUND: ReviewRound = { base: "a", head: "b", base_ref: "main", head_ref: "HEAD", at: "" };
@@ -69,6 +69,19 @@ describe("effectiveView", () => {
 
     expect(effectiveView(r, { from: 1, to: 3, rounds: 3 })).toEqual({ from: 1, to: null });
     expect(effectiveView(r, { from: 2, to: 2, rounds: 3 })).toEqual({ from: null, to: 2 });
+  });
+});
+
+describe("pickTo", () => {
+  it("keeps a From below the picked To and stores the latest round as null", () => {
+    expect(pickTo(1, 3, 3)).toEqual({ from: 1, to: null });
+    expect(pickTo(1, 2, 3)).toEqual({ from: 1, to: 2 });
+    expect(pickTo(null, 2, 3)).toEqual({ from: null, to: 2 });
+  });
+
+  it("resets a From at or past the picked To to Base", () => {
+    expect(pickTo(2, 2, 3)).toEqual({ from: null, to: 2 });
+    expect(pickTo(2, 1, 3)).toEqual({ from: null, to: 1 });
   });
 });
 

@@ -8,6 +8,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{LazyLock, Mutex};
 
 use termic_proto::{Review, ReviewOutdated, ReviewRound, ReviewThread};
@@ -123,34 +124,51 @@ pub(crate) enum Replay {
 
 type ReplayKey = (PathBuf, String, String, String);
 
-/// Replayed trees by repo and the three shas. Not pinned by any ref, so gc
-/// prunes a tree after gc.pruneExpire; a hit is checked and recomputed then.
-static REPLAYS: LazyLock<Mutex<HashMap<ReplayKey, (String, Vec<String>)>>> = LazyLock::new(Default::default);
+/// Replayed trees by repo and the three shas, None for a merge that answered
+/// with a conflict naming no file. Not pinned by any ref, so gc prunes a tree
+/// after gc.pruneExpire; a hit is checked and recomputed then.
+static REPLAYS: LazyLock<Mutex<HashMap<ReplayKey, Option<(String, Vec<String>)>>>> = LazyLock::new(Default::default);
 const REPLAYS_MAX: usize = 64;
+/// Set once merge-tree exits 129: this git lacks `--merge-base`, so no key
+/// will ever replay and none is worth a spawn.
+static NO_MERGE_BASE: AtomicBool = AtomicBool::new(false);
 
 pub(crate) fn replay(cwd: &Path, k_base: &str, k_head: &str, n_base: &str) -> Replay {
     if k_base == n_base {
         return Replay::Clean { left: k_head.to_string(), conflicted: HashSet::new() };
     }
+    if NO_MERGE_BASE.load(Ordering::Relaxed) {
+        return Replay::Unavailable;
+    }
     let key = (cwd.to_path_buf(), k_base.to_string(), k_head.to_string(), n_base.to_string());
     let clean = |(tree, conflicted): (String, Vec<String>)| Replay::Clean { left: tree, conflicted: conflicted.into_iter().collect() };
     let hit = REPLAYS.lock().unwrap().get(&key).cloned();
-    if let Some(hit) = hit {
-        if crate::git_output(&["cat-file", "-e", &hit.0], cwd, None).is_ok_and(|o| o.status.success()) {
+    match hit {
+        Some(None) => return Replay::Unavailable,
+        Some(Some(hit)) if crate::git_output(&["cat-file", "-e", &hit.0], cwd, None).is_ok_and(|o| o.status.success()) => {
             return clean(hit);
         }
+        _ => {}
     }
     let merge_base = format!("--merge-base={k_base}");
     let Ok(out) = crate::git_output(&["merge-tree", "--write-tree", "-z", "--name-only", &merge_base, n_base, k_head], cwd, None) else {
         return Replay::Unavailable;
     };
-    let Some(result) = merge_tree_result(out.status.code(), &out.stdout) else { return Replay::Unavailable };
+    let code = out.status.code();
+    if code == Some(129) {
+        NO_MERGE_BASE.store(true, Ordering::Relaxed);
+    }
+    let result = merge_tree_result(code, &out.stdout);
+    // Exit 1 is the merge's answer for these shas; any other failure may not repeat.
+    if result.is_none() && code != Some(1) {
+        return Replay::Unavailable;
+    }
     let mut memo = REPLAYS.lock().unwrap();
     if memo.len() >= REPLAYS_MAX {
         memo.clear();
     }
     memo.insert(key, result.clone());
-    clean(result)
+    result.map_or(Replay::Unavailable, clean)
 }
 
 /// 0 is clean, 1 is conflicted; anything else (129: an option this git does
@@ -457,7 +475,7 @@ mod tests {
         let cwd = dir.path();
         let gone = "0123".repeat(10);
         let key = (cwd.to_path_buf(), k_base.clone(), k_head.clone(), n_base.clone());
-        REPLAYS.lock().unwrap().insert(key.clone(), (gone.clone(), vec![]));
+        REPLAYS.lock().unwrap().insert(key.clone(), Some((gone.clone(), vec![])));
 
         let r = replay(cwd, &k_base, &k_head, &n_base);
 
@@ -466,7 +484,19 @@ mod tests {
         assert!(conflicted.is_empty());
         assert_eq!(git(cwd, &["show", &format!("{left}:a.txt")]), "a2", "round K's change");
         assert_eq!(git(cwd, &["show", &format!("{left}:up.txt")]), "up", "on the new base");
-        assert_eq!(REPLAYS.lock().unwrap().get(&key).map(|v| v.0.clone()), Some(left));
+        assert_eq!(REPLAYS.lock().unwrap().get(&key).cloned().flatten().map(|v| v.0), Some(left));
+    }
+
+    #[test]
+    fn replay_answers_a_memoized_conflict_that_names_no_file_as_unavailable_without_rerunning_the_merge() {
+        let (dir, k_base, k_head, n_base) = replay_repo();
+        let cwd = dir.path();
+        REPLAYS.lock().unwrap().insert((cwd.to_path_buf(), k_base.clone(), k_head.clone(), n_base.clone()), None);
+
+        // These shas replay cleanly, so only the memo can answer Unavailable.
+        let r = replay(cwd, &k_base, &k_head, &n_base);
+
+        assert_eq!(r, Replay::Unavailable);
     }
 
     fn review_with_rounds(n: usize) -> Review {

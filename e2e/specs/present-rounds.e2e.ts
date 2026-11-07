@@ -401,4 +401,34 @@ describe("review rounds picker", () => {
     await browser.waitUntil(async () => (await pressedFrom()) === "1",
       { timeout: 10_000, timeoutMsg: "a new round did not drop the viewer's pick for the default" });
   });
+
+  it("the To dropdown keeps a From below the picked round and resets one at or past it to Base", async () => {
+    // Radix opens on pointerdown, so a bare .click() isn't enough.
+    const pickTo = async (round: number) => {
+      await browser.execute(() => {
+        const el = document.querySelector('[data-testid="compare-round-to"]') as HTMLElement;
+        const opts = { bubbles: true, pointerType: "mouse", button: 0 } as PointerEventInit;
+        el.dispatchEvent(new PointerEvent("pointerdown", opts));
+        el.dispatchEvent(new PointerEvent("pointerup", opts));
+        el.click();
+      });
+      await waitVisible(`[data-testid="compare-round-to-item"][data-to="${round}"]`);
+      await clickIn(`[data-testid="compare-round-to-item"][data-to="${round}"]`);
+    };
+    const shownTo = () => browser.execute(() =>
+      document.querySelector('[data-testid="compare-round-to"]')?.getAttribute("data-to") ?? null);
+
+    await pickTo(2);
+
+    await browser.waitUntil(async () => (await shownTo()) === "2" && (await pressedFrom()) === "1",
+      { timeout: 10_000, timeoutMsg: "To round 2 did not keep From round 1" });
+    await waitRows([`${FILE} M`], "Round 1 -> 2 was not listed after picking To round 2");
+
+    await pickTo(1);
+
+    await browser.waitUntil(async () => (await shownTo()) === "1" && (await pressedFrom()) === "base",
+      { timeout: 10_000, timeoutMsg: "To round 1 did not reset From round 1 to Base" });
+    // Round 1 against its own base, from before the rebase.
+    await waitRows([`${FILE} A`], "round 1 against its base was not listed");
+  });
 });

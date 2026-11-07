@@ -47,7 +47,7 @@ import {
 } from "lucide-react";
 import type { GitCompare, GitFile, Review, ReviewThread, Task } from "@/lib/types";
 import { taskGitCompare, taskReviewRange, taskGitRefs } from "@/lib/ipc";
-import { effectiveView, reviewScope, threadAnchor } from "@/lib/reviewScope";
+import { effectiveView, pickTo, reviewScope, threadAnchor } from "@/lib/reviewScope";
 import { useApp } from "@/store/app";
 import { useReviews, useReview, useTaskReviewIds } from "@/store/reviews";
 import { useFileViewed, useIsViewed } from "@/store/fileViewed";
@@ -151,7 +151,7 @@ export function ComparePanel({ task, repoDir, search, viewMode, reloadToken, onO
   const viewTo = rv?.to ?? null;
   const reviewKey = review ? `${task.id}/${review.id}/${review.rounds.length}/${viewFrom ?? ""}/${viewTo ?? ""}` : null;
   /** The shown review's file list, keyed by task/review/round/view. A round's
-   *  range never changes, so it is read once per view and never on reloadToken. */
+   *  range never changes, so it is read on a view change and never on reloadToken. */
   const [range, setRange] = useState<{
     key: string; cmp: GitCompare | null; err: string | null; fallback: boolean; upstream: ReadonlySet<string>;
   } | null>(null);
@@ -198,7 +198,9 @@ export function ComparePanel({ task, repoDir, search, viewMode, reloadToken, onO
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reviewKey]);
 
-  const shownRange = reviewKey && range?.key === reviewKey ? range : null;
+  // Another view of the same review keeps its rows up until the new ones
+  // arrive, so a From or To click does not blank the list for a frame.
+  const shownRange = review && range?.key.startsWith(`${task.id}/${review.id}/`) ? range : null;
   const view = review
     ? { cmp: shownRange?.cmp ?? null, err: shownRange?.err ?? null, loading: !shownRange }
     : { cmp, err, loading };
@@ -619,8 +621,7 @@ function ReviewRoundsBar({ review, from, to, onPick }: {
               key={i}
               data-testid="compare-round-to-item"
               data-to={i + 1}
-              // A From at or past the new To would compare backwards: back to Base.
-              onSelect={() => onPick(from != null && from >= i + 1 ? null : from, i + 1 === n ? null : i + 1)}
+              onSelect={() => { const v = pickTo(from, i + 1, n); onPick(v.from, v.to); }}
               className="items-center"
             >
               <Check className={cn("h-3.5 w-3.5 shrink-0", i + 1 !== end && "opacity-0")} />

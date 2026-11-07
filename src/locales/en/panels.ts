@@ -408,8 +408,8 @@ export default {
       fromTip: "What changed from round {{k}} to round {{n}}",
       toTip: "The round the diff shows",
       upstream: "upstream",
-      upstreamTip: "This file conflicted when round {{k}} was replayed onto round {{n}}'s base, so its diff includes upstream changes",
-      fallback: "This git cannot replay round {{k}} onto round {{n}}'s base, so the list includes upstream changes in the files either round touched.",
+      upstreamTip: "This file conflicted when round {{k}} was replayed onto round {{n}}'s base, so its diff runs from round {{k}}'s head and includes upstream changes. An empty diff means the resolution dropped them.",
+      fallback: "Round {{k}} could not be replayed onto round {{n}}'s base, so the list includes upstream changes in the files either round touched.",
     },
   },
 

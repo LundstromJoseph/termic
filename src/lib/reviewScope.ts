@@ -42,6 +42,12 @@ export function effectiveView(review: Review, pick?: ReviewView & { rounds: numb
   return { from, to };
 }
 
+/** The view after picking To round `to` of `n`: the latest is stored as null,
+ *  and a From at or past the new To would compare backwards, so it resets to Base. */
+export function pickTo(from: number | null, to: number, n: number): ReviewView {
+  return { from: from != null && from >= to ? null : from, to: to === n ? null : to };
+}
+
 /** A new-thread draft written on a round the review has since moved past.
  *  Its lines are that round's head's, so it waits to be rewritten on the new
  *  diff and is never sent. A reply has no lines and is never stale. */
