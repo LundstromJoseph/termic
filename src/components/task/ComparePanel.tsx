@@ -37,7 +37,7 @@
 // is fingerprinted, so there are no viewed marks. The branch compare's state
 // survives untouched underneath for "Back to branch compare".
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   ChevronRight, ChevronDown, Check, Eye, Loader2, GitCompare as GitCompareIcon,
@@ -69,6 +69,8 @@ import { i18n } from "@/lib/i18n";
 const LS_MERGE_BASE = "gitCompareMergeBase";
 const LS_THREADS_OPEN = "compareThreadsOpen";
 const ROW_H = 26;
+
+function persist(key: string, val: string) { try { localStorage.setItem(key, val); } catch {} }
 
 function readMergeBase(): boolean {
   // Defaults ON — see the three-dot reasoning on the Rust side.
@@ -145,7 +147,6 @@ export function ComparePanel({ task, repoDir, search, viewMode, reloadToken, onO
    *  immutable, so it is read once and never on reloadToken. */
   const [range, setRange] = useState<{ key: string; cmp: GitCompare | null; err: string | null } | null>(null);
 
-  const persist = (key: string, val: string) => { try { localStorage.setItem(key, val); } catch {} };
   const toggleMergeBase = () => setMergeBase(v => { const n = !v; persist(LS_MERGE_BASE, n ? "1" : "0"); return n; });
 
   // A different task is a different branch: fall back to ITS remembered ref,
@@ -521,13 +522,10 @@ function ReviewBar({ task, review, reviewIds }: { task: Task; review: Review; re
 
 /** Review mode: every thread of the shown review, in creation order. A click
  *  opens its file's diff scrolled to the thread. */
-function ThreadList({ review, onOpen }: { review: Review; onOpen: (th: ReviewThread) => void }) {
+const ThreadList = memo(function ThreadList({ review, onOpen }: { review: Review; onOpen: (th: ReviewThread) => void }) {
   const { t } = useTranslation("panels");
   const [open, setOpen] = useState(() => { try { return localStorage.getItem(LS_THREADS_OPEN) !== "0"; } catch { return true; } });
-  const toggle = () => setOpen(v => {
-    try { localStorage.setItem(LS_THREADS_OPEN, v ? "0" : "1"); } catch {}
-    return !v;
-  });
+  const toggle = () => setOpen(v => { persist(LS_THREADS_OPEN, v ? "0" : "1"); return !v; });
   const Chevron = open ? ChevronDown : ChevronRight;
   return (
     <div className="shrink-0 border-b border-[var(--color-border-soft)]" data-testid="compare-threads">
@@ -549,7 +547,7 @@ function ThreadList({ review, onOpen }: { review: Review; onOpen: (th: ReviewThr
       )}
     </div>
   );
-}
+});
 
 function ThreadRow({ thread, onOpen }: { thread: ReviewThread; onOpen: (th: ReviewThread) => void }) {
   const { t } = useTranslation("panels");

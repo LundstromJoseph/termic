@@ -114,6 +114,9 @@ export function DiffPane({ task, tab }: { task: Task; tab: DiffTab }) {
     setNewView(v);
     try { localStorage.setItem(LS_DIFF_NEW_FILE_VIEW, v); } catch {}
   };
+  // A reveal's unpersisted flip to source belongs to the file it was made
+  // for, not to the next file a recycled preview tab shows.
+  useEffect(() => setNewView(readNewFileView()), [tab.path]);
   // Staleness (GH #266). The pane does not live-update: content moving under
   // a reader mid-review is worse than content being old. Instead the tab says
   // it is out of date and re-reads when asked, which is how GitHub handles a

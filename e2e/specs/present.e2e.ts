@@ -838,8 +838,12 @@ describe("agent-presented review", () => {
       execGit(`git -C "${cwd}" commit -q -m "e2e present long ${stamp}"`);
       lines[189] = "long 190 edited";
       writeFileSync(path.join(cwd, "present-long.txt"), `${lines.join("\n")}\n`);
-      writeFileSync(path.join(cwd, "present-notes.md"), "# Notes\n\nSome notes.\n");
-      execGit(`git -C "${cwd}" add present-long.txt present-notes.md`);
+      // Long enough to scroll, so a line-190 reveal is not satisfied by a pane
+      // already at the top.
+      const notes = Array.from({ length: 200 }, (_, i) => `- note ${i + 1}`);
+      writeFileSync(path.join(cwd, "present-notes.md"), `${notes.join("\n")}\n`);
+      writeFileSync(path.join(cwd, "present-other.md"), "# Other\n\nMore notes.\n");
+      execGit(`git -C "${cwd}" add present-long.txt present-notes.md present-other.md`);
       execGit(`git -C "${cwd}" commit -q -m "e2e present edit ${stamp}"`);
       const r = await cliRpc({ cmd: "present_new", task: taskId, range: "HEAD~1..HEAD", title: "Long file", tab: agentTab });
       expect(r.ok).toBe(true);
@@ -848,7 +852,7 @@ describe("agent-presented review", () => {
       t20 = await thread("present-long.txt", [20, 20]);
       t190 = await thread("present-long.txt", [190, 190]);
       tLong = await thread("present-long.txt");
-      tNotes = await thread("present-notes.md");
+      tNotes = await thread("present-notes.md", [190, 190]);
       await browser.execute(() => {
         localStorage.setItem("diffMode", "unified");
         localStorage.setItem("diffNewFileView", "preview");
@@ -927,6 +931,20 @@ describe("agent-presented review", () => {
       await waitRevealed(tNotes, "the markdown file's thread never showed");
       expect((await revealState(tNotes)).preview).toBe(false);
       expect(await browser.execute(() => localStorage.getItem("diffNewFileView"))).toBe("preview");
+    });
+
+    it("does not carry a reveal's flip to source over to the next new file in the preview tab", async () => {
+      await clickIn(`[data-testid="compare-thread-row"][data-thread="${tNotes}"]`);
+      await waitRevealed(tNotes, "the markdown file's thread never showed");
+      const activeTab = () => browser.execute((id) => window.__termic!.useApp.getState().activeTab[id], taskId);
+      const before = await activeTab();
+
+      await clickIn('[data-testid="compare-file-row"][data-path="present-other.md"]');
+
+      await browser.waitUntil(async () => (await revealState("")).preview,
+        { timeout: 10_000, timeoutMsg: "the next new markdown file opened in source, not preview" });
+      // The same pane, recycled: a fresh one would start from the preference anyway.
+      expect(await activeTab()).toBe(before);
     });
   });
 });

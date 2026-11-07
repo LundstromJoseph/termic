@@ -729,18 +729,18 @@ export function reviewCommentsExtension(
   ];
 }
 
-/**
- * Open the composer on the current selection — the tooltip button's action,
- * also reachable from the keyboard (EditorPane's "add selection to agent"
- * shortcut). Returns false when nothing is selected, so a key binding can fall
- * through instead of swallowing the chord.
- */
 /** The effect that opens a collapsed resolved card, or none when the thread
  *  is open or already expanded. For a reveal that has to land on content. */
 export function expandThreadEffects(state: EditorState, th: ReviewThread): StateEffect<string>[] {
   return th.resolved && !state.field(dataField, false)?.expanded.has(th.id) ? [toggleThread.of(th.id)] : [];
 }
 
+/**
+ * Open the composer on the current selection — the tooltip button's action,
+ * also reachable from the keyboard (EditorPane's "add selection to agent"
+ * shortcut). Returns false when nothing is selected, so a key binding can fall
+ * through instead of swallowing the chord.
+ */
 export function dispatchSelectionComment(view: EditorView): boolean {
   const range = view.state.selection.main;
   if (range.empty) return false;
