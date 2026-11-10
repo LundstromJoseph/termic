@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { toContainerPath, quoteWindowsPath, terminalPathText, relUnder, absUnder, baseName, joinPath, pathToFileUri, fileUriToPath } from "./osPath";
+import { toContainerPath, quoteWindowsPath, terminalPathText, relUnder, absUnder, baseName, normalizeAbsPath, joinPath, pathToFileUri, fileUriToPath } from "./osPath";
 
 describe("toContainerPath", () => {
   it("is the identity off Windows", () => {
@@ -39,6 +39,22 @@ describe("relUnder", () => {
     expect(relUnder("c:\\Repo\\src\\a.ts", "C:\\repo", true)).toBe("src/a.ts");
     expect(relUnder("C:/repo/src/a.ts", "C:\\repo\\", true)).toBe("src/a.ts");
     expect(relUnder("C:\\repo-old\\a.ts", "C:\\repo", true)).toBeNull();
+  });
+});
+
+describe("normalizeAbsPath", () => {
+  it("folds . and .. segments of a POSIX path and stops .. at the root", () => {
+    expect(normalizeAbsPath("/repo/wt/../../docs/./r.md", false)).toBe("/docs/r.md");
+    expect(normalizeAbsPath("/a//b/", false)).toBe("/a/b");
+    expect(normalizeAbsPath("/../../r.md", false)).toBe("/r.md");
+  });
+  it("folds a Windows drive path with either separator and joins it with backslashes", () => {
+    expect(normalizeAbsPath("C:\\repo\\wt/..\\docs\\.\\r.md", true)).toBe("C:\\repo\\docs\\r.md");
+    expect(normalizeAbsPath("C:\\..\\r.md", true)).toBe("C:\\r.md");
+  });
+  it("returns a path with no recognised root unchanged", () => {
+    expect(normalizeAbsPath("a/../b.md", false)).toBe("a/../b.md");
+    expect(normalizeAbsPath("/tmp/../r.md", true)).toBe("/tmp/../r.md");
   });
 });
 

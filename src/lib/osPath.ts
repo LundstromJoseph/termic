@@ -54,6 +54,23 @@ export function relUnder(abs: string, root: string, windows: boolean = IS_WINDOW
   return a.slice(r.length + 1);
 }
 
+/** An absolute path with its `.` and `..` segments folded, without touching
+ *  the disk, so it differs from the OS only across a symlinked directory
+ *  followed by `..`. `..` stops at the root, like a shell. On Windows only a
+ *  drive path (`C:\`) is folded, joined with `\`. Anything else comes back
+ *  unchanged. */
+export function normalizeAbsPath(p: string, windows: boolean = IS_WINDOWS): string {
+  const root = (windows ? /^[A-Za-z]:[\\/]/ : /^\//).exec(p)?.[0];
+  if (!root) return p;
+  const parts: string[] = [];
+  for (const seg of p.slice(root.length).split(windows ? /[\\/]/ : "/")) {
+    if (seg === "" || seg === ".") continue;
+    if (seg === "..") parts.pop();
+    else parts.push(seg);
+  }
+  return root + parts.join(windows ? "\\" : "/");
+}
+
 /** The last path segment, splitting on `/`, and on `\` too on Windows. */
 export function baseName(p: string, windows: boolean = IS_WINDOWS): string {
   const parts = p.split(windows ? /[\\/]/ : "/");

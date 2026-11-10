@@ -140,4 +140,28 @@ describe("termic view", () => {
     await expect(result).rejects.toThrow("Termic shows UTF-8 text files of 2 MB or less: /tmp/image.png");
     expect(tabs()).toHaveLength(1);
   });
+
+  it("folds .. in a path under the task root and opens the edit tab on the clean task-relative path", async () => {
+    const path = "/Users/u/tasks/fix-auth/src/../docs/r.md";
+
+    const result = await viewFileHandler({ taskId: "ws1", path, focus: false });
+
+    const tab = tabs().find(t => t.id === result.tabId);
+    expect(tab).toMatchObject({ type: "edit", path: "docs/r.md", title: "r.md" });
+    expect(ipc.taskPathStat).toHaveBeenCalledWith("ws1", "docs/r.md");
+    expect(result).toMatchObject({ path, external: false });
+  });
+
+  it("folds .. that climbs out of the task root and opens one external tab on the clean absolute path", async () => {
+    const path = "/Users/u/tasks/fix-auth/../../docs/tasks/r.md";
+
+    const result = await viewFileHandler({ taskId: "ws1", path, focus: false });
+    await viewFileHandler({ taskId: "ws1", path: "/Users/u/docs/tasks/r.md", focus: false });
+
+    const external = tabs().filter(t => t.type === "external");
+    expect(external).toHaveLength(1);
+    expect(external[0]).toMatchObject({ id: result.tabId, path: "/Users/u/docs/tasks/r.md", title: "r.md" });
+    expect(ipc.pathExists).toHaveBeenCalledWith("/Users/u/docs/tasks/r.md");
+    expect(result).toMatchObject({ path, external: true });
+  });
 });

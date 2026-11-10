@@ -471,6 +471,16 @@ describe("termic view: show a file in a tab (v30)", () => {
     expect(await tabById(out.tab_id)).toMatchObject({ type: "edit", path: name, title: name });
   });
 
+  it("folds a .. under the task root onto the same file's editor tab", async () => {
+    const name = fs.readdirSync(taskPath).find((f) => !f.startsWith(".") && fs.statSync(path.join(taskPath, f)).isFile());
+    const direct = view([path.join(taskPath, name!)]);
+
+    const out = view([`${taskPath}/sub/../${name}`]);
+
+    expect(out.tab_id).toBe(direct.tab_id);
+    expect(await tabById(out.tab_id)).toMatchObject({ type: "edit", path: name });
+  });
+
   it("exits 1 naming the path when the file does not exist, and opens no tab", async () => {
     const gone = path.join(dir, "gone.md");
     const count = () => browser.execute((tid) => (window.__termic!.useApp.getState().tabs[tid] ?? []).length, taskId);

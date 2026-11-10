@@ -10078,6 +10078,12 @@ mod tests {
 
     // ── view (v30) ───────────────────────────────────────────────────
 
+    /// An absolute path on every host: a `/tmp` literal is not absolute on
+    /// Windows, so `view_path_problem` would refuse it before the rpc.
+    fn report_path() -> String {
+        std::env::temp_dir().join("report.md").to_string_lossy().into_owned()
+    }
+
     fn view_req(path: &str, task: Option<&str>) -> Request {
         req(
             Command::View {
@@ -10106,7 +10112,7 @@ mod tests {
     fn view_refuses_an_unknown_task_without_calling_the_webview() {
         let host = StubHost::default();
 
-        let err = handle(&view_req("/tmp/report.md", Some("nope")), &host).error.expect("refused");
+        let err = handle(&view_req(&report_path(), Some("nope")), &host).error.expect("refused");
 
         assert_eq!(err.code, ErrorCode::NotFound);
         assert!(host.rpc_calls.lock().unwrap().is_empty());
@@ -10115,26 +10121,27 @@ mod tests {
     #[test]
     fn view_forwards_task_id_path_and_focus_and_maps_the_webview_reply() {
         let host = StubHost::default();
+        let path = report_path();
         host.script_rpc(
             "view_file",
             Ok(serde_json::json!({
-                "taskId": "w3", "tabId": "t9", "path": "/tmp/report.md", "external": true, "focused": true,
+                "taskId": "w3", "tabId": "t9", "path": path, "external": true, "focused": true,
             })),
         );
 
-        let reply = handle(&view_req("/tmp/report.md", Some("solo")), &host);
+        let reply = handle(&view_req(&report_path(), Some("solo")), &host);
 
         assert!(reply.ok, "{:?}", reply.error);
         assert_eq!(
             rpc_params(&host, "view_file"),
-            serde_json::json!({ "taskId": "w3", "path": "/tmp/report.md", "focus": true }),
+            serde_json::json!({ "taskId": "w3", "path": path, "focus": true }),
         );
         assert_eq!(
             reply.data,
             Some(ReplyData::View(proto::ViewData {
                 task_id: "w3".into(),
                 tab_id: "t9".into(),
-                path: "/tmp/report.md".into(),
+                path: path.clone(),
                 external: true,
                 focused: true,
             })),
@@ -10144,11 +10151,11 @@ mod tests {
     #[test]
     fn view_passes_the_webviews_refusal_through_as_bad_request() {
         let host = StubHost::default();
-        host.script_rpc("view_file", Err("no such file: /tmp/report.md".into()));
+        host.script_rpc("view_file", Err("no such file: the report".into()));
 
-        let err = handle(&view_req("/tmp/report.md", Some("w3")), &host).error.expect("error");
+        let err = handle(&view_req(&report_path(), Some("w3")), &host).error.expect("error");
 
-        assert_eq!((err.code, err.message.as_str()), (ErrorCode::BadRequest, "no such file: /tmp/report.md"));
+        assert_eq!((err.code, err.message.as_str()), (ErrorCode::BadRequest, "no such file: the report"));
     }
 
     #[test]
@@ -10156,7 +10163,7 @@ mod tests {
         let host = StubHost::default();
         host.script_rpc("view_file", Ok(serde_json::json!({ "tabId": "" })));
 
-        let err = handle(&view_req("/tmp/report.md", Some("w3")), &host).error.expect("error");
+        let err = handle(&view_req(&report_path(), Some("w3")), &host).error.expect("error");
 
         assert_eq!(err.code, ErrorCode::Internal);
     }

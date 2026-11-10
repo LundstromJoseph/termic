@@ -50,6 +50,7 @@ import {
   taskPathStat,
 } from "@/lib/ipc";
 import { resolveAbsoluteClick, type TaskRoot } from "@/lib/pathMatch";
+import { baseName, normalizeAbsPath } from "@/lib/osPath";
 import { MARKDOWN_EXT_RE } from "@/lib/markdownPaths";
 import { groupMemberByName, nextGroupColor } from "@/lib/taskGroups";
 import { startArchive } from "@/lib/archiveTask";
@@ -1457,7 +1458,11 @@ export async function viewFileHandler(params: unknown): Promise<{
     { path: task.path, prefix: "" },
     ...(task.composition ?? []).map(m => ({ path: m.path, prefix: m.dir_name })),
   ];
-  const resolved = resolveAbsoluteClick(path, roots);
+  // The CLI's `std::path::absolute` keeps `..`, so `../../docs/r.md` from a
+  // worktree arrives under the task root, and the rel would keep the `..`
+  // that `taskPathStat` refuses.
+  const abs = normalizeAbsPath(path);
+  const resolved = resolveAbsoluteClick(abs, roots);
   let type: "edit" | "external";
   let tabPath: string;
   if (resolved.kind === "inside") {
@@ -1466,18 +1471,18 @@ export async function viewFileHandler(params: unknown): Promise<{
     type = "edit";
     tabPath = resolved.rel;
   } else {
-    if (!(await pathExists(path).catch(() => false))) throw new Error(`no such file: ${path}`);
+    if (!(await pathExists(abs).catch(() => false))) throw new Error(`no such file: ${path}`);
     // The read caps size, requires UTF-8 and a regular file, so its verdict
     // is the answer (the TerminalPane ⌘-click rule).
-    const readable = await fileReadExternal(path).then(() => true, () => false);
+    const readable = await fileReadExternal(abs).then(() => true, () => false);
     if (!readable) throw new Error(`Termic shows UTF-8 text files of 2 MB or less: ${path}`);
     type = "external";
-    tabPath = path;
+    tabPath = abs;
   }
   const find = () => (useApp.getState().tabs[taskId] ?? []).find(t => t.type === type && t.path === tabPath);
   const existed = !!find();
   useApp.getState().openPreviewTab(taskId, {
-    type, path: tabPath, title: tabPath.split("/").pop() || tabPath, permanent: true, background: !focus,
+    type, path: tabPath, title: baseName(tabPath), permanent: true, background: !focus,
   });
   const tab = find();
   if (!tab) throw new Error(`the tab for ${path} did not open`);

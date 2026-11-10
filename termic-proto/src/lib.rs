@@ -4258,9 +4258,12 @@ mod tests {
 
     #[test]
     fn view_path_problem_accepts_absolute_paths_and_refuses_empty_nul_relative_and_overlong() {
-        let longest = format!("/{}", "a".repeat(VIEW_PATH_MAX - 1));
+        // temp_dir, not a `/tmp` literal: that one is not absolute on Windows.
+        let report = std::env::temp_dir().join("report.md").to_string_lossy().into_owned();
+        let dir = std::env::temp_dir().join("x").to_string_lossy().into_owned();
+        let longest = format!("{dir}{}", "a".repeat(VIEW_PATH_MAX - dir.len()));
 
-        let ok = [view_path_problem("/tmp/report.md"), view_path_problem(&longest)];
+        let ok = [view_path_problem(&report), view_path_problem(&longest)];
         let refused = [
             view_path_problem(""),
             view_path_problem("/tmp/a\0b"),
