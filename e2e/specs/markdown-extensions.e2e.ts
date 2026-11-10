@@ -154,6 +154,8 @@ describe("markdown extensions", () => {
       scale: m ? Number(m[1]) : null,
       pct: dlg?.querySelector('[data-testid="mermaid-zoom-pct"]')?.textContent ?? null,
       width: svg?.getBoundingClientRect().width ?? 0,
+      links: svg?.querySelectorAll("a").length ?? 0,
+      linksWithHref: svg ? Array.from(svg.querySelectorAll("a")).filter(a => a.hasAttribute("href") || a.hasAttributeNS("http://www.w3.org/1999/xlink", "href")).length : 0,
     };
   });
 
@@ -174,6 +176,10 @@ describe("markdown extensions", () => {
     expect(z.markers).toBeGreaterThan(0);
     expect(z.markersInClone).toBe(z.markers);
     expect(z.width).toBeGreaterThan(300); // fitted to the window, not the column
+    // the fixture's `click scan href` renders an <a xlink:href> even under "strict";
+    // in the portal nothing would stop it navigating the webview, so the clone drops it
+    expect(z.links).toBe(1);
+    expect(z.linksWithHref).toBe(0);
     await snap("md-mermaid-zoom.png");
   });
 

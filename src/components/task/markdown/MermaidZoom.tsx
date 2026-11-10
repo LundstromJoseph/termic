@@ -33,8 +33,15 @@ export function zoomAt(v: View, factor: number, px: number, py: number): View {
   return { s, x: px - (px - v.x) * k, y: py - (py - v.y) * k };
 }
 
-function cloneForZoom(svg: SVGSVGElement): { el: SVGSVGElement; box: Size } {
+export function cloneForZoom(svg: SVGSVGElement): { el: SVGSVGElement; box: Size } {
   const el = svg.cloneNode(true) as SVGSVGElement;
+  // `click X href` survives securityLevel "strict" as an <a xlink:href>. The
+  // preview swallows link clicks, but the clone sits in a portal outside it,
+  // where activating one would navigate the whole webview away from the app.
+  el.querySelectorAll("a").forEach(a => {
+    a.removeAttribute("href");
+    a.removeAttributeNS("http://www.w3.org/1999/xlink", "href");
+  });
   const vb = svg.viewBox.baseVal;
   const box = vb && vb.width > 0 && vb.height > 0 ? { w: vb.width, h: vb.height } : (() => {
     const b = svg.getBBox();

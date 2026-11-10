@@ -50,6 +50,7 @@ pub struct Manifest {
 flowchart LR
   settle[Agent settles] --> scan[Scan worktree] --> store[(Blob store)]
   scan --> manifest[Write manifest]
+  click scan href "https://example.com"
 ```
 
 ## Latency budget

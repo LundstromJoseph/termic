@@ -1,5 +1,23 @@
+// @vitest-environment happy-dom
 import { describe, it, expect } from "vitest";
-import { fitView, zoomAt } from "./MermaidZoom";
+import { cloneForZoom, fitView, zoomAt } from "./MermaidZoom";
+
+describe("cloneForZoom", () => {
+  it("strips href and xlink:href from links in the clone so activating one cannot navigate the webview", () => {
+    const host = document.createElement("div");
+    host.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 40 20">`
+      + `<a xlink:href="https://example.com"><rect width="10" height="10"></rect></a>`
+      + `<a href="about:blank"><rect width="10" height="10"></rect></a></svg>`;
+    const svg = host.querySelector("svg")!;
+
+    const { el } = cloneForZoom(svg);
+
+    const links = Array.from(el.querySelectorAll("a"));
+    expect(links).toHaveLength(2);
+    expect(links.flatMap(a => a.getAttributeNames())).toEqual([]);
+    expect(svg.querySelectorAll("a")[0].getAttribute("xlink:href")).toBe("https://example.com");
+  });
+});
 
 describe("fitView", () => {
   it("scales a wide box to 95% of the viewport width and centres it vertically", () => {
