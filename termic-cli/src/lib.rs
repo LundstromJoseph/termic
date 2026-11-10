@@ -4618,7 +4618,7 @@ mod tests {
         let err = pre_connect_guard(&overlong.cmd).unwrap_err();
 
         assert_eq!((*focus, task.as_deref(), project), (true, Some("fix-auth"), &None));
-        assert_eq!(resolved, std::env::current_dir().unwrap().join("notes/report.md").to_string_lossy());
+        assert_eq!(resolved, std::env::current_dir().unwrap().join("notes").join("report.md").to_string_lossy());
         assert!(pre_connect_guard(&cli.cmd).is_ok());
         assert!(err.message.contains("longer than"), "{}", err.message);
         assert!(Cli::try_parse_from(["termic", "view", "a.md", "--project", "web"]).is_err(), "--project needs --task");
