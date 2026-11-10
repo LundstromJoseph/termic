@@ -2147,7 +2147,12 @@ external tab from a ⌘-click) gets the same source / split / preview shell.
 `MarkdownCtx.external` switches link resolution to the file's own directory
 (`resolveExternalHref`): a target inside the task opens as an ordinary tab,
 anything else as another external tab. Relative images are not loaded, see
-docs/sandbox.md "Known gap".
+docs/sandbox.md "Known gap". Nothing watches a file outside the task (no
+focus or fsRevision reload), so opening an already-open external file again
+re-reads it: `openPreviewTab` bumps `ExternalTab.reloadNonce` and EditorPane
+swaps the new content into the read-only buffer, the GH #266 rule diffs
+follow. An open with `background` adds or updates the tab without making it
+the task's or the split pane's active tab.
 
 **Every block knows its source lines.** The `srcLines` extension's core rule
 (`src/lib/markdown/extensions/srcLines.ts`, pipeline in docs/markdown.md)

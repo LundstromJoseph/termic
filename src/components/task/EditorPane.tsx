@@ -838,7 +838,7 @@ export function EditorPane({ task, tab, active, onContent }: {
   // confirming the true-editor prompt.
   const applyDiskContent = useCallback((content: string) => {
     const v = viewRef.current;
-    if (!v || !isTaskFile) return;
+    if (!v || isScratch) return;
     if (content !== v.state.doc.toString())
       v.dispatch({
         effects: indentCompRef.current.reconfigure(indentExtension(detectIndent(content))),
@@ -847,6 +847,8 @@ export function EditorPane({ task, tab, active, onContent }: {
         // either side, so ⌘Z from the preview can tell it is not a preview edit
         annotations: [ExternalReload.of(true), isolateHistory.of("full")],
       });
+    // An external tab has no save, blame or changed-on-disk banner.
+    if (!isTaskFile) return;
     diskTextRef.current = normalizeEol(content);
     // The buffer now matches disk again, so blame can be trusted again. Same
     // reasoning as the save path, and the same reason docs/ideas/lsp.md wants
@@ -857,7 +859,19 @@ export function EditorPane({ task, tab, active, onContent }: {
     }
     setDiskChanged(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [task.id, filePath, isTaskFile]);
+  }, [task.id, filePath, isTaskFile, isScratch]);
+
+  // An external tab's re-read: `openPreviewTab` bumps the nonce when the file
+  // is opened again. Read-only, so the buffer is never dirty. A view that is
+  // still loading reads fresh content itself, so a null view is a no-op.
+  const externalReloadNonce = tab.type === "external" ? tab.reloadNonce : undefined;
+  useEffect(() => {
+    if (externalReloadNonce === undefined || tab.type !== "external") return;
+    fileReadExternal(tab.path).then(applyDiskContent).catch(() => {});
+    // Keyed on the nonce alone: a recycle to another path reloads through the
+    // mount effect, never through here.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [externalReloadNonce]);
 
   // React to an external change (GH #57). An UNTOUCHED buffer (no unsaved
   // edits) just mirrors disk silently — preview tab or not, source or

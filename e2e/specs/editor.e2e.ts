@@ -230,6 +230,15 @@ describe("editor open", () => {
     });
     await snap("external-markdown-preview");
 
+    // Nothing watches a file outside the task: opening it again is what re-reads it.
+    writeFileSync(main, "# Rewritten notes\n\nSee [the other one](other.md).\n");
+    await browser.execute((id, p) => {
+      window.__termic!.useApp.getState().openPreviewTab(id, { type: "external", path: p, title: "notes.md", permanent: true });
+    }, taskId, main);
+    await browser.waitUntil(() => shownHeading("Rewritten notes"), {
+      timeout: 10_000, timeoutMsg: "opening an open external file again did not re-read it",
+    });
+
     await browser.execute((id) => {
       const a = [...document.querySelectorAll(`[data-task-id="${id}"] .markdown-body a`)]
         .find((el) => el.getBoundingClientRect().width > 0 && el.textContent === "the other one") as HTMLElement;

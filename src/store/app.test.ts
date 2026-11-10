@@ -33,7 +33,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { isTabOnScreenIn, isUserWatching, RECENT_TASKS_CAP, useApp } from "@/store/app";
 import * as ipc from "@/lib/ipc";
 import { markUnattendedSpawn, takeUnattendedSpawn } from "@/lib/unattendedSpawns";
-import type { QueueItem, PaneLeaf, Tab, TerminalTab, PersistedTab } from "@/lib/types";
+import type { QueueItem, PaneLeaf, SplitTree, Tab, TerminalTab, PersistedTab } from "@/lib/types";
+import { findLeaf } from "@/lib/splitTree";
 import { useUI } from "@/store/ui";
 // Store interactor — the ONE place that knows the store's shape. Cases below
 // say what they mean ("what work state is that tab in?") instead of spelling
@@ -565,6 +566,83 @@ describe("openPreviewTab", () => {
     expect(nonce("live")).toBe(1);
     expect(nonce("commit")).toBeUndefined();
     expect(nonce("review")).toBeUndefined();
+  });
+
+  it("reopening an open external tab bumps its reloadNonce and creates no second tab", () => {
+    const taskId = "ws1";
+    const ext: Tab = { id: "x1", type: "external", title: "notes.md", path: "/tmp/notes.md", preview: false } as any;
+    useApp.setState({ tabs: { [taskId]: [ext] }, activeTab: { [taskId]: "x1" } });
+
+    useApp.getState().openPreviewTab(taskId, { type: "external", path: "/tmp/notes.md", title: "notes.md", permanent: true });
+    useApp.getState().openPreviewTab(taskId, { type: "external", path: "/tmp/notes.md", title: "notes.md", permanent: true });
+
+    const tabs = useApp.getState().tabs[taskId];
+    expect(tabs).toHaveLength(1);
+    expect((tabs[0] as any).reloadNonce).toBe(2);
+  });
+
+  describe("background", () => {
+    const split = (main: PaneLeaf, side: PaneLeaf): SplitTree => ({ type: "split", id: "s1", dir: "v", ratio: 0.5, a: main, b: side });
+    const main: PaneLeaf = { type: "pane", id: "main", isMain: true, tabIds: [], activeTabId: null };
+    const side = (tabIds: string[]): PaneLeaf => ({ type: "pane", id: "p1", tabIds, activeTabId: "s1-tab" });
+    const sideLeaf = () => findLeaf(useApp.getState().splitTree.ws1, "p1")!;
+    // resetAppStore leaves the split layout alone.
+    afterEach(() => useApp.setState({ splitTree: {}, activePaneId: {} }));
+
+    it("creates a new main-pane tab without making it the task's active tab", () => {
+      const taskId = "ws1";
+      const term: Tab = { id: "t1", type: "terminal", title: "claude" } as any;
+      useApp.setState({ tabs: { [taskId]: [term] }, activeTab: { [taskId]: "t1" } });
+
+      useApp.getState().openPreviewTab(taskId, { type: "external", path: "/tmp/r.md", title: "r.md", permanent: true, background: true });
+
+      expect(useApp.getState().tabs[taskId]).toHaveLength(2);
+      expect(useApp.getState().activeTab[taskId]).toBe("t1");
+    });
+
+    it("leaves the task's active tab alone when the file is already open in the main pane", () => {
+      const taskId = "ws1";
+      const term: Tab = { id: "t1", type: "terminal", title: "claude" } as any;
+      const ext: Tab = { id: "x1", type: "external", title: "r.md", path: "/tmp/r.md", preview: false } as any;
+      useApp.setState({ tabs: { [taskId]: [term, ext] }, activeTab: { [taskId]: "t1" } });
+
+      useApp.getState().openPreviewTab(taskId, { type: "external", path: "/tmp/r.md", title: "r.md", permanent: true, background: true });
+
+      expect(useApp.getState().tabs[taskId]).toHaveLength(2);
+      expect(useApp.getState().activeTab[taskId]).toBe("t1");
+      expect((useApp.getState().tabs[taskId][1] as any).reloadNonce).toBe(1);
+    });
+
+    it("appends a new tab to a focused split pane without changing the pane's activeTabId", () => {
+      const taskId = "ws1";
+      const sideTab: Tab = { id: "s1-tab", type: "terminal", title: "shell", paneId: "p1" } as any;
+      useApp.setState({
+        tabs: { [taskId]: [sideTab] }, activeTab: { [taskId]: "t1" },
+        splitTree: { [taskId]: split(main, side(["s1-tab"])) }, activePaneId: { [taskId]: "p1" },
+      });
+
+      useApp.getState().openPreviewTab(taskId, { type: "external", path: "/tmp/r.md", title: "r.md", permanent: true, background: true });
+
+      const opened = useApp.getState().tabs[taskId].find(t => (t as any).path === "/tmp/r.md")!;
+      expect(sideLeaf().tabIds).toEqual(["s1-tab", opened.id]);
+      expect(sideLeaf().activeTabId).toBe("s1-tab");
+      expect(useApp.getState().activeTab[taskId]).toBe("t1");
+    });
+
+    it("leaves a focused split pane's activeTabId alone when the file is already open in it", () => {
+      const taskId = "ws1";
+      const sideTab: Tab = { id: "s1-tab", type: "terminal", title: "shell", paneId: "p1" } as any;
+      const ext: Tab = { id: "x1", type: "external", title: "r.md", path: "/tmp/r.md", preview: false, paneId: "p1" } as any;
+      useApp.setState({
+        tabs: { [taskId]: [sideTab, ext] },
+        splitTree: { [taskId]: split(main, side(["s1-tab", "x1"])) }, activePaneId: { [taskId]: "p1" },
+      });
+
+      useApp.getState().openPreviewTab(taskId, { type: "external", path: "/tmp/r.md", title: "r.md", permanent: true, background: true });
+
+      expect(useApp.getState().tabs[taskId]).toHaveLength(2);
+      expect(sideLeaf().activeTabId).toBe("s1-tab");
+    });
   });
 
   it("sets revealHeading on existing tab (file.md#heading link to an open file)", () => {

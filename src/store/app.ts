@@ -418,8 +418,10 @@ export interface AppState {
    *  regular tab instead: an already-open preview of the same file is pinned
    *  in place, the preview slot is never recycled, and a new tab is created
    *  non-preview. For deliberate opens (cmd+click in a terminal, the file
-   *  finder), where the user asked for THAT file and expects it to stay. */
-  openPreviewTab: (taskId: string, data: { type: "edit" | "diff" | "dir" | "external"; path: string; title: string; scope?: DiffTab["scope"]; revealThread?: string; revealAt?: { line: number; col?: number }; revealHeading?: string; permanent?: boolean }) => void;
+   *  finder), where the user asked for THAT file and expects it to stay.
+   *  `background` opens or updates the tab without making it the task's or
+   *  the pane's active tab, the `termic tab` rule for agent-driven opens. */
+  openPreviewTab: (taskId: string, data: { type: "edit" | "diff" | "dir" | "external"; path: string; title: string; scope?: DiffTab["scope"]; revealThread?: string; revealAt?: { line: number; col?: number }; revealHeading?: string; permanent?: boolean; background?: boolean }) => void;
   /** Clear an edit tab's `revealAt` (or a diff tab's `revealThread`) once
    *  its pane has consumed it, so a re-render doesn't re-jump the scroll. */
   consumeReveal: (taskId: string, tabId: string) => void;
@@ -2840,6 +2842,11 @@ export const useApp = create<AppState>((set, get) => ({
       if (data.type === "diff" && !data.scope?.startsWith("commit:") && !data.scope?.startsWith("review:")) {
         patch.reloadNonce = ((existing as { reloadNonce?: number }).reloadNonce ?? 0) + 1;
       }
+      // The same rule for a file outside the task: it has no watcher and no
+      // fsRevision reload, so asking for it again is its only refresh.
+      if (data.type === "external") {
+        patch.reloadNonce = ((existing as { reloadNonce?: number }).reloadNonce ?? 0) + 1;
+      }
       // A permanent open of a file that is sitting in the preview slot pins
       // it where it is, rather than opening a second tab for the same file.
       const pin = data.permanent && existing.preview ? { preview: false } : {};
@@ -2864,6 +2871,7 @@ export const useApp = create<AppState>((set, get) => ({
         && (t.type !== "diff" || (t as any).scope === (data.type === "diff" ? data.scope : undefined)));
       if (existing) {
         const next = withNewRevealOnly(existing);
+        if (data.background) return { tabs: { ...s.tabs, [taskId]: next } };
         const newTree = setLeafActiveTabId(tree, activePaneLeaf.id, existing.id);
         return { tabs: { ...s.tabs, [taskId]: next }, splitTree: { ...s.splitTree, [taskId]: newTree } };
       }
@@ -2882,6 +2890,7 @@ export const useApp = create<AppState>((set, get) => ({
         syntax: undefined, syntaxAuto: undefined,
           ...revealPatch,
         } as unknown as Tab : t);
+        if (data.background) return { tabs: { ...s.tabs, [taskId]: next } };
         const newTree = setLeafActiveTabId(tree, activePaneLeaf.id, previewTab.id);
         return { tabs: { ...s.tabs, [taskId]: next }, splitTree: { ...s.splitTree, [taskId]: newTree } };
       }
@@ -2895,7 +2904,7 @@ export const useApp = create<AppState>((set, get) => ({
       const newTree = replaceNode(tree, activePaneLeaf.id, {
         ...activePaneLeaf,
         tabIds: [...activePaneLeaf.tabIds, newTab.id],
-        activeTabId: newTab.id,
+        activeTabId: data.background ? activePaneLeaf.activeTabId : newTab.id,
       });
       return { ...setActiveInPane(newTab.id, newTree), tabs: { ...s.tabs, [taskId]: [...list, newTab] } };
     }
@@ -2904,7 +2913,7 @@ export const useApp = create<AppState>((set, get) => ({
     const mainList = list.filter(t => !(t as TerminalTab).paneId);
     const previewTab = data.permanent ? undefined : mainList.find(t => t.preview);
     const setActive = (id: string): Partial<AppState> =>
-      ({ activeTab: { ...s.activeTab, [taskId]: id } });
+      data.background ? {} : ({ activeTab: { ...s.activeTab, [taskId]: id } });
 
     const existing = mainList.find(t => t.type === data.type && (t as any).path === data.path
       && (t.type !== "diff" || (t as any).scope === (data.type === "diff" ? data.scope : undefined)));

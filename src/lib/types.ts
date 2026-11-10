@@ -2127,6 +2127,10 @@ export interface ExternalTab extends BaseTab {
   mdView?: "source" | "preview" | "split";
   /** Per-document remote-image override, as on EditTab. Session-only. */
   remoteImagesUnblocked?: boolean;
+  /** Bumped when the file is opened again while this tab is open, which
+   *  re-reads it. Nothing watches a file outside the task, so this is its
+   *  only reload. Transient. */
+  reloadNonce?: number;
 }
 
 export type Tab = TerminalTab | DiffTab | EditTab | DirTab | ScratchTab | ExternalTab;
