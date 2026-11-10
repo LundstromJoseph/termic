@@ -2018,6 +2018,19 @@ would sit on each other. Front matter `folded: A, B` names the sections
 that open collapsed. Find, the outline, go to line, footnotes and
 `#fragment` links unfold whatever hides their target.
 
+**A mermaid diagram opens full-window from an expand button.** Each
+rendered diagram carries a text-free button at its top right
+(`.md-mermaid-expand`), shown on hover or focus. In a read-only preview
+(an external file, a diff preview, the Changelog) a click on the diagram
+itself opens it too, with a `zoom-in` cursor; an editable preview leaves
+that click alone, because it is the first half of the double-click that
+opens the block editor. The dialog (`MermaidZoom.tsx`) shows a clone of
+the rendered SVG, fitted to the window (never above 200%): drag to pan,
+wheel to pan, pinch (ctrl+wheel) to zoom about the pointer; the toolbar
+has Zoom out, the percent, Zoom in, Fit and Close; `+` / `=`, `-` and `0`
+(fit) work from the keyboard, a double-click fits, Esc closes and focus
+returns to the preview. The scale stays in [10%, 800%].
+
 **Line numbers per block, in a gutter that never runs on scroll.**
 `useLineGutter` (`components/task/markdown/lineGutter.ts`), mode from
 `reader.lineNumbers`: Hover (default) numbers the innermost stamped block

@@ -50,9 +50,11 @@ second one (performance.md).
   allowlist automatically, and policed by claim.
 - `hydrate(host, cx)`: post-mount pass after every rebuild, may return a
   cleanup. `cx` is `{ themeDark, canEdit, isAlive(), claim(root), filePath?,
-  scroller? }`; `canEdit` says whether the preview has a write path (see
-  Edits), and a flip of it rebuilds the preview. `scroller` is what an
-  in-document jump scrolls. Hydrates run in registration order, and one
+  scroller?, openDiagram? }`; `canEdit` says whether the preview has a write
+  path (see Edits), and a flip of it rebuilds the preview. `scroller` is
+  what an in-document jump scrolls. `openDiagram(svg)` opens a rendered
+  diagram in the zoom dialog; a preview that leaves it out gets no expand
+  buttons. Hydrates run in registration order, and one
   that throws is logged and skipped, the rest still run. Read the DOM
   knowing what has hydrated before you: `headingLinks` runs before `math`,
   which is why heading text reads math through `headingText`.
@@ -76,7 +78,15 @@ extensions" at the end of `src/index.css`; strings are `panels:mdExt.*`.
 - `srcLines`: the `data-src-line` / `data-src-end` stamps on every block.
   Trusts both attrs.
 - `fence`: code fences, the mermaid placeholder and its lazy render.
-  Allows `data-mermaid` (diagram source the document wrote anyway).
+  Allows `data-mermaid` (diagram source the document wrote anyway). With
+  `cx.openDiagram`, each rendered diagram gets an expand button
+  (`SLOT_ATTR` chrome, appended AFTER `cx.claim`, which would strip the
+  attr), and in a read-only preview (`!cx.canEdit`) the block gets
+  `md-mermaid-zoomable` and a click on its SVG opens it as well. One
+  delegated host listener, removed by the cleanup. The dialog clones the
+  rendered SVG, keeping mermaid's id: its `<style>` is scoped `#mmd-N` and
+  its own `<defs>` keep the arrowheads resolving after a rebuild replaces
+  the original. No second render.
 - `alerts`: GitHub callouts, a blockquote whose first line is `[!NOTE]`,
   `[!TIP]`, `[!IMPORTANT]`, `[!WARNING]` or `[!CAUTION]` (any case, alone on
   its line). Adds `markdown-alert markdown-alert-<type>` to the blockquote

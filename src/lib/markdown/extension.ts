@@ -22,6 +22,9 @@ export interface HydrateCtx {
   /** the element the preview scrolls, for an in-document jump (footnotes).
    *  Absent: the jump opens and flashes its target without scrolling. */
   scroller?: HTMLElement | null;
+  /** open a rendered mermaid diagram in the zoom dialog. Absent: diagrams
+   *  get no expand button. */
+  openDiagram?: (svg: SVGSVGElement) => void;
 }
 
 export interface MdExtension {

@@ -19,6 +19,12 @@ function render(src: string) {
   return { host, model: doc.model };
 }
 vi.mock("@/lib/clipboard", () => ({ copyToClipboard: vi.fn(() => Promise.resolve()) }));
+vi.mock("mermaid", () => ({
+  default: {
+    initialize: vi.fn(),
+    render: vi.fn(async (id: string) => ({ svg: `<svg id="${id}" viewBox="0 0 40 20"><rect width="40" height="20"></rect></svg>` })),
+  },
+}));
 beforeEach(() => vi.mocked(copyToClipboard).mockClear());
 
 /** render + hydrate, the way the preview does it. */
@@ -203,6 +209,49 @@ describe("codeHeader", () => {
     cleanup();
     host.querySelector<HTMLElement>(".md-code-copy")!.click();
     expect(copyToClipboard).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("fence mermaid zoom", () => {
+  const SRC = "```mermaid\ngraph LR\n```\n";
+  /** render + hydrate with the given ctx, resolved once mermaid has drawn */
+  async function diagram(cx: { canEdit: boolean; openDiagram?: (svg: SVGSVGElement) => void }) {
+    const { host } = render(SRC);
+    hydrate(host, { themeDark: true, isAlive: () => true, claim, ...cx });
+    await vi.waitFor(() => expect(host.querySelector(".mermaid-block > svg")).not.toBeNull());
+    const block = host.querySelector<HTMLElement>(".mermaid-block")!;
+    return { block, svg: block.querySelector("svg")!, expand: block.querySelector<HTMLElement>(".md-mermaid-expand") };
+  }
+
+  it("without openDiagram a rendered diagram gets no expand button and no zoom cursor", async () => {
+    const { block, expand } = await diagram({ canEdit: false });
+    expect(expand).toBeNull();
+    expect(block.classList.contains("md-mermaid-zoomable")).toBe(false);
+  });
+
+  it("the expand button is text-free chrome that opens the diagram's own svg", async () => {
+    const openDiagram = vi.fn();
+    const { svg, expand } = await diagram({ canEdit: true, openDiagram });
+    expand!.click();
+    expect(expand!.hasAttribute(SLOT_ATTR) && expand!.textContent === "").toBe(true);
+    expect(expand!.title).toBe("Expand diagram");
+    expect(openDiagram).toHaveBeenCalledExactlyOnceWith(svg);
+  });
+
+  it("a click on the diagram opens it in a read-only preview", async () => {
+    const openDiagram = vi.fn();
+    const { block, svg } = await diagram({ canEdit: false, openDiagram });
+    svg.querySelector("rect")!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    expect(block.classList.contains("md-mermaid-zoomable")).toBe(true);
+    expect(openDiagram).toHaveBeenCalledExactlyOnceWith(svg);
+  });
+
+  it("a click on the diagram does not open it in an editable preview, where it starts a double-click edit", async () => {
+    const openDiagram = vi.fn();
+    const { block, svg } = await diagram({ canEdit: true, openDiagram });
+    svg.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    expect(block.classList.contains("md-mermaid-zoomable")).toBe(false);
+    expect(openDiagram).not.toHaveBeenCalled();
   });
 });
 

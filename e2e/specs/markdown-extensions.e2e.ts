@@ -78,7 +78,8 @@ describe("markdown extensions", () => {
         dts: all("dt").map(d => d.textContent),
         notes: all("ol.footnotes > li[data-src-line]").length,
         refs: all("sup a[data-fnref]").map(a => a.title),
-        ids: host.querySelectorAll("[id]").length,
+        // a mermaid SVG carries mermaid's own ids (its style scope, its markers)
+        ids: host.querySelectorAll("[id]:not(.mermaid-block *)").length,
       };
     });
     expect(r.pairs).toEqual([
@@ -134,6 +135,76 @@ describe("markdown extensions", () => {
     expect(Math.abs(r.wideWidth - r.cardWidth)).toBeLessThanOrEqual(1);
     await browser.execute(() => window.__mdExt!().querySelector(".front-matter")!.scrollIntoView({ block: "start" }));
     await snap("md-front-matter.png");
+  });
+
+  // mermaid zoom: the expand button opens a clone of the rendered SVG in a
+  // dialog. The arrowheads are markers the clone must resolve from its own
+  // <defs>, so that is measured, not only looked at.
+  const zoom = () => browser.execute(() => {
+    const dlg = document.querySelector<HTMLElement>('[data-testid="mermaid-zoom"]');
+    const stage = dlg?.querySelector<HTMLElement>('[data-testid="mermaid-zoom-stage"]');
+    const svg = stage?.querySelector("svg");
+    const refs = svg ? Array.from(svg.querySelectorAll("[marker-end]"), el => el.getAttribute("marker-end")!.match(/#([^)]+)/)![1]) : [];
+    const m = stage ? getComputedStyle(stage).transform.match(/^matrix\(([^,]+)/) : null;
+    return {
+      open: !!dlg,
+      role: dlg?.getAttribute("role") ?? null,
+      markers: refs.length,
+      markersInClone: refs.filter(id => svg!.querySelector(`[id="${id}"]`) instanceof SVGMarkerElement).length,
+      scale: m ? Number(m[1]) : null,
+      pct: dlg?.querySelector('[data-testid="mermaid-zoom-pct"]')?.textContent ?? null,
+      width: svg?.getBoundingClientRect().width ?? 0,
+    };
+  });
+
+  it("a diagram's expand button opens it in a dialog, fitted, with its arrowheads", async () => {
+    await browser.waitUntil(
+      () => browser.execute(() => !!window.__mdExt!().querySelector(".mermaid-block > svg + .md-mermaid-expand")),
+      { timeout: 15_000, timeoutMsg: "the diagram never rendered with an expand button" },
+    );
+    // an edit tab's preview is editable: a click on the diagram itself stays a click
+    await browser.execute(() => window.__mdExt!().querySelector<SVGElement>(".mermaid-block > svg")!.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    expect((await zoom()).open).toBe(false);
+    await browser.execute(() => window.__mdExt!().querySelector(".mermaid-block")!.scrollIntoView({ block: "center" }));
+    await snap("md-mermaid-block.png");
+    await browser.execute(() => window.__mdExt!().querySelector<HTMLElement>(".md-mermaid-expand")!.click());
+    await browser.waitUntil(async () => (await zoom()).scale !== null && (await zoom()).pct !== "", { timeout: 5_000, timeoutMsg: "the zoom dialog never painted" });
+    const z = await zoom();
+    expect(z.role).toBe("dialog");
+    expect(z.markers).toBeGreaterThan(0);
+    expect(z.markersInClone).toBe(z.markers);
+    expect(z.width).toBeGreaterThan(300); // fitted to the window, not the column
+    await snap("md-mermaid-zoom.png");
+  });
+
+  it("Zoom in raises the scale and 0 fits again", async () => {
+    const fitted = (await zoom()).scale!;
+    await browser.execute(() => document.querySelector<HTMLElement>('[data-testid="mermaid-zoom-in"]')!.click());
+    await browser.waitUntil(async () => ((await zoom()).scale ?? 0) > fitted * 1.2, { timeout: 5_000, timeoutMsg: "Zoom in never raised the scale" });
+    expect((await zoom()).pct).toBe(`${Math.round(fitted * 125)}%`);
+    await snap("md-mermaid-zoomed.png");
+    await browser.keys(["0"]);
+    await browser.waitUntil(async () => Math.abs(((await zoom()).scale ?? 0) - fitted) < 1e-6, { timeout: 5_000, timeoutMsg: "0 never fitted the diagram again" });
+  });
+
+  it("the open dialog keeps its arrowheads when the agent rewrites the file", async () => {
+    writeFileSync(path.join(fixture, DOC), SOURCE.replace("# Task snapshots\n", "# Task snapshots\n\nRewritten under the zoom.\n"));
+    await browser.execute((id) => window.__termic!.useApp.getState().bumpFsRevision(id), taskId);
+    await browser.waitUntil(
+      () => browser.execute(() => window.__mdExt!().textContent!.includes("Rewritten under the zoom.")
+        && !!window.__mdExt!().querySelector(".mermaid-block > svg")),
+      { timeout: 10_000, timeoutMsg: "the preview never re-rendered under the dialog" },
+    );
+    const z = await zoom();
+    expect(z.open).toBe(true);
+    expect(z.markersInClone).toBe(z.markers);
+    await snap("md-mermaid-zoom-after-rewrite.png");
+  });
+
+  it("Esc closes the dialog and focus returns to the preview", async () => {
+    await browser.keys(["Escape"]);
+    await browser.waitUntil(async () => !(await zoom()).open, { timeout: 5_000, timeoutMsg: "Esc did not close the zoom dialog" });
+    expect(await browser.execute(() => document.activeElement === window.__mdExt!().closest("[tabindex]"))).toBe(true);
   });
 
   it("a footnote reference jumps to its note and the back link returns", async () => {

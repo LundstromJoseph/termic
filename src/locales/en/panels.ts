@@ -192,6 +192,14 @@ export default {
       collapse: "Collapse section",
       expand: "Expand section",
     },
+    mermaid: {
+      expand: "Expand diagram",
+      dialogTitle: "Diagram",
+      zoomIn: "Zoom in",
+      zoomOut: "Zoom out",
+      fit: "Fit to window",
+      close: "Close",
+    },
     code: {
       copy: "Copy",
       copyTip: "Copy code",

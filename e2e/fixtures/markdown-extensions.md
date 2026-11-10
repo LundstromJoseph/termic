@@ -46,6 +46,12 @@ pub struct Manifest {
 
     an indented block has a header too
 
+```mermaid
+flowchart LR
+  settle[Agent settles] --> scan[Scan worktree] --> store[(Blob store)]
+  scan --> manifest[Write manifest]
+```
+
 ## Latency budget
 
 With $B$ the changed bytes and $W$ the write throughput, a snapshot costs

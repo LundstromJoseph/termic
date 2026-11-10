@@ -4,7 +4,22 @@
 // lands when a diagram is actually previewed.
 
 import type { MdExtension } from "../extension";
+import { SLOT_ATTR } from "../trust";
 import { i18n } from "@/lib/i18n";
+
+const EXPAND = "md-mermaid-expand";
+const ZOOMABLE = "md-mermaid-zoomable";
+
+function expandButton(): HTMLButtonElement {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = EXPAND;
+  btn.setAttribute(SLOT_ATTR, "");
+  const label = i18n.t("panels:mdExt.mermaid.expand");
+  btn.title = label;
+  btn.setAttribute("aria-label", label);
+  return btn;
+}
 
 // Monotonic id source for mermaid render targets. Math.random/Date.now are
 // avoided elsewhere in this codebase; a plain counter is deterministic enough.
@@ -76,6 +91,13 @@ export const fence: MdExtension = {
           if (!cx.isAlive()) return;
           el.innerHTML = svg;
           cx.claim(el);
+          // after the claim, which strips SLOT_ATTR from whatever it walks
+          if (cx.openDiagram) {
+            el.appendChild(expandButton());
+            // a click on an editable preview is the first half of the
+            // double-click that opens the block editor
+            if (!cx.canEdit) el.classList.add(ZOOMABLE);
+          }
         } catch (e) {
           console.error("[markdown-preview] mermaid render failed:", e);
           if (!cx.isAlive()) return;
@@ -83,5 +105,18 @@ export const fence: MdExtension = {
         }
       }
     })();
+    const open = cx.openDiagram;
+    if (!open) return;
+    const onClick = (e: MouseEvent) => {
+      const t = e.target as Element;
+      const block = t.closest?.(".mermaid-block");
+      const svg = block?.querySelector<SVGSVGElement>(":scope > svg");
+      if (!block || !svg || !host.contains(block)) return;
+      const viaButton = !!t.closest(`.${EXPAND}`)?.hasAttribute(SLOT_ATTR);
+      const viaDiagram = block.classList.contains(ZOOMABLE) && svg.contains(t);
+      if (viaButton || viaDiagram) open(svg);
+    };
+    host.addEventListener("click", onClick);
+    return () => host.removeEventListener("click", onClick);
   },
 };

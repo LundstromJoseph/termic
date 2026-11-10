@@ -62,6 +62,7 @@ import { useBlockEditor } from "./markdown/blockEditor";
 import { useLineGutter } from "./markdown/lineGutter";
 import { GoToLineBar, revealLine } from "./markdown/GoToLine";
 import { OutlineRail } from "./markdown/Outline";
+import { MermaidZoom, type MermaidZoomHandle } from "./markdown/MermaidZoom";
 import { usePrefs } from "@/store/prefs";
 import { bindingMatches } from "@/lib/shortcuts";
 
@@ -701,6 +702,8 @@ export function MarkdownPreview(
   // click land focus here for that check.
   const containerRef = useRef<HTMLDivElement>(null);
   const scrollerRef = useRef<HTMLDivElement>(null);
+  const zoomRef = useRef<MermaidZoomHandle>(null);
+  const openDiagram = useCallback((svg: SVGSVGElement) => zoomRef.current?.open(svg), []);
   const realignSync = useScrollSync(scrollerRef, hostRef, syncView, visible, editorVisible);
   const gutterLayerRef = useRef<HTMLDivElement>(null);
   const gutter = useLineGutter({
@@ -1015,7 +1018,7 @@ export function MarkdownPreview(
     if (findOpenRef.current && findQueryRef.current) runFind(findQueryRef.current, true);
     // extension passes (mermaid, ...). Async ones check isAlive before
     // touching the DOM; cleanups run before the next rebuild or on unmount.
-    const unhydrate = hydrate(host, { themeDark, canEdit, isAlive: () => alive, claim, filePath: ctx?.filePath, scroller: scrollerRef.current });
+    const unhydrate = hydrate(host, { themeDark, canEdit, isAlive: () => alive, claim, filePath: ctx?.filePath, scroller: scrollerRef.current, openDiagram });
     return () => { alive = false; unhydrate(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [text, themeDark, linkify, ctx?.taskId, ctx?.filePath, ctx?.memberDirs, remoteImagesAllowed, canEdit]);
@@ -1321,6 +1324,7 @@ export function MarkdownPreview(
   const bannerKind = remoteImageBannerKind(hasBlockedRemoteImages, !!onUnblockRemoteImages, justAllowedGlobally);
 
   return (
+    <>
     <div
       ref={containerRef}
       tabIndex={-1}
@@ -1412,6 +1416,11 @@ export function MarkdownPreview(
       </div>
       </div>
     </div>
+    {/* a sibling, not a child: React events bubble out of a portal through
+        the React tree, and the container's onKeyDown would take ⌘Z / ⌘S
+        pressed in the dialog for the buffer underneath */}
+    <MermaidZoom ref={zoomRef} returnFocus={containerRef} />
+    </>
   );
 }
 

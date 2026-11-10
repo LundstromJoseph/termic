@@ -187,6 +187,14 @@ export default {
       collapse: "折叠章节",
       expand: "展开章节",
     },
+    mermaid: {
+      expand: "放大查看图表",
+      dialogTitle: "图表",
+      zoomIn: "放大",
+      zoomOut: "缩小",
+      fit: "适应窗口",
+      close: "关闭",
+    },
     code: {
       copy: "复制",
       copyTip: "复制代码",
