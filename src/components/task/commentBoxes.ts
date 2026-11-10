@@ -225,9 +225,10 @@ export function buildCard(comment: ReviewComment, onEdit: () => void): HTMLEleme
 }
 
 /** One thread of an agent-presented review: its location, then every comment
- *  in order under an author line (the agent's name, or "You"). A resolved
- *  thread shows only its header unless `expanded`, with a toggle on the
- *  location. The host owns `expanded` and rebuilds the card to change it. */
+ *  in order under an author line (the agent's name, or "You"), then Reply and
+ *  Resolve. A resolved thread shows only its header unless `expanded`, with a
+ *  toggle on the location. The host owns `expanded` and rebuilds the card to
+ *  change it. */
 export function buildThreadCard(thread: ReviewThread, expanded: boolean, host: {
   onReply: () => void;
   onResolve: (resolved: boolean) => Promise<void>;
@@ -264,7 +265,6 @@ export function buildThreadCard(thread: ReviewThread, expanded: boolean, host: {
     void host.onResolve(!resolved).finally(() => { resolve.disabled = false; });
   });
   tools.appendChild(resolve);
-  head.appendChild(tools);
   wrap.appendChild(head);
   for (const c of thread.comments) {
     const entry = el("div", "tc-thread-entry");
@@ -273,6 +273,11 @@ export function buildThreadCard(thread: ReviewThread, expanded: boolean, host: {
     entry.appendChild(el("div", "tc-comment-body", c.body));
     wrap.appendChild(entry);
   }
+  // The actions follow the last comment, so a long thread is read top to
+  // bottom before replying. A collapsed card is only its header, so they
+  // stay on that one row rather than adding a second.
+  if (resolved && !expanded) head.appendChild(tools);
+  else wrap.appendChild(tools);
   return wrap;
 }
 

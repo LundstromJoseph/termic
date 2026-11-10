@@ -568,6 +568,35 @@ describe("agent-presented review threads in a review: diff", () => {
     expect(read()).toEqual({ collapsed: "true", expanded: "false", text: "▸ thing.ts · line 2" });
   });
 
+  const actionsPlace = (card: HTMLElement) => {
+    const tools = card.querySelector<HTMLElement>(".tc-comment-tools")!;
+    if (tools.parentElement?.classList.contains("tc-comment-card-head")) return "header";
+    const entries = card.querySelectorAll(".tc-thread-entry");
+    const lastEntry = entries[entries.length - 1];
+    return card.lastElementChild === tools && tools.previousElementSibling === lastEntry ? "after last comment" : "elsewhere";
+  };
+
+  it("puts an open thread's Reply and Resolve after its last comment, not in the header", async () => {
+    putReview(1, [thread("r1-t1", FILE, [2, 2], "agent", "user", "agent")]);
+
+    const view = mountReview();
+    await settle();
+
+    expect(actionsPlace(cards(view)[0])).toBe("after last comment");
+  });
+
+  it("keeps a collapsed resolved thread's actions on its header row and moves them after the last comment once expanded", async () => {
+    putReview(1, [resolvedBy(thread("r1-t1", FILE, [2, 2], "agent", "user"), "user")]);
+    const view = mountReview();
+    await settle();
+    const collapsed = actionsPlace(cards(view)[0]);
+
+    cards(view)[0].querySelector<HTMLButtonElement>(".tc-thread-toggle")!.click();
+
+    expect(collapsed).toBe("header");
+    expect(actionsPlace(cards(view)[0])).toBe("after last comment");
+  });
+
   it("keeps a thread expanded across a push that grows it, and collapses it again after a reopen and re-resolve", async () => {
     putReview(1, [resolvedBy(thread("r1-t1", FILE, [2, 2], "agent"), "user")]);
     const view = mountReview();

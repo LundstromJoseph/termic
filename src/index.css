@@ -857,6 +857,8 @@ html.termic-mod-held .xterm .xterm-cursor-pointer { cursor: pointer; }
 .tc-comment-card:hover .tc-comment-tools { opacity: 1; }
 /* Reply is what a thread is for, so it never hides behind a hover. */
 .tc-thread-card .tc-comment-tools { opacity: 1; }
+/* a thread's actions after its last comment (buildThreadCard) */
+.tc-thread-card > .tc-comment-tools { justify-content: flex-end; margin-top: 5px; }
 .tc-comment-body {
   font-size: 13px;
   line-height: 1.45;
