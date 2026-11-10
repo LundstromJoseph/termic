@@ -315,6 +315,12 @@ another. Over MCP: `task_group` with `join` or `leave`.
   the badge in place, `badge rm <key>` removes it, `badge list` lists
   them. Keys as for `prop`, text one line of at most 40 characters, 8
   badges per task.
+- `"$TERMIC_CLI" view <path>` - show the user a file in a tab of YOUR
+  task: a file in the task opens in its editor, any other path
+  read-only, markdown rendered. It opens in the background; `--focus`
+  brings it to the front of the task. Viewing it again re-reads it, so
+  run it again after rewriting a report. The task must be open in
+  Termic.
 - `"$TERMIC_CLI" result <task>` - the agent's last message from its
   session transcript (claude only; other agents error and you fall back
   to the file convention).

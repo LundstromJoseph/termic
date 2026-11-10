@@ -926,6 +926,9 @@ pub(crate) fn dispatch_authenticated(
             value.as_deref(),
             cwd.as_deref(),
         ),
+        Command::View { path, focus, task, project, cwd } => {
+            handle_view(&req.id, host, path, *focus, task.as_deref(), project.as_deref(), cwd.as_deref())
+        }
         Command::BadgeSet { task, project, key, text, color, cwd } => {
             let color = color.clone().unwrap_or_else(|| proto::BADGE_DEFAULT_COLOR.into());
             let op = crate::BadgeOp::Set { key: key.clone(), text: text.clone(), color };
@@ -3362,6 +3365,53 @@ fn handle_prop(
         tabs.retain(|t| !t.props.is_empty());
     }
     Reply::ok(id, ReplyData::Prop(proto::PropData { task_id: t.id, tab_id: target, tabs, collected }))
+}
+
+/// `termic view` (v30): show a file in a tab of the task. The webview owns
+/// every check that needs the disk or the strip (does the file exist, is it
+/// inside the task, is the task mounted), so its refusal passes through.
+/// The reply never carries the file's content.
+fn handle_view(
+    id: &str,
+    host: &dyn CliHost,
+    path: &str,
+    focus: bool,
+    task: Option<&str>,
+    project: Option<&str>,
+    cwd: Option<&str>,
+) -> Reply {
+    if let Some(why) = proto::view_path_problem(path) {
+        return Reply::err(id, ErrorCode::BadRequest, why);
+    }
+    let (projects, tasks) = host.projects_tasks();
+    let t = match resolve_task_arg(&projects, &tasks, task, project, cwd) {
+        Ok(t) => t.clone(),
+        Err(e) => return Reply { id: id.into(), ok: false, data: None, error: Some(e) },
+    };
+    let value = match host.rpc(
+        "view_file",
+        serde_json::json!({ "taskId": t.id, "path": path, "focus": focus }),
+        OPEN_TIMEOUT,
+    ) {
+        Ok(v) => v,
+        // The `handle_tab` rule: the webview's message is the useful one.
+        Err(e) => return Reply::err(id, ErrorCode::BadRequest, &e),
+    };
+    let tab_id = value.get("tabId").and_then(|v| v.as_str()).unwrap_or_default();
+    if tab_id.is_empty() {
+        return Reply::err(id, ErrorCode::Internal, "the app opened no tab for the file");
+    }
+    let flag = |k: &str| value.get(k).and_then(|v| v.as_bool()).unwrap_or(false);
+    Reply::ok(
+        id,
+        ReplyData::View(proto::ViewData {
+            task_id: t.id,
+            tab_id: tab_id.to_string(),
+            path: path.to_string(),
+            external: flag("external"),
+            focused: flag("focused"),
+        }),
+    )
 }
 
 fn badge_entries(badges: &[crate::TaskBadge]) -> Vec<proto::BadgeEntry> {
@@ -10024,6 +10074,91 @@ mod tests {
             assert_eq!(err.code, code, "{webview}");
             assert!(!err.message.starts_with("cli_tab_prop"), "sentinel leaked: {}", err.message);
         }
+    }
+
+    // ── view (v30) ───────────────────────────────────────────────────
+
+    fn view_req(path: &str, task: Option<&str>) -> Request {
+        req(
+            Command::View {
+                path: path.into(),
+                focus: true,
+                task: task.map(str::to_string),
+                project: None,
+                cwd: None,
+            },
+            Some("tok"),
+        )
+    }
+
+    #[test]
+    fn view_refuses_a_relative_path_before_resolving_the_task_or_calling_the_webview() {
+        let host = StubHost::default();
+
+        let err = handle(&view_req("report.md", Some("w3")), &host).error.expect("refused");
+
+        assert_eq!(err.code, ErrorCode::BadRequest);
+        assert!(err.message.contains("not an absolute path"), "{}", err.message);
+        assert!(host.rpc_calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn view_refuses_an_unknown_task_without_calling_the_webview() {
+        let host = StubHost::default();
+
+        let err = handle(&view_req("/tmp/report.md", Some("nope")), &host).error.expect("refused");
+
+        assert_eq!(err.code, ErrorCode::NotFound);
+        assert!(host.rpc_calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn view_forwards_task_id_path_and_focus_and_maps_the_webview_reply() {
+        let host = StubHost::default();
+        host.script_rpc(
+            "view_file",
+            Ok(serde_json::json!({
+                "taskId": "w3", "tabId": "t9", "path": "/tmp/report.md", "external": true, "focused": true,
+            })),
+        );
+
+        let reply = handle(&view_req("/tmp/report.md", Some("solo")), &host);
+
+        assert!(reply.ok, "{:?}", reply.error);
+        assert_eq!(
+            rpc_params(&host, "view_file"),
+            serde_json::json!({ "taskId": "w3", "path": "/tmp/report.md", "focus": true }),
+        );
+        assert_eq!(
+            reply.data,
+            Some(ReplyData::View(proto::ViewData {
+                task_id: "w3".into(),
+                tab_id: "t9".into(),
+                path: "/tmp/report.md".into(),
+                external: true,
+                focused: true,
+            })),
+        );
+    }
+
+    #[test]
+    fn view_passes_the_webviews_refusal_through_as_bad_request() {
+        let host = StubHost::default();
+        host.script_rpc("view_file", Err("no such file: /tmp/report.md".into()));
+
+        let err = handle(&view_req("/tmp/report.md", Some("w3")), &host).error.expect("error");
+
+        assert_eq!((err.code, err.message.as_str()), (ErrorCode::BadRequest, "no such file: /tmp/report.md"));
+    }
+
+    #[test]
+    fn view_is_internal_when_the_webview_reports_no_tab() {
+        let host = StubHost::default();
+        host.script_rpc("view_file", Ok(serde_json::json!({ "tabId": "" })));
+
+        let err = handle(&view_req("/tmp/report.md", Some("w3")), &host).error.expect("error");
+
+        assert_eq!(err.code, ErrorCode::Internal);
     }
 
     // ── task badges (v25) ────────────────────────────────────────────

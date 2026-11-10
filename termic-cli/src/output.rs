@@ -694,6 +694,12 @@ pub fn prop_text(p: &termic_proto::PropData, wrote: bool) -> String {
     out.trim_end().to_string()
 }
 
+/// `view`: where the file opened.
+pub fn view_text(v: &termic_proto::ViewData) -> String {
+    let ro = if v.external { " (read-only)" } else { "" };
+    format!("Opened {} in a tab{ro}", v.path)
+}
+
 /// `badge list`: one `key: text (color)` line per badge.
 pub fn badges_text(d: &termic_proto::BadgesData) -> String {
     if d.badges.is_empty() {

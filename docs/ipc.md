@@ -243,6 +243,25 @@ and a failed one is logged: the file is the record and the next `loadAll`
 catches the sidebar up. `badge_remove` of a missing key is ok with
 `changed` false.
 
+**Viewing a file (wire v30).** `view { path, focus, task?, project?,
+cwd? }` shows a file in a tab of the task and replies `ReplyData::View`
+(`ViewData { task_id, tab_id, path, external, focused }`), never the
+file's content. `path` is absolute (`view_path_problem`); the CLI resolves
+a relative one against its own cwd with `std::path::absolute`, which does
+not touch the disk. `handle_view` resolves the task and calls the
+`view_file` RPC, passing the webview's refusal through as BadRequest, the
+`handle_tab` rule. `viewFileHandler` refuses an unmounted task (its strip
+is empty, the `closeTabHandler` data-loss shape), then routes the way a
+⌘-click does: inside a task root it opens the `edit` tab on the relative
+path after `task_path_stat`, outside it opens a read-only `external` tab
+after `path_exists` and a trial `file_read_external`. The tab opens in the
+background (`openPreviewTab`'s `background`) unless `focus`. A new
+markdown tab is patched to `mdView: "preview"`, tab-local. Viewing an open
+external file again bumps its `reloadNonce`, so the tab re-reads it; an
+edit tab relies on its own reload paths. MCP mirrors it as `task_view`,
+and a peer is refused it (`drive_denied`), because the path names the
+caller's disk.
+
 **Agent-presented reviews (wire v26, resolve v27, iterations v28, delete v29).** `present_new { range, title?,
 author?, repo?, tab? }`, `present_comment { review, file, start_line?,
 end_line?, body }`, `present_reply { thread, body }`, `present_show {

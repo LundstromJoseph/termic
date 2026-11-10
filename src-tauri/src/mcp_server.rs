@@ -782,7 +782,7 @@ fn rpc_response(server: &McpServer, req: &HttpRequest) -> (u16, Vec<u8>) {
 /// (`agent_overview!` in termic-cli/src/lib.rs): keep the two in step. The
 /// point is the first sentence: an agent that does not realise it is running
 /// INSIDE a Termic task never thinks to start siblings or report back.
-const MCP_INSTRUCTIONS: &str = "Termic runs coding agents side by side, each in its own task (a git worktree, or the project's main checkout, with its own terminal), listed in the app's sidebar. If your environment has TERMIC_TASK_ID, you are one of those agents, running INSIDE a Termic task right now, and these tools drive the app around you. From there you can: launch new tasks with their own agents (task_new; in your project they join your task's group in the sidebar, in another they are linked to your task instead; you name the group for the batch of work with task_group); prompt another task's agent (task_send; it queues behind a busy agent's turn, and now=true skips that queue for a message that cannot wait) and read what it produced (task_log, task_result); open another agent tab in a task (task_tab); retitle your own task (task_rename); label your tab with what you are working on, shown on the task's sidebar row (task_prop, e.g. ticket=ABC-1; pass your TERMIC_TAB_ID as tab); put a coloured status badge under your task's name (task_badge_set, e.g. key=ci text=passing color=good); show the user a commit range as a review and discuss it in comment threads (present_new with range=main..HEAD, present_comment, present_reply; pass your TERMIC_TAB_ID as tab to present_new and present_claim, and answer the user's review comments with present_reply, not in your terminal); and keep notes, plans, findings, logs and reports the user should READ in scratchpads (scratchpad_new, scratchpad_write): a tab in your task that updates live and stays out of git, so use one instead of dropping temporary .md files into the repo. A multi-repo project holds several repos, possibly many (project_list shows each project's type and members): task_new worktrees only the members you name in members (none without it). Coordinate by prompting each other rather than blocking: end a prompt with how the other agent should report back to you (a task_send to your task id), and ask for that report every time it finishes or gets stuck, follow-up work included, until a human tells it to stop. Sign every prompt you send another agent, first line and last: [message from agent:<your agent> task:<your task name> id:<your TERMIC_TASK_ID>] ... -- agent:<your agent> task:<your task name> id:<your TERMIC_TASK_ID>, with the values written out (there is no shell here to fill them in; TERMIC_TASK holds your task name). A prompt that arrives WITH that header came from another agent, not the user: the id is where to reply. Report back there every time you finish or get stuck, follow-up work included, and stop only when a human tells you to. When Termic set this client up, it tells the server which task you run in, so task_rename, task_group, task_tab, task_prop, task_badge_set, task_badge_remove, task_badge_list and the present_* tools default to your own task, exactly like the CLI; name other tasks explicitly. If this machine is paired with others on its network (peer_list), task_new, task_send, task_wait, task_result and task_list take peer:<machine> to run THERE, and peer_call runs any other tool there: put peer:<this machine's name> in your signature and ask for the reply as a task_send with peer:<this machine> back to your task id; a prompt whose header carries peer:<machine> came from that machine, so answer it, or ask it for help when stuck, with task_send peer:<machine> to the id in that header. Without TERMIC_TASK_ID you are driving Termic from outside it.";
+const MCP_INSTRUCTIONS: &str = "Termic runs coding agents side by side, each in its own task (a git worktree, or the project's main checkout, with its own terminal), listed in the app's sidebar. If your environment has TERMIC_TASK_ID, you are one of those agents, running INSIDE a Termic task right now, and these tools drive the app around you. From there you can: launch new tasks with their own agents (task_new; in your project they join your task's group in the sidebar, in another they are linked to your task instead; you name the group for the batch of work with task_group); prompt another task's agent (task_send; it queues behind a busy agent's turn, and now=true skips that queue for a message that cannot wait) and read what it produced (task_log, task_result); open another agent tab in a task (task_tab); retitle your own task (task_rename); label your tab with what you are working on, shown on the task's sidebar row (task_prop, e.g. ticket=ABC-1; pass your TERMIC_TAB_ID as tab); put a coloured status badge under your task's name (task_badge_set, e.g. key=ci text=passing color=good); show the user a commit range as a review and discuss it in comment threads (present_new with range=main..HEAD, present_comment, present_reply; pass your TERMIC_TAB_ID as tab to present_new and present_claim, and answer the user's review comments with present_reply, not in your terminal); and keep notes, plans, findings, logs and reports the user should READ in scratchpads (scratchpad_new, scratchpad_write): a tab in your task that updates live and stays out of git, so use one instead of dropping temporary .md files into the repo. A multi-repo project holds several repos, possibly many (project_list shows each project's type and members): task_new worktrees only the members you name in members (none without it). Coordinate by prompting each other rather than blocking: end a prompt with how the other agent should report back to you (a task_send to your task id), and ask for that report every time it finishes or gets stuck, follow-up work included, until a human tells it to stop. Sign every prompt you send another agent, first line and last: [message from agent:<your agent> task:<your task name> id:<your TERMIC_TASK_ID>] ... -- agent:<your agent> task:<your task name> id:<your TERMIC_TASK_ID>, with the values written out (there is no shell here to fill them in; TERMIC_TASK holds your task name). A prompt that arrives WITH that header came from another agent, not the user: the id is where to reply. Report back there every time you finish or get stuck, follow-up work included, and stop only when a human tells you to. When Termic set this client up, it tells the server which task you run in, so task_rename, task_group, task_tab, task_prop, task_view, task_badge_set, task_badge_remove, task_badge_list and the present_* tools default to your own task, exactly like the CLI; name other tasks explicitly. If this machine is paired with others on its network (peer_list), task_new, task_send, task_wait, task_result and task_list take peer:<machine> to run THERE, and peer_call runs any other tool there: put peer:<this machine's name> in your signature and ask for the reply as a task_send with peer:<this machine> back to your task id; a prompt whose header carries peer:<machine> came from that machine, so answer it, or ask it for help when stuck, with task_send peer:<machine> to the id in that header. Without TERMIC_TASK_ID you are driving Termic from outside it.";
 
 /// UnsupportedProtocolVersionError. The `supported` list has to be
 /// machine-readable in `data`: that is what a client retries from, and
@@ -1637,6 +1637,26 @@ const TOOLS: &[ToolDef] = &[
         }),
     },
     ToolDef {
+        name: "task_view",
+        cli_verb: "view",
+        description: "Show a file to the user in a tab of a task (yours by default): a task file in its editor, any other absolute path read-only. Markdown opens rendered. Returns the tab id, never the file's content.",
+        params: &[
+            ParamDef { name: "path", json_type: "string", required: true, description: "Absolute path of the file.", cli_flag: Some("path") },
+            ParamDef { name: "focus", json_type: "boolean", required: false, description: "Make it the task's active tab.", cli_flag: Some("--focus") },
+            P_PAD_TASK,
+            P_PROJECT,
+        ],
+        destructive: false,
+        read_only: false,
+        build: |a| Ok(Command::View {
+            path: need_str(a, "path")?,
+            focus: arg_bool(a, "focus")?,
+            task: arg_str(a, "task")?,
+            project: arg_str(a, "project")?,
+            cwd: None,
+        }),
+    },
+    ToolDef {
         name: "task_badge_set",
         cli_verb: "badge set",
         description: "Set a coloured status badge under the task's name in the sidebar (ci=passing). The same key replaces it.",
@@ -2337,7 +2357,7 @@ fn peer_call_command(args: &Args) -> Result<(Command, String), String> {
 /// Tools whose `task` defaults to the caller's own, as the CLI's `rename`,
 /// `group` and `tab` default to `$TERMIC_TASK_ID`.
 const SELF_DEFAULT_TOOLS: &[&str] = &[
-    "task_rename", "task_group", "task_tab", "task_prop",
+    "task_rename", "task_group", "task_tab", "task_prop", "task_view",
     "task_badge_set", "task_badge_remove", "task_badge_list",
     "present_new", "present_comment", "present_reply", "present_show", "present_list", "present_claim",
     "present_resolve", "present_unresolve", "present_update", "present_delete",
@@ -4284,7 +4304,10 @@ mod tests {
         // replacing the pre-iterations "New round, new review."
         // 35236: present_delete, parity with `termic present delete`. The
         // review param and one clause.
-        const RECORDED: usize = 35236;
+        // 35921: task_view, parity with `termic view` (v30). The description
+        // says the reply never carries the file's content, which is the
+        // question a client asks before granting it.
+        const RECORDED: usize = 35921;
         assert!(
             size <= RECORDED,
             "serialized tools/list grew to {size} bytes (recorded {RECORDED}); grow it consciously"
@@ -4448,6 +4471,24 @@ mod tests {
         assert!(matches!(c, Command::Prop { tab: None, key: None, value: None, .. }));
         // It defaults to the caller's task, like the CLI.
         assert!(SELF_DEFAULT_TOOLS.contains(&"task_prop"));
+        assert_eq!(tool_entry(tool)["annotations"]["destructiveHint"], false);
+    }
+
+    #[test]
+    fn task_view_builds_the_view_command_with_focus_off_by_default_and_defaults_to_the_callers_task() {
+        let tool = TOOLS.iter().find(|t| t.name == "task_view").unwrap();
+        let build = |v: serde_json::Value| (tool.build)(v.as_object().unwrap());
+
+        let bare = build(serde_json::json!({ "path": "/tmp/report.md" })).unwrap();
+        let full = build(serde_json::json!({ "path": "/tmp/report.md", "focus": true, "task": "t", "project": "web" })).unwrap();
+        let missing = build(serde_json::json!({ "task": "t" }));
+
+        assert_eq!(bare, Command::View { path: "/tmp/report.md".into(), focus: false, task: None, project: None, cwd: None });
+        assert_eq!(full, Command::View {
+            path: "/tmp/report.md".into(), focus: true, task: Some("t".into()), project: Some("web".into()), cwd: None,
+        });
+        assert!(missing.unwrap_err().contains("path"));
+        assert!(SELF_DEFAULT_TOOLS.contains(&"task_view"));
         assert_eq!(tool_entry(tool)["annotations"]["destructiveHint"], false);
     }
 

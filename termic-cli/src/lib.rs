@@ -1263,6 +1263,44 @@ disabled, 6 refused, 8 connection lost."
         project: Option<String>,
     },
 
+    /// Show a file to the user in a tab: a task file in its editor, any other
+    /// path read-only. Markdown opens rendered.
+    #[command(
+        after_help = "The tab opens in the background, like `tab`: the user's current tab \
+stays in front, and the window is never raised. --focus makes it the task's \
+active tab. Viewing a file that is already open reuses its tab and re-reads \
+the file, so run it again after rewriting a report. A relative path resolves \
+against the current directory. The task must be open in Termic (`termic \
+open` it first).
+
+A file inside the task opens in its editor, the same tab a click on the \
+path opens. Any other file opens read-only; Termic shows UTF-8 text files \
+of 2 MB or less. Without --task, the task is yours ($TERMIC_TASK_ID), then \
+the current directory.
+
+With --output-format json, one object: {\"task_id\", \"tab_id\", \"path\", \
+\"external\" (read-only, outside the task), \"focused\"}. It never carries \
+the file's content.
+
+Exit codes: 0 ok, 1 error (unknown task, the task is not open, no such \
+file, a file Termic cannot show), 4 app not running, 5 CLI disabled, 6 \
+refused, 8 connection lost."
+    )]
+    View {
+        /// The file to show.
+        path: std::path::PathBuf,
+        /// Make the tab the task's active tab.
+        #[arg(long)]
+        focus: bool,
+        /// Task name, task id, or qualified project/name. Default: your own
+        /// task ($TERMIC_TASK_ID), then the current directory.
+        #[arg(long, value_name = "TASK")]
+        task: Option<String>,
+        /// Project name, to disambiguate. Requires --task.
+        #[arg(long, requires = "task")]
+        project: Option<String>,
+    },
+
     /// Set, remove or list the coloured status badges under a task's name.
     #[command(subcommand, name = "badge", subcommand_required = true)]
     Badge(BadgeCmd),
@@ -2266,6 +2304,11 @@ fn pre_connect_guard(cmd: &Cmd) -> Result<(), CliError> {
             return Err(CliError::new(exit_code::ERROR, why));
         }
     }
+    if let Cmd::View { path, .. } = cmd {
+        if let Some(why) = proto::view_path_problem(&view_path(path)?) {
+            return Err(CliError::new(exit_code::ERROR, why));
+        }
+    }
     if let Cmd::Badge(b) = cmd {
         let problem = match b {
             BadgeCmd::Set { key, text, color, .. } => proto::badge_key_problem(key)
@@ -2742,6 +2785,20 @@ outside.",
             )?;
             render(&cli.cmd, format, data).map(Output::ok)
         }
+        Cmd::View { path, focus, task, project } => {
+            let data = client::request(
+                &mut conn,
+                proto::Command::View {
+                    path: view_path(path)?,
+                    focus: *focus,
+                    task: task.clone().or_else(|| own_env("TERMIC_TASK_ID")),
+                    project: project.clone(),
+                    cwd: std::env::current_dir().ok().map(|p| p.to_string_lossy().into_owned()),
+                },
+                &token,
+            )?;
+            render(&cli.cmd, format, data).map(Output::ok)
+        }
         Cmd::Group { task, name, color, project, join, leave } => {
             // Same target rule as rename: explicit task, else the caller's
             // own ($TERMIC_TASK_ID), else the cwd the server resolves.
@@ -2996,6 +3053,14 @@ fn parent_task_from_env() -> Option<String> {
 /// name a task that machine does not have, so a verb that needs one has to
 /// name it. (The caller's task still rides along as `from_task`, which is
 /// what lets that machine reply into it; see client::authed.)
+/// `view`'s path as the wire carries it: absolute against this process's
+/// cwd, without touching the disk (a missing file is the webview's error).
+fn view_path(path: &std::path::Path) -> Result<String, CliError> {
+    std::path::absolute(path)
+        .map(|p| p.to_string_lossy().into_owned())
+        .map_err(|e| CliError::new(exit_code::ERROR, format!("cannot resolve {}: {e}", path.display())))
+}
+
 fn own_env(key: &str) -> Option<String> {
     if client::peer().is_some() {
         return None;
@@ -4327,6 +4392,11 @@ pub fn render(cmd: &Cmd, format: OutputFormat, data: proto::ReplyData) -> Result
             OutputFormat::Text => output::prop_text(&p, value.is_some()),
         }),
         (Cmd::Prop { .. }, _) => Err(unexpected("prop")),
+        (Cmd::View { .. }, proto::ReplyData::View(v)) => Ok(match format {
+            OutputFormat::Json | OutputFormat::StreamJson => output::json(&v),
+            OutputFormat::Text => output::view_text(&v),
+        }),
+        (Cmd::View { .. }, _) => Err(unexpected("view")),
         _ => Err(unexpected("command")),
     }
 }
@@ -4536,6 +4606,45 @@ mod tests {
         }
         let cli = Cli::try_parse_from(["termic", "prop", "ticket", ""]).unwrap();
         assert!(pre_connect_guard(&cli.cmd).is_ok());
+    }
+
+    #[test]
+    fn view_parses_resolves_a_relative_path_against_the_cwd_and_refuses_an_overlong_one() {
+        let cli = Cli::try_parse_from(["termic", "view", "notes/report.md", "--focus", "--task", "fix-auth"]).unwrap();
+        let overlong = Cli::try_parse_from(["termic", "view", &format!("/{}", "a".repeat(4096))]).unwrap();
+
+        let Cmd::View { path, focus, task, project } = &cli.cmd else { panic!("not view") };
+        let resolved = view_path(path).unwrap();
+        let err = pre_connect_guard(&overlong.cmd).unwrap_err();
+
+        assert_eq!((*focus, task.as_deref(), project), (true, Some("fix-auth"), &None));
+        assert_eq!(resolved, std::env::current_dir().unwrap().join("notes/report.md").to_string_lossy());
+        assert!(pre_connect_guard(&cli.cmd).is_ok());
+        assert!(err.message.contains("longer than"), "{}", err.message);
+        assert!(Cli::try_parse_from(["termic", "view", "a.md", "--project", "web"]).is_err(), "--project needs --task");
+    }
+
+    #[test]
+    fn view_renders_read_only_for_an_external_file_and_json_without_the_wire_tag() {
+        let data = |external| proto::ViewData {
+            task_id: "w1".into(),
+            tab_id: "t3".into(),
+            path: "/tmp/report.md".into(),
+            external,
+            focused: false,
+        };
+        let cmd = Cmd::View { path: "/tmp/report.md".into(), focus: false, task: None, project: None };
+
+        let external = render(&cmd, OutputFormat::Text, proto::ReplyData::View(data(true))).unwrap();
+        let inside = render(&cmd, OutputFormat::Text, proto::ReplyData::View(data(false))).unwrap();
+        let json: serde_json::Value =
+            serde_json::from_str(&render(&cmd, OutputFormat::Json, proto::ReplyData::View(data(true))).unwrap()).unwrap();
+
+        assert_eq!(external, "Opened /tmp/report.md in a tab (read-only)");
+        assert_eq!(inside, "Opened /tmp/report.md in a tab");
+        assert_eq!(json, serde_json::json!({
+            "task_id": "w1", "tab_id": "t3", "path": "/tmp/report.md", "external": true, "focused": false,
+        }));
     }
 
     #[test]

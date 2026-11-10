@@ -364,6 +364,126 @@ describe("termic prop: tab properties on the sidebar row (GH #358)", () => {
   });
 });
 
+describe("termic view: show a file in a tab (v30)", () => {
+  const TASK = "cli-view";
+  let taskId: string;
+  let taskPath: string;
+  let dir: string;
+
+  after(async () => {
+    if (taskId) await archiveTask(taskId);
+    if (dir) rmTree(dir, { bestEffort: true });
+  });
+
+  before(async () => {
+    await waitForAppShell();
+    await requireTermicApi();
+    taskId = await openTask(TASK);
+    await browser.waitUntil(
+      () => browser.execute((tid) => window.__termic!.useApp.getState().mountedTasks.has(tid), taskId),
+      { timeout: 10_000, timeoutMsg: "the task never mounted" },
+    );
+    taskPath = await browser.execute(
+      (tid) => window.__termic!.useApp.getState().tasks.find((t: any) => t.id === tid)!.path as string,
+      taskId,
+    );
+    // Real path: the CLI's cwd comes back resolved (/var is /private/var).
+    dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "termic-e2e-view-")));
+  });
+
+  const env = () => ({ TERMIC_DATA_DIR: dataDir, TERMIC_TASK_ID: taskId });
+  const view = (args: string[], cwd?: string) =>
+    JSON.parse(runCli(["--no-launch", "--json", "view", ...args], env(), cwd));
+  const tabById = (id: string) =>
+    browser.execute(
+      (tid, i) => {
+        const t = (window.__termic!.useApp.getState().tabs[tid] ?? []).find((x: any) => x.id === i) as any;
+        return t ? { type: t.type, path: t.path, title: t.title, mdView: t.mdView ?? null } : null;
+      },
+      taskId,
+      id,
+    );
+  const activeTab = () =>
+    browser.execute((tid) => window.__termic!.useApp.getState().activeTab[tid] ?? null, taskId);
+  const shownHeading = (text: string) =>
+    browser.execute(
+      (tid, t) => [...document.querySelectorAll(`[data-task-id="${tid}"] .markdown-body h1`)]
+        .some((h) => h.getBoundingClientRect().width > 0 && h.textContent?.includes(t)),
+      taskId,
+      text,
+    );
+
+  it("opens a markdown file outside the task in a background read-only tab, set to render", async () => {
+    const file = path.join(dir, "report.md");
+    fs.writeFileSync(file, "# Background report\n\nBody.\n");
+    const before = await activeTab();
+
+    const out = view([file]);
+
+    expect(out).toMatchObject({ task_id: taskId, path: file, external: true, focused: false });
+    expect(await tabById(out.tab_id)).toEqual({ type: "external", path: file, title: "report.md", mdView: "preview" });
+    expect(await activeTab()).toBe(before);
+  });
+
+  it("--focus makes it the task's active tab, rendered", async () => {
+    const file = path.join(dir, "report.md");
+
+    const out = view([file, "--focus"]);
+
+    expect(out.focused).toBe(true);
+    expect(await activeTab()).toBe(out.tab_id);
+    await browser.waitUntil(() => shownHeading("Background report"), {
+      timeout: 10_000, timeoutMsg: "the viewed markdown never rendered",
+    });
+    await snap("cli-view-focus.png");
+  });
+
+  it("viewing it again after a rewrite shows the new text in the same tab", async () => {
+    const file = path.join(dir, "report.md");
+    const first = view([file]);
+    fs.writeFileSync(file, "# Rewritten report\n\nBody.\n");
+
+    const stdout = runCli(["--no-launch", "view", file], env());
+
+    expect(stdout.trim()).toBe(`Opened ${file} in a tab (read-only)`);
+    await browser.waitUntil(() => shownHeading("Rewritten report"), {
+      timeout: 10_000, timeoutMsg: "a second view did not re-read the file",
+    });
+    expect(view([file]).tab_id).toBe(first.tab_id);
+  });
+
+  it("resolves a relative path against the CLI's cwd", async () => {
+    fs.writeFileSync(path.join(dir, "notes.txt"), "plain notes\n");
+
+    const out = view(["notes.txt"], dir);
+
+    expect(out.path).toBe(path.join(dir, "notes.txt"));
+    expect(await tabById(out.tab_id)).toMatchObject({ type: "external", title: "notes.txt", mdView: null });
+  });
+
+  it("opens a file inside the task in its editor tab", async () => {
+    const name = fs.readdirSync(taskPath).find((f) => !f.startsWith(".") && fs.statSync(path.join(taskPath, f)).isFile());
+    expect(name).toBeTruthy();
+
+    const out = view([path.join(taskPath, name!)]);
+
+    expect(out.external).toBe(false);
+    expect(await tabById(out.tab_id)).toMatchObject({ type: "edit", path: name, title: name });
+  });
+
+  it("exits 1 naming the path when the file does not exist, and opens no tab", async () => {
+    const gone = path.join(dir, "gone.md");
+    const count = () => browser.execute((tid) => (window.__termic!.useApp.getState().tabs[tid] ?? []).length, taskId);
+    const before = await count();
+
+    const run = () => runCli(["--no-launch", "view", gone], env());
+
+    expect(run).toThrow(/exit 1/);
+    expect(run).toThrow(`no such file: ${gone}`);
+    expect(await count()).toBe(before);
+  });
+});
+
 describe("termic badge: status badges under the task's name", () => {
   const OPEN = "cli-badges";
   const STOPPED = "cli-badges-stopped";

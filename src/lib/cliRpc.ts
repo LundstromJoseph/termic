@@ -26,7 +26,9 @@ import { useApp } from "@/store/app";
 import { usePrefs } from "@/store/prefs";
 import { usePromptLibrary } from "@/store/prompts";
 import {
+  fileReadExternal,
   onPtyData,
+  pathExists,
   projectAdd,
   projectBranchContext,
   projectGitBranches,
@@ -45,7 +47,10 @@ import {
   taskGroupNew,
   taskGroupLeave,
   taskGroupUpdate,
+  taskPathStat,
 } from "@/lib/ipc";
+import { resolveAbsoluteClick, type TaskRoot } from "@/lib/pathMatch";
+import { MARKDOWN_EXT_RE } from "@/lib/markdownPaths";
 import { groupMemberByName, nextGroupColor } from "@/lib/taskGroups";
 import { startArchive } from "@/lib/archiveTask";
 import { withCreateLock } from "@/lib/createLock";
@@ -1422,6 +1427,65 @@ export async function closeTabHandler(
   return { taskId: p.taskId, tabId: p.tabId, killedPty };
 }
 
+/** `termic view` (v30): show a file in a tab of the task, the route a
+ *  ⌘-click on the path takes. Inside a task root it opens the editor tab,
+ *  anywhere else a read-only external tab. In the background unless
+ *  `focus`. The reply never carries the file's content. */
+export async function viewFileHandler(params: unknown): Promise<{
+  taskId: string; tabId: string; path: string; external: boolean; focused: boolean;
+}> {
+  const p = params as { taskId?: unknown; path?: unknown; focus?: unknown };
+  if (typeof p?.taskId !== "string" || !p.taskId) throw new Error("view_file requires a taskId");
+  if (typeof p?.path !== "string" || !p.path) throw new Error("view_file requires a path");
+  const taskId = p.taskId;
+  const path = p.path;
+  const focus = p.focus === true;
+  const app = useApp.getState();
+  if (!app.tasks.some(t => t.id === taskId)) await app.loadAll();
+  const s = useApp.getState();
+  const task = s.tasks.find(t => t.id === taskId);
+  if (!task) throw new Error(`unknown task ${taskId}`);
+  if (task.archived) throw new Error(`task ${task.name} is archived`);
+  // Writing a tab into an unmounted task's empty strip is the data-loss
+  // shape closeTabHandler documents.
+  if (!s.mountedTasks.has(taskId)) {
+    throw new Error(
+      `task ${task.name} is not open in Termic, so it has no tab strip (open it with \`termic open\`)`,
+    );
+  }
+  const roots: TaskRoot[] = [
+    { path: task.path, prefix: "" },
+    ...(task.composition ?? []).map(m => ({ path: m.path, prefix: m.dir_name })),
+  ];
+  const resolved = resolveAbsoluteClick(path, roots);
+  let type: "edit" | "external";
+  let tabPath: string;
+  if (resolved.kind === "inside") {
+    const stat = await taskPathStat(taskId, resolved.rel).catch(() => null);
+    if (!stat?.exists || stat.is_dir) throw new Error(`no such file: ${path}`);
+    type = "edit";
+    tabPath = resolved.rel;
+  } else {
+    if (!(await pathExists(path).catch(() => false))) throw new Error(`no such file: ${path}`);
+    // The read caps size, requires UTF-8 and a regular file, so its verdict
+    // is the answer (the TerminalPane ⌘-click rule).
+    const readable = await fileReadExternal(path).then(() => true, () => false);
+    if (!readable) throw new Error(`Termic shows UTF-8 text files of 2 MB or less: ${path}`);
+    type = "external";
+    tabPath = path;
+  }
+  const find = () => (useApp.getState().tabs[taskId] ?? []).find(t => t.type === type && t.path === tabPath);
+  const existed = !!find();
+  useApp.getState().openPreviewTab(taskId, {
+    type, path: tabPath, title: tabPath.split("/").pop() || tabPath, permanent: true, background: !focus,
+  });
+  const tab = find();
+  if (!tab) throw new Error(`the tab for ${path} did not open`);
+  // Tab-local: the user's markdown view pref is untouched.
+  if (!existed && MARKDOWN_EXT_RE.test(tabPath)) useApp.getState().patchTab(taskId, tab.id, { mdView: "preview" });
+  return { taskId, tabId: tab.id, path, external: type === "external", focused: focus };
+}
+
 // ─────────────────────────── dispatch ────────────────────────────────
 
 const handlers: Record<string, Handler> = {
@@ -1431,6 +1495,7 @@ const handlers: Record<string, Handler> = {
   close_tab: closeTabHandler,
   rename_tab: renameTabHandler,
   tab_props: tabPropsHandler,
+  view_file: viewFileHandler,
   task_badges: taskBadgesHandler,
   review_changed: reviewChangedHandler,
   list_agents: listAgentsHandler,

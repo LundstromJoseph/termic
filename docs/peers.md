@@ -235,8 +235,8 @@ into one of your agents. If that agent runs with YOLO, whoever controls
 the paired machine can steer it.
 
 **Drive agents (what pairing grants).** Every verb an MCP client has, except `quit`, `attach`,
-`project add`, `project remove`, the `peer` verbs, and forwarding on to
-a third machine. Said plainly: **this is remote code execution as you.**
+`view` (its path names the caller's disk), `project add`, `project remove`,
+the `peer` verbs, and forwarding on to a third machine. Said plainly: **this is remote code execution as you.**
 The peer can create tasks in any project you registered, with `--yolo`
 and `--sandbox off`, and any prompt.
 

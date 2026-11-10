@@ -143,7 +143,10 @@ use std::io::{self, BufRead, Read, Write};
 ///
 /// v29: `present_delete` deletes a review and its hidden refs. A v28 server
 /// does not know the verb; the bump turns that into "restart the app".
-pub const PROTOCOL_VERSION: u32 = 29;
+///
+/// v30: `view` shows a file to the user in a tab of a task. A v29 server does
+/// not know the verb; the bump turns that into "restart the app".
+pub const PROTOCOL_VERSION: u32 = 30;
 
 /// A pasted "123", "#123", "!123" or a PR / MR link, reduced to its number.
 /// None for anything else. The webview's `parsePrRef` (src/lib/prReview.ts)
@@ -324,6 +327,28 @@ pub fn badge_color_problem(color: &str) -> Option<String> {
     Some(format!(
         "unknown colour \"{color}\" (good, warning, error, neutral, or a hex like #3b82f6)"
     ))
+}
+
+/// Longest path `view` accepts, in bytes (macOS `PATH_MAX`).
+pub const VIEW_PATH_MAX: usize = 4096;
+
+/// Why `path` cannot be shown by `view` (v30), or None when it can: it must
+/// be absolute, so the CLI resolves a relative path against its own cwd
+/// before sending. Existence and readability are the webview's to check.
+pub fn view_path_problem(path: &str) -> Option<String> {
+    if path.is_empty() {
+        return Some("the path is empty".into());
+    }
+    if path.contains('\0') {
+        return Some("the path contains a NUL byte".into());
+    }
+    if !std::path::Path::new(path).is_absolute() {
+        return Some(format!("\"{path}\" is not an absolute path"));
+    }
+    if path.len() > VIEW_PATH_MAX {
+        return Some(format!("the path is longer than {VIEW_PATH_MAX} bytes"));
+    }
+    None
 }
 
 /// An agent-presented review: one `base..head` range per iteration plus comment
@@ -982,6 +1007,24 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cwd: Option<String>,
     },
+    /// v30: show a file to the user in a tab of the task: a file inside the
+    /// task in its editor, any other path read-only. Replies `ReplyData::View`,
+    /// which never carries the file's content.
+    View {
+        /// Absolute path (`view_path_problem`).
+        path: String,
+        /// Make the tab the task's active tab. Off by default: the tab opens
+        /// in the background, the `tab` rule.
+        #[serde(default)]
+        focus: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project: Option<String>,
+        /// The CLI's working directory, for worktree-first resolution.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cwd: Option<String>,
+    },
     /// v25: set a badge on a task. Re-setting `key` replaces its text and
     /// colour in place. Replies `ReplyData::Badges`.
     BadgeSet {
@@ -1631,6 +1674,8 @@ pub enum ReplyData {
     Tab(TabData),
     TabClose(TabCloseData),
     Prop(PropData),
+    /// `view` (v30).
+    View(ViewData),
     /// `badge set`, `badge rm` and `badge list` (v25).
     Badges(BadgesData),
     /// `present new` and `present show` (v26).
@@ -1704,6 +1749,18 @@ pub struct PropData {
     pub tab_id: Option<String>,
     pub tabs: Vec<TabProps>,
     pub collected: Vec<CollectedProp>,
+}
+
+/// `view`'s reply (v30): where the file opened. Never the file's content.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ViewData {
+    pub task_id: String,
+    pub tab_id: String,
+    pub path: String,
+    /// The file is outside the task, so the tab is read-only.
+    pub external: bool,
+    /// The tab became the task's active tab (`--focus`).
+    pub focused: bool,
 }
 
 /// One badge on a task (v25), in the order its key was first set.
@@ -3191,6 +3248,12 @@ mod tests {
                 key: Some("status".into()), value: Some(String::new()), cwd: None,
             },
             Command::Prop { task: None, project: None, tab: None, key: None, value: None, cwd: Some("/t".into()) },
+            // v30: show a file.
+            Command::View {
+                path: "/tmp/report.md".into(), focus: true, task: Some("fix-auth".into()),
+                project: Some("web".into()), cwd: None,
+            },
+            Command::View { path: "/t/a.rs".into(), focus: false, task: None, project: None, cwd: Some("/t".into()) },
             // v25: badges.
             Command::BadgeSet {
                 task: Some("fix-auth".into()),
@@ -3574,6 +3637,13 @@ mod tests {
                     props: vec![PropEntry { key: "ticket".into(), value: "ABC-1".into() }],
                 }],
                 collected: vec![CollectedProp { key: "ticket".into(), values: vec!["ABC-1".into()] }],
+            }),
+            ReplyData::View(ViewData {
+                task_id: "w1".into(),
+                tab_id: "t3".into(),
+                path: "/tmp/report.md".into(),
+                external: true,
+                focused: false,
             }),
             ReplyData::Badges(BadgesData {
                 task_id: "w1".into(),
@@ -4182,6 +4252,30 @@ mod tests {
             badge_color_problem("red").unwrap(),
         ];
         for m in msgs {
+            assert!(!m.contains('\u{2014}'), "em dash in {m:?}");
+        }
+    }
+
+    #[test]
+    fn view_path_problem_accepts_absolute_paths_and_refuses_empty_nul_relative_and_overlong() {
+        let longest = format!("/{}", "a".repeat(VIEW_PATH_MAX - 1));
+
+        let ok = [view_path_problem("/tmp/report.md"), view_path_problem(&longest)];
+        let refused = [
+            view_path_problem(""),
+            view_path_problem("/tmp/a\0b"),
+            view_path_problem("report.md"),
+            view_path_problem("./report.md"),
+            view_path_problem(&format!("{longest}a")),
+        ];
+
+        assert_eq!(ok, [None, None]);
+        assert!(refused[0].as_deref().unwrap().contains("empty"));
+        assert!(refused[1].as_deref().unwrap().contains("NUL"));
+        assert!(refused[2].as_deref().unwrap().contains("not an absolute path"));
+        assert!(refused[3].as_deref().unwrap().contains("not an absolute path"));
+        assert!(refused[4].as_deref().unwrap().contains("longer than"));
+        for m in refused.iter().flatten() {
             assert!(!m.contains('\u{2014}'), "em dash in {m:?}");
         }
     }

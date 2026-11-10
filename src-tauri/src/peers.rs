@@ -146,11 +146,13 @@ impl Grant {
 /// Why a verb is refused to a peer even with Drive. Quitting kills every
 /// agent here; attach is a live stream with no place on a request/reply
 /// hop; adding or removing projects reaches outside the folders the user
-/// already chose to give agents; and a peer may not pair, unpair or rename
+/// already chose to give agents; `view` takes a path that names the
+/// caller's disk, not this one; and a peer may not pair, unpair or rename
 /// on this machine's behalf, nor chain a call on to a third machine.
 fn drive_denied(cmd: &Command) -> Option<&'static str> {
     Some(match cmd {
         Command::Quit { .. } => "quit",
+        Command::View { .. } => "view",
         Command::Attach { .. } => "attach",
         Command::ProjectAdd { .. } => "project add",
         Command::ProjectRemove { .. } => "project remove",
@@ -2598,6 +2600,12 @@ mod tests {
         let r = call(&a, "Win", Command::Quit { commit: true }, None);
         assert_eq!(r.error.as_ref().unwrap().code, ErrorCode::Auth, "{r:?}");
         assert_eq!(*b.host.quit_calls.lock().unwrap(), 0);
+
+        // Nor show a file there: the path names Mac's disk, not Win's.
+        let view = Command::View { path: "/tmp/report.md".into(), focus: false, task: Some("solo".into()), project: None, cwd: None };
+        let r = call(&a, "Win", view, None);
+        assert_eq!(r.error.as_ref().unwrap().code, ErrorCode::Auth, "{r:?}");
+        assert!(b.host.rpc_calls.lock().unwrap().iter().all(|(m, _)| m != "view_file"));
 
         // Nor reach the peer verbs there, or chain to a third machine.
         let r = call(&a, "Win", Command::PeerList, None);

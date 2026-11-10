@@ -255,6 +255,12 @@ is accepted, bounded three ways:
 - **Nowhere to send it.** The pinned CSP (`connect-src`, see
   `src/lib/cspGuard.test.ts`) means an attacker who could invoke it has no
   egress for the result.
+- **Reachable from the CLI too, with no content back.** `termic view` /
+  MCP `task_view` (wire v30) trigger the same read for any process holding
+  the CLI token, not only a ⌘-click. The bounds above are unchanged, and
+  the reply carries the tab id, never the content. A caller with the socket
+  (sandbox off or Monitor) can already read what it asks to show; Enforce
+  modes and Docker have no socket.
 
 The residual risk is an XSS in our own UI turning into local file
 disclosure. That is strictly worse than before this command existed, and is
