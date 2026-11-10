@@ -89,9 +89,9 @@ extensions" at the end of `src/index.css`; strings are `panels:mdExt.*`.
   (closest line wins, so lines shifting above do not lose it). Only the
   outer 8 levels of nesting are keyed: each key reads the summary and
   searches the subtree, so a hostile doc nesting hundreds deep would cost
-  depth x size per rebuild. Find opens
-  every `<details>` around the current match (`revealInDetails`, called
-  from `gotoMatch`). Allows and trusts nothing.
+  depth x size per rebuild. Every jump opens the `<details>` around its
+  target (`revealInDetails`, through `revealHidden`, see `folds`). Allows
+  and trusts nothing.
 - `frontMatter`: YAML front matter (`---` on line 1 through the next `---`
   or `...`, root document only; unclosed stays an `<hr>`) as a key/value
   card, `<div class="front-matter">`. No YAML parser: flat top-level
@@ -124,6 +124,34 @@ extensions" at the end of `src/index.css`; strings are `panels:mdExt.*`.
   matches GitHub's, and matches `DocModel.headings` (whose text also takes
   `math_inline` as TeX). `SLOT_ATTR` chrome with no text, so the heading's
   `textContent` is unchanged. Allows and trusts nothing.
+- `folds`: section folding. Hydrate prepends a chevron button
+  (`.md-fold-toggle`, `SLOT_ATTR` chrome with no text, `aria-expanded`) to
+  every markdown h2 / h3 directly in the document (raw-HTML headings carry
+  no line stamp and never fold); a delegated click toggles `tc-fold-closed`
+  on the heading. `applyFolds(host)` then makes one pass over the host's
+  children: everything up to the next heading of the same or a higher
+  level gets `tc-fold-hidden` (`display: none`), an h4 does not end an h3,
+  a slot takes the state of the block before it, and the footnotes list
+  ends every section. Classes on the flat top-level siblings, never a
+  wrapper: breakout, slot placement, copy, the block editor and scroll sync
+  all read the flat structure, and every measuring pass already skips
+  boxless elements. The `tc-` prefix makes claim strip a document's own
+  copy, so a document cannot hide content or fake a fold. Front matter
+  `folded: A, B` (first `folded` key, any case, brackets and quotes
+  stripped) names sections that open collapsed: a core rule after `inline`
+  stamps the trusted `data-fold-default` on each top-level h2 / h3 whose
+  text matches, case-insensitively, every match. `viewState` keys each
+  foldable heading by level and text (closest line wins, as `details`) and
+  keeps the reader's toggle across rebuilds, unless the heading's default
+  changed since (the author edited `folded:`), in which case the new
+  default wins. Nothing is persisted: closing the tab drops the toggles,
+  and a recycled preview tab renders an empty document between files, so
+  one file's folds never reach the next. Every jump (find, outline, go to
+  line, footnotes, `#fragment`) goes through `revealHidden` in `reveal.ts`,
+  which opens the `<details>` and folds around its target. `placeSlots`
+  and the rebuild's place step re-run `applyFolds`; both exit at once on a
+  document with nothing folded. Copy drops `tc-fold-hidden` blocks. Trusts
+  `data-fold-default`.
 - `footnotes`: `markdown-it-footnote` (`[^1]` with a `[^1]:` definition,
   and `^[inline]`). No element ids: the note `<li>` carries `data-fn="N"`,
   a reference `<a data-fnref="N:k">` (note N, its k-th reference) and the
@@ -399,4 +427,5 @@ The outline rail (docs/ui.md "Outline") reads `DocModel.headings`, not the
 DOM: level, rendered text, slug and source line, from the same parse. The
 preview passes each rebuild's model to it; the rail keeps h1-h3 and finds a
 heading's element by its `data-src-line` stamp, which a document cannot
-forge (see Trust).
+forge (see Trust). A jump to a heading inside a collapsed section unfolds
+it first (`revealHidden`).

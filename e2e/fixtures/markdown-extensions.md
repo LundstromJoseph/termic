@@ -3,6 +3,7 @@ title: Task snapshots
 status: draft
 owner: alice
 reviewers: [bob, carol]
+folded: Folded section
 tags:
   - storage
   - undo
@@ -77,6 +78,18 @@ Snapshot
 
 Manifest
 : The sorted list of paths and blob hashes.
+
+## Folded section
+
+Collapsed on open: the front matter names it.
+
+| Key | Value |
+| --- | ----- |
+| a   | 1     |
+
+### Inner
+
+The inner paragraph under the fold.
 
 [^hash]: Hashing kept up with disk reads on every machine tried.
 [^runs]: Measured over 20 runs on a 1 GB checkout.

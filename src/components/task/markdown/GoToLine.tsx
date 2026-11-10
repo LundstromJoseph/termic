@@ -11,14 +11,15 @@ import { flashTo } from "@/lib/markdown/reveal";
 
 /** Scroll `scroller` to the block for `line` and flash it. False when the
  *  document has no block to land on. A block inside a closed <details>
- *  counts: landing opens it, the same as find and a footnote jump. */
+ *  or a collapsed section counts: landing opens it, the same as find and a
+ *  footnote jump. */
 export function revealLine(host: HTMLElement, scroller: HTMLElement, line: number): boolean {
   const els: HTMLElement[] = [], ranges: LineRange[] = [];
   for (const el of Array.from(host.querySelectorAll<HTMLElement>("[data-src-line]"))) {
     const r = elRange(el);
     // a block with no box is nowhere to scroll to, unless a closed <details>
-    // is all that hides it (a block under the block editor is not one)
-    if (r && (el.getClientRects().length || el.closest("details:not([open])"))) { els.push(el); ranges.push(r); }
+    // or fold is all that hides it (a block under the block editor is not one)
+    if (r && (el.getClientRects().length || el.closest("details:not([open]), .tc-fold-hidden"))) { els.push(el); ranges.push(r); }
   }
   if (!els.length) return false;
   const i = blockForLine(ranges, line);

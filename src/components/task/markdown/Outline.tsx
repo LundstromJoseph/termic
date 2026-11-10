@@ -15,7 +15,7 @@
 import { useEffect, useRef, useState, type RefObject } from "react";
 import { useTranslation } from "react-i18next";
 import type { Heading } from "@/lib/markdown/model";
-import { revealInDetails } from "@/lib/markdown/extensions/details";
+import { revealHidden } from "@/lib/markdown/reveal";
 import { cn } from "@/lib/utils";
 
 /** where a heading counts as "being read": this far below the top */
@@ -120,9 +120,9 @@ export function OutlineRail({ initial, bind, hostRef, scrollerRef }: {
     const host = hostRef.current;
     const el = host && headingEls(host).get(h.line);
     if (!el) return;
-    // open a closed <details> first, as every other jump does (flashTo);
-    // the outline keeps its own landing, the heading at the top
-    revealInDetails(el);
+    // open a closed <details> or section first, as every other jump does
+    // (flashTo); the outline keeps its own landing, the heading at the top
+    revealHidden(el);
     el.scrollIntoView({ block: "start" });
   };
 

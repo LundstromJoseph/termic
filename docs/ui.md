@@ -2005,6 +2005,19 @@ a visual line number means nothing once the width or font changes.
   max-content width to size it by. Find scrolls a sideways-scrolled box to
   its current match before scrolling the pane.
 
+**Sections fold from a chevron after the heading text.** Each markdown h2 /
+h3 directly in the document carries a chevron button (`.md-fold-toggle`,
+the `folds` extension in docs/markdown.md) between its text and the link
+button. It shows on hover and always on a collapsed heading, where it
+points right. A click collapses everything up to the next heading of the
+same or a higher level (`display: none`, never `visibility`); clicking the
+heading text does nothing, so selecting it or double-clicking into the
+block editor never folds. Not in the left margin: the line-number gutter
+labels the hovered heading there, 10px left of its column, and the two
+would sit on each other. Front matter `folded: A, B` names the sections
+that open collapsed. Find, the outline, go to line, footnotes and
+`#fragment` links unfold whatever hides their target.
+
 **Line numbers per block, in a gutter that never runs on scroll.**
 `useLineGutter` (`components/task/markdown/lineGutter.ts`), mode from
 `reader.lineNumbers`: Hover (default) numbers the innermost stamped block

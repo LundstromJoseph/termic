@@ -184,6 +184,10 @@ export default {
       label: "前置元数据",
       raw: "原始 YAML",
     },
+    fold: {
+      collapse: "折叠章节",
+      expand: "展开章节",
+    },
     code: {
       copy: "复制",
       copyTip: "复制代码",

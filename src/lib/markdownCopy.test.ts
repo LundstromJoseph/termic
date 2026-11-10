@@ -78,6 +78,11 @@ describe("clipboardHtmlForRange", () => {
     expect(clipboardHtmlForRange(selectAll(h), h)).toBe("<p>before</p><p>after</p>");
   });
 
+  it("drops the blocks of a collapsed section the selection crosses", () => {
+    const h = host('<p>before</p><h2 class="tc-fold-closed">Folded</h2><p class="tc-fold-hidden">inside</p><p>after</p>');
+    expect(clipboardHtmlForRange(selectAll(h), h)).toBe("<p>before</p><h2>Folded</h2><p>after</p>");
+  });
+
   it("drops local and blocked images but keeps remote ones", () => {
     const h = host('<p><img src="data:image/png;base64,AAAA" alt="a"><img data-md-remote-src="https://x.test/b.png" alt="b"><img src="https://x.test/c.png" alt="c" title="t"></p>');
     expect(clipboardHtmlForRange(selectAll(h), h)).toBe('<p><img src="https://x.test/c.png" alt="c"></p>');

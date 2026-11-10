@@ -189,6 +189,10 @@ export default {
       label: "Front matter",
       raw: "Raw YAML",
     },
+    fold: {
+      collapse: "Collapse section",
+      expand: "Expand section",
+    },
     code: {
       copy: "Copy",
       copyTip: "Copy code",

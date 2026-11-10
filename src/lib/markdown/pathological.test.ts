@@ -249,3 +249,33 @@ describe("details", () => {
     expect(open.every((o, i) => o === (i % 3 === 0))).toBe(true);
   });
 });
+
+describe("folds", () => {
+  const FOLDS = EXTENSIONS.findIndex(e => e.name === "folds");
+
+  // 20k, not 50k: hydrate runs on a happy-dom tree (see the top of the file)
+  it("20k top-level h2s with a 1k-name folded list render, restore and fold", () => {
+    const n = big(20_000);
+    const names = Array.from({ length: 1_000 }, (_, i) => `s${i * 2}`).join(", ");
+    const body = Array.from({ length: n }, (_, i) => `## s${i}\n\nbody\n`).join("\n");
+    const { host } = mount(`---\nfolded: ${names}\n---\n\n${body}`);
+    restoreViewState(host, []);
+    const closed = host.querySelectorAll(".tc-fold-closed").length;
+    expect(closed).toBe(Math.min(1_000, Math.ceil(n / 2)));
+    expect(host.querySelectorAll(".tc-fold-hidden")).toHaveLength(closed);
+  });
+
+  // semantics only, as for details: identical headings restore one for one
+  it("restores many identical heading texts one for one, after lines shift", () => {
+    const doc = (top: string) => top + "## S\n\nbody\n\n".repeat(1_000);
+    const a = mount(doc("")).host;
+    restoreViewState(a, []);
+    a.querySelectorAll("h2").forEach((h, i) => h.classList.toggle("tc-fold-closed", i % 3 === 0));
+    const saved = captureViewState(a);
+    expect((saved[FOLDS] as unknown[]).length).toBe(1_000);
+    const b = mount(doc("new\n\nlines\n\n")).host;
+    restoreViewState(b, saved);
+    const closed = Array.from(b.querySelectorAll("h2"), h => h.classList.contains("tc-fold-closed"));
+    expect(closed.every((c, i) => c === (i % 3 === 0))).toBe(true);
+  });
+});

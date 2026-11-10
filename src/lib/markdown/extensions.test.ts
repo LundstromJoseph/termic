@@ -5,6 +5,7 @@ import { SLOT_ATTR } from "@/lib/markdown/trust";
 import { copyToClipboard } from "@/lib/clipboard";
 import { revealInDetails } from "./extensions/details";
 import { findHeading, headingText } from "./extensions/headingLinks";
+import { applyFolds, DEFAULT_ATTR, FOLD_CLOSED, FOLD_HIDDEN, foldedNames, revealInFolds } from "./extensions/folds";
 
 // same sacrificial first line as markdown.test.ts: DOMPurify under happy-dom
 // unwraps the first element it sees.
@@ -304,5 +305,147 @@ describe("math", () => {
     // loaded now: a rebuild renders in the same task, no frame of raw TeX
     const again = mount("$y$\n").host;
     expect(again.querySelector("math")).not.toBeNull();
+  });
+});
+
+describe("folds", () => {
+  // front matter only counts on line 1, so no sacrificial line: happy-dom's
+  // DOMPurify unwraps the card itself, and the headings after it are intact.
+  function renderFm(src: string) {
+    const host = document.createElement("div");
+    host.innerHTML = renderDoc(src).html;
+    claim(host);
+    return host;
+  }
+  /** a rebuild the way the preview does one: capture off the old DOM, then
+   *  render, claim, restore, hydrate. */
+  function rebuild(src: string, old?: HTMLElement) {
+    const saved = old ? captureViewState(old) : [];
+    const host = renderFm(src);
+    restoreViewState(host, saved);
+    hydrate(host, { themeDark: true, canEdit: false, isAlive: () => true, claim });
+    return host;
+  }
+  const heading = (host: HTMLElement, text: string) =>
+    Array.from(host.querySelectorAll<HTMLElement>("h1,h2,h3,h4,h5,h6")).find(h => h.textContent === text)!;
+  const para = (host: HTMLElement, text: string) =>
+    Array.from(host.querySelectorAll("p")).find(p => p.textContent === text)!;
+  const hidden = (el: Element) => el.classList.contains(FOLD_HIDDEN);
+  const closed = (el: Element) => el.classList.contains(FOLD_CLOSED);
+  // "x" is the sacrificial first element when there is no front matter
+  const SECTIONS = "x\n\n## A\n\npa\n\n### B\n\npb\n\n#### C\n\npc\n\n### D\n\npd\n\n## E\n\npe\n";
+
+  it("foldedNames reads the first folded key, any case, and strips brackets, quotes and spacing", () => {
+    const doc = renderDoc("---\nFolded: [ Details , \"Open Questions\", 'Risks' ,, ]\nfolded: Ignored\n---\n");
+    expect(foldedNames(doc.model.frontMatter!.pairs)).toEqual(new Set(["details", "open questions", "risks"]));
+    expect(foldedNames([["title", "x"]])).toEqual(new Set());
+  });
+
+  it("stamps the folded default only on top-level h2 and h3 whose text matches, ignoring case", () => {
+    const host = renderFm([
+      "---", "folded: details, inner, notes", "---", "",
+      "# Details", "", "## DETAILS", "", "### Inner", "", "#### Notes", "",
+      "- ## Notes", "", "> ## Notes", "", "<h2>Notes</h2>", "", "## Notes", "",
+    ].join("\n"));
+    const stamped = Array.from(host.querySelectorAll(`[${DEFAULT_ATTR}]`), el => `${el.tagName}:${el.textContent}`);
+    expect(stamped).toEqual(["H2:DETAILS", "H3:Inner", "H2:Notes"]);
+    expect(host.querySelector(`[${DEFAULT_ATTR}]`)!.getAttribute(DEFAULT_ATTR)).toBe("1");
+  });
+
+  it("stamps nothing without front matter", () => {
+    const { host } = render("folded: Details\n\n## Details\n");
+    expect(host.querySelector(`[${DEFAULT_ATTR}]`)).toBeNull();
+  });
+
+  it("claim strips a fold class and default attr the document wrote itself", () => {
+    const { host } = render('<h2 class="tc-fold-closed" data-fold-default="1">Fake</h2>\n\n<p class="tc-fold-hidden">shown</p>\n');
+    expect(host.querySelector(`.${FOLD_CLOSED}, .${FOLD_HIDDEN}, [${DEFAULT_ATTR}]`)).toBeNull();
+  });
+
+  it("a first render collapses the folded sections and hides their blocks", () => {
+    const host = rebuild(`---\nfolded: B\n---\n\n${SECTIONS}`);
+    expect(closed(heading(host, "B"))).toBe(true);
+    expect(closed(heading(host, "A"))).toBe(false);
+    expect(hidden(heading(host, "B"))).toBe(false);
+    expect([para(host, "pb"), heading(host, "C"), para(host, "pc")].every(hidden)).toBe(true);
+    expect([para(host, "pa"), heading(host, "D"), para(host, "pd")].some(hidden)).toBe(false);
+  });
+
+  it("keeps the reader's toggles through a rebuild that shifts every line", () => {
+    const a = rebuild(`---\nfolded: B\n---\n\n${SECTIONS}`);
+    heading(a, "B").classList.remove(FOLD_CLOSED);
+    heading(a, "D").classList.add(FOLD_CLOSED);
+    const b = rebuild(`---\nfolded: B\n---\n\nnew\n\nlines\n\n${SECTIONS}`, a);
+    expect(closed(heading(b, "B"))).toBe(false);
+    expect(closed(heading(b, "D"))).toBe(true);
+    expect(hidden(para(b, "pd"))).toBe(true);
+    expect(hidden(para(b, "pb"))).toBe(false);
+  });
+
+  it("a folded default the author changed wins over the state it was saved in", () => {
+    const a = rebuild(`---\nfolded: B\n---\n\n${SECTIONS}`);
+    // the author moves the default from B to D; the reader touched neither
+    const b = rebuild(`---\nfolded: D\n---\n\n${SECTIONS}`, a);
+    expect(closed(heading(b, "B"))).toBe(false);
+    expect(closed(heading(b, "D"))).toBe(true);
+    // with the default unchanged, the reader's toggle is what is kept
+    heading(b, "D").classList.remove(FOLD_CLOSED);
+    const c = rebuild(`---\nfolded: D\n---\n\n${SECTIONS}`, b);
+    expect(closed(heading(c, "D"))).toBe(false);
+  });
+
+  it("applyFolds: an h2 hides its h3s, an h4 does not end an h3, a slot follows its block", () => {
+    const host = rebuild(SECTIONS);
+    const slot = document.createElement("div");
+    slot.setAttribute(SLOT_ATTR, "");
+    para(host, "pc").after(slot);
+    heading(host, "B").classList.add(FOLD_CLOSED);
+    applyFolds(host);
+    expect([heading(host, "C"), para(host, "pc"), slot].every(hidden)).toBe(true);
+    expect(hidden(heading(host, "D"))).toBe(false);
+    heading(host, "B").classList.remove(FOLD_CLOSED);
+    heading(host, "A").classList.add(FOLD_CLOSED);
+    applyFolds(host);
+    expect([para(host, "pa"), heading(host, "B"), heading(host, "D"), para(host, "pd"), slot].every(hidden)).toBe(true);
+    expect([heading(host, "A"), heading(host, "E"), para(host, "pe")].some(hidden)).toBe(false);
+    // nothing closed any more: everything shows again
+    heading(host, "A").classList.remove(FOLD_CLOSED);
+    applyFolds(host);
+    expect(host.querySelector(`.${FOLD_HIDDEN}`)).toBeNull();
+  });
+
+  it("the footnotes list stays visible under a collapsed last section", () => {
+    const host = rebuild("---\nfolded: Last\n---\n\n## Last\n\nSee note.[^1]\n\n[^1]: The note.\n");
+    expect(hidden(para(host, "See note.1"))).toBe(true);
+    expect(hidden(host.querySelector("ol.footnotes")!)).toBe(false);
+  });
+
+  it("revealInFolds opens the h3 and the h2 around a block and syncs their chevrons", () => {
+    const host = rebuild(`---\nfolded: A, B\n---\n\n${SECTIONS}`);
+    revealInFolds(para(host, "pc"));
+    expect(host.querySelector(`.${FOLD_CLOSED}, .${FOLD_HIDDEN}`)).toBeNull();
+    expect(Array.from(host.querySelectorAll(".md-fold-toggle"), b => b.getAttribute("aria-expanded"))).toEqual(["true", "true", "true", "true"]);
+  });
+
+  it("the chevron toggles its section and aria-expanded follows", () => {
+    const host = rebuild(SECTIONS);
+    const btn = heading(host, "A").querySelector<HTMLElement>(".md-fold-toggle")!;
+    // chrome with no text: find, copy and slugs read the heading unchanged
+    expect(btn.hasAttribute(SLOT_ATTR) && btn.textContent === "").toBe(true);
+    expect(btn.getAttribute("aria-expanded")).toBe("true");
+    btn.click();
+    expect(closed(heading(host, "A"))).toBe(true);
+    expect(hidden(para(host, "pa"))).toBe(true);
+    expect(btn.getAttribute("aria-expanded")).toBe("false");
+    expect(btn.title).toBe("Expand section");
+    btn.click();
+    expect(host.querySelector(`.${FOLD_HIDDEN}`)).toBeNull();
+    expect(btn.getAttribute("aria-expanded")).toBe("true");
+    expect(btn.title).toBe("Collapse section");
+  });
+
+  it("only markdown h2 and h3 at the top level get a chevron", () => {
+    const { host } = mount("# H1\n\n## H2\n\n### H3\n\n#### H4\n\n- ## Listed\n\n<h2>Raw</h2>\n");
+    expect(Array.from(host.querySelectorAll(".md-fold-toggle"), b => b.parentElement!.textContent)).toEqual(["H2", "H3"]);
   });
 });

@@ -12,6 +12,7 @@
 
 import { WIDE_CLASS } from "@/lib/markdown/extensions/breakout";
 import { SLOT_ATTR } from "@/lib/markdown/trust";
+import { FOLD_HIDDEN } from "@/lib/markdown/extensions/folds";
 
 
 /** The `<mark>` around the text a review comment quotes (previewComments).
@@ -47,8 +48,9 @@ function clean(root: Node): void {
   for (let n = walker.nextNode(); n; n = walker.nextNode()) els.push(n as Element);
   for (const el of els) {
     const tag = el.tagName;
-    // review-comment cards are app UI, not the document
-    if (el.hasAttribute(SLOT_ATTR)) {
+    // review-comment cards are app UI, not the document; a collapsed
+    // section's blocks are not on screen
+    if (el.hasAttribute(SLOT_ATTR) || el.classList.contains(FOLD_HIDDEN)) {
       el.remove();
       continue;
     }

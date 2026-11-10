@@ -48,7 +48,8 @@ import { taskChange, type PreviewEditTarget } from "@/lib/markdown/edit";
 import { IS_MAC } from "@/lib/platform";
 import { lastLine, type LineRange } from "@/lib/markdown/lines";
 import { READER_DEFAULTS, readerClass, readerStyle, type ReaderSettings } from "@/lib/markdown/reader";
-import { revealInDetails } from "@/lib/markdown/extensions/details";
+import { revealHidden } from "@/lib/markdown/reveal";
+import { applyFolds } from "@/lib/markdown/extensions/folds";
 import { findHeading } from "@/lib/markdown/extensions/headingLinks";
 import { useUI } from "@/store/ui";
 import { useTranslation } from "react-i18next";
@@ -351,7 +352,10 @@ function findHeadingBySlug(host: HTMLElement | null, fragment: string): HTMLElem
 
 /** Scroll the preview to a `#fragment` link target (in-page anchor / self-link). */
 function scrollToHeading(host: HTMLElement | null, fragment: string) {
-  findHeadingBySlug(host, fragment)?.scrollIntoView({ block: "start" });
+  const el = findHeadingBySlug(host, fragment);
+  if (!el) return;
+  revealHidden(el);
+  el.scrollIntoView({ block: "start" });
 }
 
 /** Tracks whether the image cache still owes a navigation-triggered
@@ -739,8 +743,8 @@ export function MarkdownPreview(
     findIndexRef.current = n;
     setFindIndex(n);
     marks.forEach((m, k) => m.classList.toggle(FIND_CURRENT_CLASS, k === n));
-    // a match inside a collapsed <details> has no box to scroll to
-    revealInDetails(marks[n]);
+    // a match inside a collapsed <details> or section has no box to scroll to
+    revealHidden(marks[n]);
     const scroller = hostRef.current?.parentElement;
     if (scroller) scrollMarkIntoView(scroller, marks[n]);
   };
@@ -994,7 +998,7 @@ export function MarkdownPreview(
       claim(host);
       restoreViewState(host, saved);
       modelRef.current = doc.model;
-    }, () => { comments.place(); blockEditor.place(); });
+    }, () => { comments.place(); blockEditor.place(); applyFolds(host); });
     outlineSinkRef.current?.(modelRef.current?.headings ?? []);
     // the blocks moved under a still editor: re-align to it
     realignSync();
@@ -1112,6 +1116,7 @@ export function MarkdownPreview(
     }
     if (attempt.kind !== "matched" || !host) return;
     const target = attempt.target;
+    revealHidden(target);
     target.scrollIntoView({ block: "start" });
 
     // Images and mermaid diagrams above the heading are still 0-height at this

@@ -23,6 +23,7 @@ import { details } from "./extensions/details";
 import { frontMatter } from "./extensions/frontMatter";
 import { codeHeader } from "./extensions/codeHeader";
 import { headingLinks } from "./extensions/headingLinks";
+import { folds } from "./extensions/folds";
 import { footnotes } from "./extensions/footnotes";
 import { deflist } from "./extensions/deflist";
 import { mark } from "./extensions/mark";
@@ -32,7 +33,7 @@ import { math } from "./extensions/math";
  *  wraps finished blocks, after every other rule has shaped them. */
 export const EXTENSIONS: readonly MdExtension[] = [
   srcLines, fence, frontMatter, alerts, details, taskList, codeHeader, headingLinks,
-  footnotes, deflist, mark, math, breakout,
+  folds, footnotes, deflist, mark, math, breakout,
 ];
 
 /** Everything the preview is allowed to render, whether markdown-it emitted it

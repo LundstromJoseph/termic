@@ -81,7 +81,7 @@ describe("markdown extensions", () => {
         ids: host.querySelectorAll("[id]").length,
       };
     });
-    expect(r.pairs).toEqual(["title Task snapshots", "status draft", "owner alice", "reviewers bob, carol"]);
+    expect(r.pairs).toEqual(["title Task snapshots", "status draft", "owner alice", "reviewers bob, carol", "folded Folded section"]);
     expect(r.fmLine).toBe("1");
     expect(r.hr).toBe(0);
     expect(r.alerts).toEqual(["markdown-alert-note", "markdown-alert-tip", "markdown-alert-important", "markdown-alert-warning", "markdown-alert-caution"]);
@@ -89,7 +89,7 @@ describe("markdown extensions", () => {
     expect(r.alertIcon).toContain("data:image/svg+xml");
     expect(r.codeLangs).toEqual(["rust", ""]);
     expect(r.codeHeadText).toBe("");
-    expect(r.headingLinks).toEqual(["H1", "H2", "H2", "H3"]);
+    expect(r.headingLinks).toEqual(["H1", "H2", "H2", "H3", "H2", "H3"]);
     // the slug is made at click time, from the rendered page: each copies its own
     for (const [i, slug] of ["task-snapshots", "design", "latency-budget", "glossary"].entries()) {
       await browser.execute((i) => (window.__mdExt!().querySelectorAll<HTMLElement>(".md-heading-link")[i]).click(), i);
@@ -129,5 +129,224 @@ describe("markdown extensions", () => {
     );
     expect(await browser.execute(() => window.__mdExt!().querySelector("details")!.open)).toBe(true);
     await snap("md-extensions-details-open.png");
+  });
+
+  // folds: `folded: Folded section` in the fixture's front matter. What a
+  // reader sees is computed display, so that is what is asserted.
+  const fold = () => browser.execute(() => {
+    const host = window.__mdExt!();
+    const h2 = Array.from(host.querySelectorAll("h2")).find(h => h.textContent === "Folded section")!;
+    const inner = Array.from(host.querySelectorAll("h3")).find(h => h.textContent === "Inner")!;
+    const para = (t: string) => Array.from(host.querySelectorAll("p")).find(p => p.textContent!.startsWith(t));
+    const shown = (el: Element | null | undefined) => !!el && getComputedStyle(el).display !== "none";
+    return {
+      closed: h2.classList.contains("tc-fold-closed"),
+      expanded: h2.querySelector(".md-fold-toggle")?.getAttribute("aria-expanded"),
+      innerClosed: inner.classList.contains("tc-fold-closed"),
+      heading: shown(h2),
+      lead: shown(para("Collapsed on open")),
+      // the breakout wrapper sets its own display: the fold has to beat it
+      table: shown(host.querySelector("table")?.closest(".md-wide")),
+      inner: shown(inner),
+      innerPara: shown(para("The inner paragraph")),
+      glossary: shown(host.querySelector("dl")),
+      footnotes: shown(host.querySelector("ol.footnotes")),
+    };
+  });
+  const FOLDED = { closed: true, expanded: "false", heading: true, lead: false, table: false, inner: false, innerPara: false, glossary: true, footnotes: true };
+  const OPEN = { closed: false, expanded: "true", heading: true, lead: true, table: true, inner: true, innerPara: true, glossary: true, footnotes: true };
+  const chevron = (heading: string) => browser.execute((t) => {
+    const h = Array.from(window.__mdExt!().querySelectorAll("h2, h3")).find(h => h.textContent === t)!;
+    h.querySelector<HTMLElement>(".md-fold-toggle")!.click();
+  }, heading);
+  const waitFold = (want: Partial<Awaited<ReturnType<typeof fold>>>, msg: string) =>
+    browser.waitUntil(async () => {
+      const f = await fold();
+      return Object.entries(want).every(([k, v]) => f[k as keyof typeof f] === v);
+    }, { timeout: 5_000, timeoutMsg: msg });
+  /** the folded section at the top of the pane, for a snap that shows it */
+  const snapFold = async (name: string) => {
+    await browser.execute(() => Array.from(window.__mdExt!().querySelectorAll("h2")).find(h => h.textContent === "Folded section")!
+      .scrollIntoView({ block: "start" }));
+    await snap(name);
+  };
+  const lineOf = (text: string) => String(readFileSync(path.join(fixture, DOC), "utf8").split("\n").indexOf(text) + 1);
+  const focusDoc = (key: string) => browser.execute((k) => {
+    window.__mdExt!().closest<HTMLElement>("[tabindex]")!.focus();
+    const mac = /^(mac|darwin)/i.test(navigator.platform);
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: k, [mac ? "metaKey" : "ctrlKey"]: true, bubbles: true, cancelable: true }));
+  }, key);
+  const typeInto = (testid: string, value: string, key?: string) => browser.execute((id, tid, v, k) => {
+    const input = document.querySelector<HTMLInputElement>(`[data-task-id="${id}"] [data-testid="${tid}"] input`)!;
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, v);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    if (k) input.dispatchEvent(new KeyboardEvent("keydown", { key: k, bubbles: true, cancelable: true }));
+  }, taskId, testid, value, key ?? "");
+
+  it("a section named in folded: opens collapsed, its blocks display: none, the rest untouched", async () => {
+    expect(await fold()).toMatchObject({ ...FOLDED, innerClosed: false });
+    await snapFold("md-fold-collapsed.png");
+  });
+
+  it("the chevron unfolds the section and folds it again", async () => {
+    await chevron("Folded section");
+    await waitFold(OPEN, "the chevron did not unfold the section");
+    await snapFold("md-fold-expanded.png");
+    await chevron("Folded section");
+    await waitFold(FOLDED, "the chevron did not fold the section again");
+  });
+
+  it("a folded h3 inside an open h2 hides only its own blocks", async () => {
+    await chevron("Folded section");
+    await chevron("Inner");
+    await waitFold({ closed: false, innerClosed: true, lead: true, table: true, inner: true, innerPara: false },
+      "folding Inner hid more or less than its own section");
+    await snapFold("md-fold-inner.png");
+    await chevron("Inner");
+    await chevron("Folded section");
+    await waitFold(FOLDED, "could not reset to the folded default");
+  });
+
+  it("the chevron sits after the heading text, inside the column, clear of the line-number gutter", async () => {
+    // a gutter label's right edge is 10px left of its block's column
+    // (lineGutter.ts), so anything inside the column cannot collide with it
+    const r = await browser.execute(() => {
+      const h2 = Array.from(window.__mdExt!().querySelectorAll("h2")).find(h => h.textContent === "Folded section")!;
+      const btn = h2.querySelector(".md-fold-toggle")!;
+      const text = document.createRange();
+      text.selectNodeContents(h2.firstChild!);
+      return {
+        insideColumn: btn.getBoundingClientRect().left >= h2.getBoundingClientRect().left,
+        afterText: btn.getBoundingClientRect().left >= text.getBoundingClientRect().right,
+        beforeLink: btn.nextElementSibling?.classList.contains("md-heading-link") ?? false,
+        shown: getComputedStyle(btn).opacity,
+      };
+    });
+    // collapsed, so shown without a hover
+    expect(r).toEqual({ insideColumn: true, afterText: true, beforeLink: true, shown: "1" });
+  });
+
+  it("find inside a folded section unfolds it", async () => {
+    const counter = () => browser.execute((id) =>
+      document.querySelector(`[data-task-id="${id}"] [data-testid="md-find"]`)?.textContent ?? null, taskId);
+    await focusDoc("f");
+    await browser.waitUntil(async () => (await counter()) !== null, { timeout: 5_000, timeoutMsg: "find never opened" });
+    await typeInto("md-find", "inner paragraph");
+    await browser.waitUntil(async () => (await counter())?.includes("1/1") ?? false, { timeout: 5_000, timeoutMsg: "find never matched inside the fold" });
+    await waitFold({ ...OPEN }, "a find match inside the fold did not unfold it");
+    await typeInto("md-find", "", "Escape");
+    await chevron("Folded section");
+    await waitFold(FOLDED, "could not refold after find");
+  });
+
+  it("an outline click on a heading inside a fold unfolds it", async () => {
+    const toggle = () => browser.execute((id) => Array.from(document.querySelectorAll<HTMLElement>(`[data-task-id="${id}"] [data-testid="md-outline-toggle"]`))
+      .find(b => b.getBoundingClientRect().width > 0)!.click(), taskId);
+    const line = lineOf("### Inner");
+    await toggle();
+    try {
+      await browser.waitUntil(
+        () => browser.execute((id, l) => !!document.querySelector(`[data-task-id="${id}"] [data-outline-line="${l}"]`), taskId, line),
+        { timeout: 5_000, timeoutMsg: "the outline never listed Inner" },
+      );
+      await browser.execute((id, l) => Array.from(document.querySelectorAll<HTMLElement>(`[data-task-id="${id}"] [data-outline-line="${l}"]`))
+        .find(b => b.getBoundingClientRect().width > 0)!.click(), taskId, line);
+      await waitFold({ ...OPEN }, "an outline jump into the fold did not unfold it");
+    } finally {
+      await toggle();
+    }
+    await chevron("Folded section");
+    await waitFold(FOLDED, "could not refold after the outline jump");
+  });
+
+  it("go to line into a folded section unfolds it and flashes the block", async () => {
+    const line = lineOf("The inner paragraph under the fold.");
+    await focusDoc("g");
+    await browser.waitUntil(
+      () => browser.execute((id) => !!document.querySelector(`[data-task-id="${id}"] [data-testid="md-goto"]`), taskId),
+      { timeout: 5_000, timeoutMsg: "go to line never opened" },
+    );
+    await typeInto("md-goto", line, "Enter");
+    await browser.waitUntil(
+      () => browser.execute((l) => window.__mdExt!().querySelector<HTMLElement>(".md-flash")?.dataset.srcLine === l, line),
+      { timeout: 5_000, timeoutMsg: `line ${line} never flashed` },
+    );
+    expect(await fold()).toMatchObject(OPEN);
+    await chevron("Folded section");
+    await waitFold(FOLDED, "could not refold after go to line");
+  });
+
+  it("the reader's folds survive an edit in split view", async () => {
+    // opposite of the default on both: Folded section open, Inner closed
+    await chevron("Folded section");
+    await chevron("Inner");
+    await waitFold({ closed: false, innerClosed: true, innerPara: false }, "could not set up the reader's folds");
+    const setView = (v: string) => browser.execute((id, p, v) => {
+      const app = window.__termic!.useApp.getState();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const tab = app.tabs[id].find((t: any) => t.type === "edit" && t.path === p);
+      app.patchTab(id, tab.id, { mdView: v });
+    }, taskId, DOC, v);
+    await setView("split");
+    try {
+      await browser.waitUntil(
+        () => browser.execute(() => Array.from(document.querySelectorAll(".cm-editor")).some(el => !el.closest(".markdown-body") && el.getBoundingClientRect().width > 0)),
+        { timeout: 10_000, timeoutMsg: "split view never showed the editor" },
+      );
+      await browser.execute(() => {
+        const dom = Array.from(document.querySelectorAll(".cm-editor"))
+          .find(el => !el.closest(".markdown-body") && el.getBoundingClientRect().width > 0);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const view = (dom as unknown as { __cmView: any }).__cmView;
+        // above every section, so each heading's line shifts
+        const at = view.state.doc.toString().indexOf("# Task snapshots\n") + "# Task snapshots\n".length;
+        view.dispatch({ changes: { from: at, insert: "\nTyped in split view.\n" } });
+      });
+      await browser.waitUntil(
+        () => browser.execute(() => window.__mdExt!().textContent!.includes("Typed in split view.")),
+        { timeout: 10_000, timeoutMsg: "the preview never picked up the edit" },
+      );
+      expect(await fold()).toMatchObject({ closed: false, innerClosed: true, lead: true, inner: true, innerPara: false });
+      await snapFold("md-fold-split-edit.png");
+    } finally {
+      // save, so the archive in after() meets a clean tab
+      await browser.execute(() => {
+        const mac = /^(mac|darwin)/i.test(navigator.platform);
+        window.__mdExt!().dispatchEvent(new KeyboardEvent("keydown", { key: "s", [mac ? "metaKey" : "ctrlKey"]: true, bubbles: true }));
+      });
+      await browser.waitUntil(() => readFileSync(path.join(fixture, DOC), "utf8").includes("Typed in split view."),
+        { timeout: 5_000, timeoutMsg: "⌘S never saved the split edit" });
+      await setView("preview");
+    }
+  });
+
+  it("a recycled preview tab opens the next file on its own defaults, not the last file's folds", async () => {
+    const BODY = "## Folded section\n\nA body.\n\n### Inner\n\nInner body.\n";
+    writeFileSync(path.join(fixture, "md-fold-a.md"), `---\nfolded: Folded section\n---\n\n${BODY}`);
+    writeFileSync(path.join(fixture, "md-fold-b.md"), `---\ntitle: b\n---\n\n${BODY.replace("A body.", "B body.")}`);
+    const open = (p: string, text: string) => browser.execute((id, p) => {
+      const app = window.__termic!.useApp.getState();
+      app.bumpFsRevision(id);
+      app.openPreviewTab(id, { type: "edit", path: p, title: p });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const tab = window.__termic!.useApp.getState().tabs[id].find((t: any) => t.type === "edit" && t.path === p);
+      app.setActiveTabId(id, tab.id);
+      app.patchTab(id, tab.id, { mdView: "preview" });
+      return tab.id as string;
+    }, taskId, p).then(async (tabId) => {
+      await browser.waitUntil(() => browser.execute((t) => window.__mdExt?.()?.textContent?.includes(t) ?? false, text),
+        { timeout: 10_000, timeoutMsg: `${p} never rendered` });
+      return tabId;
+    });
+    const state = () => browser.execute(() => Array.from(window.__mdExt!().querySelectorAll("h2, h3"), h => `${h.textContent}:${h.classList.contains("tc-fold-closed")}`));
+    const a = await open("md-fold-a.md", "A body.");
+    expect(await state()).toEqual(["Folded section:true", "Inner:false"]);
+    // the reader flips both
+    await chevron("Folded section");
+    await chevron("Inner");
+    expect(await state()).toEqual(["Folded section:false", "Inner:true"]);
+    const b = await open("md-fold-b.md", "B body.");
+    expect(b).toBe(a); // the same preview slot, recycled
+    expect(await state()).toEqual(["Folded section:false", "Inner:false"]);
   });
 });

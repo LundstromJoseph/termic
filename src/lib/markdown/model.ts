@@ -71,7 +71,7 @@ export function blockEnd(lines: readonly string[], map: [number, number]): numbe
 
 /** Heading text as the reader sees it: `## Sub *it*` -> "Sub it". Math is
  *  its TeX, as GitHub slugs it. */
-function inlineText(inline: Token | undefined): string {
+export function inlineText(inline: Token | undefined): string {
   let s = "";
   for (const c of inline?.children ?? []) {
     if (c.type === "text" || c.type === "code_inline" || c.type === "math_inline") s += c.content;

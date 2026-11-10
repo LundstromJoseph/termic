@@ -14,6 +14,7 @@ import { useShallow } from "zustand/react/shallow";
 import { useReviewComments, type ReviewComment } from "@/store/reviewComments";
 import { QUOTE_CLASS } from "@/lib/markdownCopy";
 import { SLOT_ATTR } from "@/lib/markdown/trust";
+import { applyFolds } from "@/lib/markdown/extensions/folds";
 import { buildCard, buildComposer, type ComposerSpec } from "./commentBoxes";
 import { innermostBlocks, keepAfter, newSlot } from "./markdown/previewSlots";
 import { elRange, sliceLines } from "@/lib/markdown/lines";
@@ -161,6 +162,8 @@ export function placeSlots(host: HTMLElement, slots: Slot[]): void {
   }
   for (const el of Array.from(host.querySelectorAll(`[${COMMENTED_ATTR}]`))) if (!lit.has(el)) el.removeAttribute(COMMENTED_ATTR);
   for (const el of lit) el.setAttribute(COMMENTED_ATTR, "");
+  // a slot moved into or out of a collapsed section takes its state
+  applyFolds(host);
 }
 
 /** Review comments on the preview of task file `file` (undefined = none).

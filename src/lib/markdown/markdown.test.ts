@@ -34,6 +34,7 @@ describe("engine allowlist", () => {
       "data-mermaid", "data-src-line", "data-src-end",
       "type", "checked", "data-task-line", TRUST_MARK,
       "data-fn", "data-fnref",
+      "data-fold-default",
     ]));
   });
 

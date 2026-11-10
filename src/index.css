@@ -1267,6 +1267,10 @@ html.termic-mod-held .xterm .xterm-cursor-pointer { cursor: pointer; }
 .markdown-body > .md-wide > * { margin-bottom: 0; }
 /* a diagram has no useful max-content width: take the whole cap, centered */
 .markdown-body > .md-wide-fill { width: auto; }
+/* folds (lib/markdown/extensions/folds.ts): a block in a collapsed section.
+   display, never visibility (a hidden pane's renderer keeps drawing), and
+   it has to beat .md-wide's own display. */
+.markdown-body > .tc-fold-hidden { display: none !important; }
 /* Line-number gutter (components/task/markdown/lineGutter.ts). One 0x0 layer
    at the scroller's content origin, so the labels scroll with the document
    and nothing is recomputed on scroll. A label's right edge sits just left of
@@ -1488,6 +1492,30 @@ html.termic-mod-held .xterm .xterm-cursor-pointer { cursor: pointer; }
 .markdown-body :is(h1, h2, h3, h4, h5, h6):hover > .md-heading-link,
 .markdown-body .md-heading-link:focus-visible { opacity: 1; }
 .markdown-body .md-heading-link:hover { color: var(--color-accent); }
+
+/* folds: the chevron after a foldable heading's text, shown on hover and
+   always on a collapsed one, where it points right. Not in the left margin:
+   the line-number gutter labels the hovered heading there. */
+.markdown-body .md-fold-toggle {
+  display: inline-block;
+  width: 0.7em;
+  height: 0.7em;
+  margin-left: 0.35em;
+  padding: 0;
+  vertical-align: middle;
+  color: var(--color-fg-faint);
+  background: currentColor;
+  border: 0;
+  cursor: pointer;
+  opacity: 0;
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E") center / contain no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E") center / contain no-repeat;
+}
+.markdown-body :is(h2, h3):hover > .md-fold-toggle,
+.markdown-body .md-fold-toggle:focus-visible,
+.markdown-body .tc-fold-closed > .md-fold-toggle { opacity: 1; }
+.markdown-body .tc-fold-closed > .md-fold-toggle { transform: rotate(-90deg); }
+.markdown-body .md-fold-toggle:hover { color: var(--color-accent); }
 
 /* footnotes: the notes list under a rule at the end, and the flash a jump
    (reference to note, back link to reference) lands with. */
