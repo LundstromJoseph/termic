@@ -186,7 +186,6 @@ export default {
       caution: "Caution",
     },
     frontMatter: {
-      label: "Front matter",
       raw: "Raw YAML",
     },
     fold: {

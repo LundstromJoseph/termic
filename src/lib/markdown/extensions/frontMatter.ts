@@ -1,5 +1,5 @@
 // front matter: `---` on the document's first line through the next
-// `---` or `...` line renders as a compact key/value card instead of an
+// `---` or `...` line renders as a strip of key/value chips instead of an
 // <hr> and a paragraph of YAML. Only at the very top of the root document.
 // No YAML library: top-level `key: value` lines become pairs, every other
 // line (nested maps, lists, block scalars, comments) goes in a collapsed raw
@@ -39,6 +39,8 @@ export function parseFrontMatter(lines: readonly string[]): Pick<FrontMatter, "p
 }
 
 const PILL_KEYS = new Set(["status", "state"]);
+// past this a value reads as a sentence, not a tag: it gets its own row
+const WIDE = 60;
 
 export const frontMatter: MdExtension = {
   name: "frontMatter",
@@ -69,17 +71,21 @@ export const frontMatter: MdExtension = {
       const t = tokens[idx];
       const { pairs, raw } = t.meta as Pick<FrontMatter, "pairs" | "raw">;
       const esc = md.utils.escapeHtml;
-      let html = `<div class="front-matter"${self.renderAttrs(t)}>`
-        + `<span class="fm-label">${esc(i18n.t("panels:mdExt.frontMatter.label"))}</span>`;
+      let body = "";
       for (const [k, v] of pairs) {
+        // read by folds.ts, which folds the sections it names
+        if (k.toLowerCase() === "folded") continue;
         const cls = PILL_KEYS.has(k.toLowerCase()) ? "fm-v fm-pill" : "fm-v";
-        html += `\n<span class="fm-pair"><span class="fm-k">${esc(k)}</span> <span class="${cls}">${esc(v)}</span></span>`;
+        const pair = v.length > WIDE ? "fm-pair fm-wide" : "fm-pair";
+        body += `\n<span class="${pair}"><span class="fm-k">${esc(k)}</span> <span class="${cls}">${esc(v)}</span></span>`;
       }
       if (raw.length) {
-        html += `\n<details class="fm-raw"><summary>${esc(i18n.t("panels:mdExt.frontMatter.raw"))}</summary>`
+        body += `\n<details class="fm-raw"><summary>${esc(i18n.t("panels:mdExt.frontMatter.raw"))}</summary>`
           + `<pre><code>${esc(raw.join("\n"))}</code></pre></details>`;
       }
-      return `${html}</div>\n`;
+      // a header holding only `folded:` still emits its stamped block, so the
+      // model's block list and the DOM agree; CSS hides it
+      return `<div class="${body ? "front-matter" : "front-matter fm-empty"}"${self.renderAttrs(t)}>${body}</div>\n`;
     };
   },
 };

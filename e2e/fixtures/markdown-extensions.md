@@ -3,6 +3,7 @@ title: Task snapshots
 status: draft
 owner: alice
 reviewers: [bob, carol]
+summary: Automatic snapshots of a task's worktree, taken each time an agent settles
 folded: Folded section
 tags:
   - storage

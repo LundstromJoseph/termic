@@ -93,12 +93,16 @@ extensions" at the end of `src/index.css`; strings are `panels:mdExt.*`.
   target (`revealInDetails`, through `revealHidden`, see `folds`). Allows
   and trusts nothing.
 - `frontMatter`: YAML front matter (`---` on line 1 through the next `---`
-  or `...`, root document only; unclosed stays an `<hr>`) as a key/value
-  card, `<div class="front-matter">`. No YAML parser: flat top-level
-  `key: value` lines are pairs, every other line is shown raw in a
-  collapsed `<details>`. One stamped block, so comments and line numbers
+  or `...`, root document only; unclosed stays an `<hr>`) as a strip of
+  key/value chips, `<div class="front-matter">`, with no label. No YAML
+  parser: flat top-level `key: value` lines are pairs, every other line is
+  shown raw in a collapsed `<details>`. A value over 60 characters gets
+  `fm-wide`, a full-width row instead of a chip. A `folded` pair (any
+  case) is not rendered, since it drives `folds`; a header holding only
+  `folded:` still emits its block, as `fm-empty` (`display: none`), so the
+  model and the DOM agree. One stamped block, so comments and line numbers
   work on it. `DocModel.frontMatter` carries `{ pairs, raw, startLine,
-  endLine }`. Allows and trusts nothing new.
+  endLine }`, `folded` included. Allows and trusts nothing new.
 - `codeHeader`: hydrate only. Inserts a header row (language from the
   `language-*` class, a Copy button through `copyToClipboard`) as the
   previous sibling of every stamped `<pre>`, so it sits inside a breakout

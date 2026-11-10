@@ -181,7 +181,6 @@ export default {
       caution: "注意",
     },
     frontMatter: {
-      label: "前置元数据",
       raw: "原始 YAML",
     },
     fold: {

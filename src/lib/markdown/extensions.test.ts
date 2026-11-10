@@ -3,7 +3,9 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { captureViewState, claim, hydrate, renderDoc, restoreViewState } from "./engine";
 import { SLOT_ATTR } from "@/lib/markdown/trust";
 import { copyToClipboard } from "@/lib/clipboard";
+import MarkdownIt from "markdown-it";
 import { revealInDetails } from "./extensions/details";
+import { frontMatter } from "./extensions/frontMatter";
 import { findHeading, headingText } from "./extensions/headingLinks";
 import { applyFolds, DEFAULT_ATTR, FOLD_CLOSED, FOLD_HIDDEN, foldedNames, revealInFolds } from "./extensions/folds";
 
@@ -137,6 +139,37 @@ describe("frontMatter", () => {
     expect(host.querySelector(".fm-pill")!.textContent).toBe("draft");
     expect(host.querySelector("details.fm-raw code")!.textContent).toBe("tags:\n  - storage\n# a comment");
     expect(host.querySelector("hr")).toBeNull();
+  });
+
+  // the card is the first element, which happy-dom's DOMPurify unwraps, so
+  // its classes are read off the extension's own renderer, unsanitized
+  const card = (src: string) => {
+    const md = new MarkdownIt();
+    frontMatter.plugin!(md);
+    const host = document.createElement("div");
+    host.innerHTML = md.render(src);
+    return host.querySelector(".front-matter")!;
+  };
+
+  it("drops the visible label and renders no folded pair, which stays in the model", () => {
+    const src = "---\ntitle: T\nFOLDED: Details\n---\n";
+    expect(renderDoc(src).model.frontMatter!.pairs).toEqual([["title", "T"], ["FOLDED", "Details"]]);
+    expect(card(src).textContent!.trim()).toBe("title T");
+  });
+
+  it("gives a value over 60 characters a wide row and a value of 60 a chip", () => {
+    const el = card(`---\nshort: ${"b".repeat(60)}\nsummary: ${"a".repeat(61)}\n---\n`);
+    expect(Array.from(el.querySelectorAll(".fm-pair"), p => [p.querySelector(".fm-k")!.textContent, p.classList.contains("fm-wide")]))
+      .toEqual([["short", false], ["summary", true]]);
+    expect(el.classList.contains("fm-empty")).toBe(false);
+  });
+
+  it("a header holding only folded: still renders its block, marked empty, and stays one block in the model", () => {
+    const src = "---\nfolded: Details\n---\n\n## Details\n";
+    const el = card(src);
+    expect(el.classList.contains("fm-empty")).toBe(true);
+    expect(el.textContent).toBe("");
+    expect(renderDoc(src).model.blocks[0]).toMatchObject({ kind: "front_matter", startLine: 1, endLine: 3 });
   });
 
   it("accepts ... as the closing fence", () => {

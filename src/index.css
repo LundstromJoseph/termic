@@ -1381,26 +1381,34 @@ html.termic-mod-held .xterm .xterm-cursor-pointer { cursor: pointer; }
 .markdown-body details[open] > summary { margin-bottom: 0.55em; }
 .markdown-body details > :last-child { margin-bottom: 0; }
 
-/* frontMatter: the YAML header as one compact card of key/value pairs;
-   anything that is not a flat pair sits raw in a fold inside it. */
+/* frontMatter: the YAML header as a strip of key/value chips; a long value
+   takes a full row, and anything that is not a flat pair sits raw in a fold. */
 .markdown-body .front-matter {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 0.3em 1.3em;
+  gap: 0.4em;
   margin-bottom: 1.6em;
-  padding: 0.6em 0.9em;
   font-size: 12.5px;
   line-height: 1.5;
-  background: var(--color-bg-1);
-  border: 1px solid var(--color-border-soft);
-  border-radius: 6px;
 }
-.markdown-body .front-matter .fm-label {
-  font-size: 10.5px;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--color-fg-faint);
+.markdown-body .front-matter.fm-empty { display: none; }
+.markdown-body .front-matter .fm-pair {
+  display: flex;
+  align-items: baseline;
+  padding: 0.1em 0.7em;
+  background: var(--color-bg);
+  border: 1px solid var(--color-border-soft);
+  border-radius: 999px;
+}
+.markdown-body .front-matter .fm-pair.fm-wide {
+  display: block;
+  flex-basis: 100%;
+  padding: 0.1em 0;
+  background: none;
+  border: 0;
+  border-radius: 0;
+  overflow-wrap: anywhere;
 }
 .markdown-body .front-matter .fm-k { margin-right: 0.35em; color: var(--color-fg-faint); }
 .markdown-body .front-matter .fm-pill {

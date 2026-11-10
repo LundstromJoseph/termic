@@ -81,7 +81,10 @@ describe("markdown extensions", () => {
         ids: host.querySelectorAll("[id]").length,
       };
     });
-    expect(r.pairs).toEqual(["title Task snapshots", "status draft", "owner alice", "reviewers bob, carol", "folded Folded section"]);
+    expect(r.pairs).toEqual([
+      "title Task snapshots", "status draft", "owner alice", "reviewers bob, carol",
+      "summary Automatic snapshots of a task's worktree, taken each time an agent settles",
+    ]);
     expect(r.fmLine).toBe("1");
     expect(r.hr).toBe(0);
     expect(r.alerts).toEqual(["markdown-alert-note", "markdown-alert-tip", "markdown-alert-important", "markdown-alert-warning", "markdown-alert-caution"]);
@@ -105,6 +108,32 @@ describe("markdown extensions", () => {
     expect(r.refs).toEqual(["Hashing kept up with disk reads on every machine tried.", "Measured over 20 runs on a 1 GB checkout."]);
     expect(r.ids).toBe(0);
     await snap("md-extensions.png");
+  });
+
+  it("front matter is a strip of chips, folded: is not shown, and a long value spans the strip", async () => {
+    const r = await browser.execute(() => {
+      const fm = window.__mdExt!().querySelector<HTMLElement>(".front-matter")!;
+      const pair = (k: string) => Array.from(fm.querySelectorAll<HTMLElement>(".fm-pair")).find(p => p.querySelector(".fm-k")!.textContent === k)!;
+      const chip = getComputedStyle(pair("owner"));
+      const wide = pair("summary");
+      return {
+        keys: Array.from(fm.querySelectorAll(".fm-k"), k => k.textContent),
+        label: !!fm.querySelector(".fm-label"),
+        chipRadius: chip.borderTopLeftRadius,
+        chipBorder: chip.borderTopWidth,
+        chipNarrower: pair("owner").getBoundingClientRect().width < fm.clientWidth / 2,
+        wide: wide.classList.contains("fm-wide"),
+        wideBorder: getComputedStyle(wide).borderTopWidth,
+        wideWidth: wide.getBoundingClientRect().width,
+        cardWidth: fm.clientWidth,
+      };
+    });
+    expect(r.keys).toEqual(["title", "status", "owner", "reviewers", "summary"]);
+    expect(r.label).toBe(false);
+    expect(r).toMatchObject({ chipRadius: "999px", chipBorder: "1px", chipNarrower: true, wide: true, wideBorder: "0px" });
+    expect(Math.abs(r.wideWidth - r.cardWidth)).toBeLessThanOrEqual(1);
+    await browser.execute(() => window.__mdExt!().querySelector(".front-matter")!.scrollIntoView({ block: "start" }));
+    await snap("md-front-matter.png");
   });
 
   it("a footnote reference jumps to its note and the back link returns", async () => {
