@@ -87,6 +87,16 @@ extensions" at the end of `src/index.css`; strings are `panels:mdExt.*`.
   rendered SVG, keeping mermaid's id: its `<style>` is scoped `#mmd-N` and
   its own `<defs>` keep the arrowheads resolving after a rebuild replaces
   the original. No second render.
+  Trust: the mermaid SVG goes in through `innerHTML` WITHOUT the app
+  sanitizer; only mermaid's own `securityLevel: "strict"` DOMPurify passes
+  run. Those keep `click X href` as `<a xlink:href>` and let HTML labels
+  carry `<area href>`, `<img usemap>` and forms. The preview's link guard
+  catches only `closest("a")`. `cloneForZoom` strips `href` /
+  `xlink:href` from every element except SVG non-`<a>` ones (`<image>`,
+  `<use>`: content, not links), plus `action`, `formaction`, `form` and
+  `usemap` (the clone shares the original's ids and map names, so those
+  would resolve to the preview's live `<form>` / `<map>`), and cancels
+  `submit` on the clone root. A new clone surface needs the same strip.
 - `alerts`: GitHub callouts, a blockquote whose first line is `[!NOTE]`,
   `[!TIP]`, `[!IMPORTANT]`, `[!WARNING]` or `[!CAUTION]` (any case, alone on
   its line). Adds `markdown-alert markdown-alert-<type>` to the blockquote

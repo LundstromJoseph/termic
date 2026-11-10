@@ -2,20 +2,56 @@
 import { describe, it, expect } from "vitest";
 import { cloneForZoom, fitView, zoomAt } from "./MermaidZoom";
 
+// `label` lands in a <foreignObject> as HTML-namespace elements, the way a
+// browser parses mermaid's labels (happy-dom's parser would leave them SVG).
+function renderSvg(inner: string, label = ""): SVGSVGElement {
+  const host = document.createElement("div");
+  host.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 40 20">${inner}<foreignObject width="40" height="20"></foreignObject></svg>`;
+  const div = document.createElement("div");
+  div.innerHTML = label;
+  host.querySelector("foreignObject")!.append(div);
+  return host.querySelector("svg")!;
+}
+
 describe("cloneForZoom", () => {
-  it("strips href and xlink:href from links in the clone so activating one cannot navigate the webview", () => {
-    const host = document.createElement("div");
-    host.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 40 20">`
-      + `<a xlink:href="https://example.com"><rect width="10" height="10"></rect></a>`
-      + `<a href="about:blank"><rect width="10" height="10"></rect></a></svg>`;
-    const svg = host.querySelector("svg")!;
+  it("strips every navigation attribute in the clone (svg and html links, image-map areas, usemap, form action, formaction and form) and leaves the original intact", () => {
+    const svg = renderSvg(
+      `<a xlink:href="https://example.com"><rect width="10" height="10"></rect></a>`
+      + `<a href="about:blank"><rect width="10" height="10"></rect></a>`,
+      `<a href="https://example.com/a">a</a>`
+      + `<img usemap="#m"><map name="m"><area shape="default" href="https://example.com/y"></map>`
+      + `<form action="https://example.com/f"><button formaction="https://example.com/b">b</button></form>`
+      + `<button form="f">c</button>`,
+    );
 
     const { el } = cloneForZoom(svg);
 
-    const links = Array.from(el.querySelectorAll("a"));
-    expect(links).toHaveLength(2);
-    expect(links.flatMap(a => a.getAttributeNames())).toEqual([]);
-    expect(svg.querySelectorAll("a")[0].getAttribute("xlink:href")).toBe("https://example.com");
+    const navigating = ["href", "xlink:href", "action", "formaction", "form", "usemap"];
+    const left = Array.from(el.querySelectorAll("*"))
+      .flatMap(n => n.getAttributeNames().filter(a => navigating.includes(a)).map(a => `${n.localName}[${a}]`));
+    expect(left).toEqual([]);
+    expect(svg.querySelector("area")!.getAttribute("href")).toBe("https://example.com/y");
+  });
+
+  it("keeps href on svg <image> and <use> in the clone because they are content, not links", () => {
+    const svg = renderSvg(
+      `<image href="data:image/png;base64,AA=="></image><use xlink:href="#shape"></use>`,
+    );
+
+    const { el } = cloneForZoom(svg);
+
+    expect(el.querySelector("image")!.getAttribute("href")).toBe("data:image/png;base64,AA==");
+    expect(el.querySelector("use")!.getAttributeNS("http://www.w3.org/1999/xlink", "href")).toBe("#shape");
+  });
+
+  it("cancels a form submit inside the clone so an action-less form cannot reload the app", () => {
+    const svg = renderSvg("", "<form></form>");
+    const { el } = cloneForZoom(svg);
+    const submit = new Event("submit", { bubbles: true, cancelable: true });
+
+    el.querySelector("form")!.dispatchEvent(submit);
+
+    expect(submit.defaultPrevented).toBe(true);
   });
 });
 

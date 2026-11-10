@@ -20,6 +20,10 @@ const MIN = 0.1;
 const MAX = 8;
 const STEP = 1.25;
 
+const SVG_NS = "http://www.w3.org/2000/svg";
+const XLINK_NS = "http://www.w3.org/1999/xlink";
+const NAV_ATTRS = ["action", "formaction", "form", "usemap"];
+
 /** the box centred in the viewport, at 95% of the tighter fit, never above 2x. */
 export function fitView(box: Size, vp: Size): View {
   const s = Math.min(Math.min(vp.w / box.w, vp.h / box.h) * 0.95, 2);
@@ -35,13 +39,22 @@ export function zoomAt(v: View, factor: number, px: number, py: number): View {
 
 export function cloneForZoom(svg: SVGSVGElement): { el: SVGSVGElement; box: Size } {
   const el = svg.cloneNode(true) as SVGSVGElement;
-  // `click X href` survives securityLevel "strict" as an <a xlink:href>. The
-  // preview swallows link clicks, but the clone sits in a portal outside it,
-  // where activating one would navigate the whole webview away from the app.
-  el.querySelectorAll("a").forEach(a => {
-    a.removeAttribute("href");
-    a.removeAttributeNS("http://www.w3.org/1999/xlink", "href");
+  // Mermaid strict keeps `click X href` as an <a xlink:href> and lets HTML
+  // labels carry <area href>, <img usemap> and forms. The clone sits in a
+  // portal outside the preview's click guard, where activating any of them
+  // would navigate the whole webview away from the app. `usemap` and `form`
+  // go too: the clone keeps the original's ids and names, so they would
+  // resolve to the preview's untouched <map> or <form>.
+  el.querySelectorAll("*").forEach(node => {
+    // in SVG only <a> navigates; an <image> or <use> href is content
+    if (node.namespaceURI !== SVG_NS || node.localName === "a") {
+      node.removeAttribute("href");
+      node.removeAttributeNS(XLINK_NS, "href");
+    }
+    for (const attr of NAV_ATTRS) node.removeAttribute(attr);
   });
+  // a form with no action still submits to the app's own URL, reloading it
+  el.addEventListener("submit", e => e.preventDefault());
   const vb = svg.viewBox.baseVal;
   const box = vb && vb.width > 0 && vb.height > 0 ? { w: vb.width, h: vb.height } : (() => {
     const b = svg.getBBox();
