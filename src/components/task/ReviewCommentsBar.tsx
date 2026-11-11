@@ -106,11 +106,13 @@ export function ReviewCommentsBar({ taskId, compact = false, className }: {
   const isExternal = (file: string, reviewId?: string) => !reviewId && isAbsoluteToken(file);
   function jumpTo(file: string, reviewId?: string) {
     const ext = (tabsForTask ?? []).find(t => t.type === "external" && t.path === file);
-    if (ext) useApp.getState().setActiveTabId(taskId, ext.id);
+    if (ext?.paneId) useApp.getState().setPaneActiveTab(taskId, ext.paneId, ext.id);
+    else if (ext) useApp.getState().setActiveTabId(taskId, ext.id);
     else if (isExternal(file, reviewId)) {
-      openPreviewTab(taskId, { type: "external", path: file, title: baseName(file) });
-      // in preview, as `termic view` opens it: the source view shows no
-      // cards for an external file
+      // permanent, as `termic view` opens it: the mdView patch below must not
+      // land on the preview slot, which a recycle hands to the next file
+      openPreviewTab(taskId, { type: "external", path: file, title: baseName(file), permanent: true });
+      // in preview: the source view shows no cards for an external file
       const tab = (useApp.getState().tabs[taskId] ?? []).find(t => t.type === "external" && t.path === file);
       if (tab) useApp.getState().patchTab(taskId, tab.id, { mdView: "preview" });
     } else {

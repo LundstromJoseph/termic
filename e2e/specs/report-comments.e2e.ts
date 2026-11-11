@@ -41,14 +41,20 @@ describe("comments on a termic view report", () => {
   let extTabId!: string;
   let dir!: string;
   let file!: string;
+  let other!: string;
   let readerWas: unknown;
 
-  type TabInfo = { id: string; type: string; path: string | null; mdView: string | null };
+  type TabInfo = { id: string; type: string; path: string | null; mdView: string | null; preview: boolean };
   const tabs = (): Promise<TabInfo[]> => browser.execute((id) =>
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (window.__termic!.useApp.getState().tabs[id] ?? []).map((t: any) => ({ id: t.id, type: t.type, path: t.path ?? null, mdView: t.mdView ?? null })),
+    (window.__termic!.useApp.getState().tabs[id] ?? []).map((t: any) => ({ id: t.id, type: t.type, path: t.path ?? null, mdView: t.mdView ?? null, preview: !!t.preview })),
   taskId);
   const activeTab = () => browser.execute((id) => window.__termic!.useApp.getState().activeTab[id], taskId);
+  const paneActive = (paneId: string) => browser.execute((id, p) => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const walk = (n: any): any => !n ? null : n.type === "pane" ? (n.id === p ? n : null) : walk(n.a) ?? walk(n.b);
+    return walk(window.__termic!.useApp.getState().splitTree[id])?.activeTabId ?? null;
+  }, taskId, paneId);
   const pillText = () => browser.execute(() =>
     document.querySelector('[data-testid="review-comments-pill"]')?.textContent ?? null);
   const composer = () => browser.execute(() => {
@@ -100,6 +106,8 @@ describe("comments on a termic view report", () => {
     dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "termic-e2e-report-")));
     file = path.join(dir, "report.md");
     fs.writeFileSync(file, SOURCE);
+    other = path.join(dir, "other.md");
+    fs.writeFileSync(other, "# Other\n");
     await browser.execute((id) => {
       window.__report = {
         host: () => Array.from(document.querySelector(`[data-task-id="${id}"]`)!.querySelectorAll<HTMLElement>(".markdown-body"))
@@ -188,16 +196,54 @@ describe("comments on a termic view report", () => {
     expect((await tabs()).filter(t => t.type === "diff" && t.path === file)).toEqual([]);
   });
 
-  it("the bar's file button reopens the report when its tab was closed", async () => {
-    await browser.execute((id, tab) => window.__termic!.useApp.getState().closeTab(id, tab), taskId, extTabId);
+  it("the bar's file button brings the report forward in the split pane that holds it", async () => {
+    const { paneId, otherId } = await browser.execute((id, ext, o) => {
+      const app = window.__termic!.useApp;
+      app.getState().openPreviewTab(id, { type: "external", path: o, title: "other.md", permanent: true });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const otherId = app.getState().tabs[id]!.find((t: any) => t.type === "external" && t.path === o)!.id;
+      const paneId = app.getState().splitPane(id, "v");
+      app.getState().moveTabToPane(id, ext, paneId);
+      app.getState().moveTabToPane(id, otherId, paneId);
+      return { paneId, otherId };
+    }, taskId, extTabId, other);
+    try {
+      await activateAgent();
+      expect(await paneActive(paneId)).toBe(otherId);
+
+      await clickBarFile(file);
+
+      await browser.waitUntil(async () => (await paneActive(paneId)) === extTabId,
+        { timeout: 5_000, timeoutMsg: "the pane did not switch to the report" });
+      expect(await activeTab()).toBe(agentTabId);
+    } finally {
+      // the next case needs the report back in main and no pane
+      await browser.execute((id, ext, p) => {
+        const app = window.__termic!.useApp;
+        app.getState().moveTabToMain(id, ext);
+        app.getState().closePane(id, p);
+      }, taskId, extTabId, paneId);
+    }
+  });
+
+  it("the bar's file button reopens the report when its tab was closed, as its own tab, not in the preview slot", async () => {
+    await browser.execute((id, tab, o) => {
+      const app = window.__termic!.useApp;
+      app.getState().closeTab(id, tab);
+      app.getState().openPreviewTab(id, { type: "external", path: o, title: "other.md" });
+    }, taskId, extTabId, other);
+    const slot = (await tabs()).find(t => t.path === other)!;
+    expect(slot.preview).toBe(true);
     await activateAgent();
 
     await clickBarFile(file);
 
     await browser.waitUntil(async () => {
       const id = await activeTab();
-      return (await tabs()).some(t => t.id === id && t.type === "external" && t.path === file && t.mdView === "preview");
-    }, { timeout: 5_000, timeoutMsg: "the report did not reopen as the active tab, in preview" });
+      return (await tabs()).some(t => t.id === id && t.type === "external" && t.path === file && t.mdView === "preview" && !t.preview);
+    }, { timeout: 5_000, timeoutMsg: "the report did not reopen as the active, permanent tab, in preview" });
+    // the preview slot still holds its own file, with its own view
+    expect((await tabs()).find(t => t.id === slot.id)).toMatchObject({ path: other, mdView: slot.mdView });
     // its comments come back with it
     await browser.waitUntil(async () => (await cardCount()) === 2,
       { timeout: 10_000, timeoutMsg: "the reopened report has no cards" });
