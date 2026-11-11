@@ -2073,12 +2073,17 @@ number means nothing once the width or font changes.
   ranges do not follow a rewrite; the quote carries the text.
 - `[[id]]` chips (`idChips`, docs/markdown.md): an id opening a paragraph
   draws as a small mono box on `--color-bg-2`, and a severity after it as
-  a bold badge tinted from `--color-err` (critical), `--color-warn`
-  (major, there is no orange token) or `--color-info` (minor). Where the
-  preview takes comments (`md-comments` on the host) a chip has a pointer
-  cursor and an accent hover, and a click opens the composer on its block,
-  quoting the block's source, the same as the gutter `+`. Elsewhere a chip
-  is inert, and one inside a link still follows the link.
+  a bold badge on a 10% tint of `--color-palette-red` (critical),
+  `-orange` (major) or `-blue` (minor), its text that hue pulled 20%
+  toward `--color-fg`. The bare hue is under 4.5:1 on its tint in light
+  (orange 3.7:1); the pull clears it in light and dark, and the e2e
+  asserts the floor. Where the preview takes comments (`md-comments` on
+  the host) a chip has a pointer cursor and an accent hover, and a click
+  opens the composer on its block, quoting the block's source, the same
+  as the gutter `+`; a double-click on it does not open the block editor.
+  Elsewhere a chip is inert, and one inside a link still follows the link.
+  A chip, the gutter `+` or the selection pill never replaces a composer
+  with typed text: that composer takes focus and the new one is dropped.
 
 **Review menu (`Aa`).** `ReviewMenu` (`components/task/markdown/ReviewMenu.tsx`)
 on the markdown tab's preview toolbar, after the line chip and the outline

@@ -220,16 +220,22 @@ extensions" at the end of `src/index.css`; strings are `panels:mdExt.*`.
   indent, level), so `$$` lines never rescan the run they sit in.
 - `idChips`: `[[step-1]]` (lowercase letters, `-`, digits) opening a
   paragraph, followed by whitespace or the end of the line, renders as
-  `<span data-md-chip="step-1">step-1</span>`, without the brackets, so a
-  copy reads `step-1`. A `critical:` / `major:` / `minor:` right after it
-  renders as `<span data-md-sev="major">major</span>` with the colon
-  dropped. A core rule pushed after `text_join` checks only the first text
-  child of each paragraph's inline token, so paragraphs at the root, in
-  list items (tight or loose), blockquotes and footnotes get chips, and
-  headings, table cells, code and a paragraph's second line do not.
-  `[[Step-1]]`, `[[step]]` and `[[step-1]]x` stay text, as does a paragraph
-  opening with a link, code span or raw HTML. Accepted: `\[[a-1]]` chips,
-  since `text_join` has merged the escape. Two anchored regexes per
+  `<span data-md-chip="step-1"><span>[[</span>step-1<span>]]</span></span>`.
+  A `critical:` / `major:` / `minor:` after it renders as
+  `<span data-md-sev="major">major<span>:</span></span>`. Every source
+  character stays in the DOM as text, the spaces included, and CSS draws
+  the brackets and colon at `font-size: 0`, so textContent, copy and a
+  selection's quote read the line as typed. Find matches within one text
+  node, as it does across any inline markup, so `step-1` finds the chip
+  and `[[step-1]] Add` does not. A core rule pushed after `text_join`
+  checks only the first text child of each paragraph's inline token, so
+  paragraphs at the root, in list items (tight or loose), blockquotes and
+  footnotes get chips, and headings, table cells, code and a paragraph's
+  second line do not. `[[Step-1]]`, `[[step]]` and an id glued to what
+  follows (`[[step-1]]x`, `[[step-1]]**x**`) stay text, as does a paragraph
+  opening with a link, code span or raw HTML. Accepted: `\[[a-1]]` and
+  `&#91;[a-1]]` chip, since `text_join` has merged the escape or entity
+  into the text. Two anchored regexes per
   paragraph, no hydrate, no `viewState`. Chips render in every preview (a
   report reads the same in a diff); `MarkdownPreview` makes them clickable
   only where comments are on, a click opening the block's composer. Trusts

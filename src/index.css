@@ -1559,10 +1559,9 @@ html.termic-mod-held .xterm .xterm-cursor-pointer { cursor: pointer; }
 
 /* id chips (extensions/idChips): `[[step-1]]` opening a paragraph, and the
    severity badge after it. Clickable only where the preview takes comments.
-   major takes warn deliberately: there is no orange token. */
+   The gap after each is the source's own space, kept as text. */
 .markdown-body :is([data-md-chip], [data-md-sev]) {
   display: inline-block;
-  margin-right: 0.35em;
   padding: 0 0.4em;
   border-radius: 4px;
   font-family: var(--font-mono);
@@ -1578,19 +1577,20 @@ html.termic-mod-held .xterm .xterm-cursor-pointer { cursor: pointer; }
   border-color: var(--color-accent);
   color: var(--color-accent);
 }
-.markdown-body [data-md-sev] { font-weight: 600; }
-.markdown-body [data-md-sev="critical"] {
-  color: var(--color-err);
-  background: color-mix(in srgb, var(--color-err) 16%, transparent);
+/* the `[[`, `]]` and `:` the source has: in the DOM for copy and find, not
+   drawn. font-size 0 rather than display: none, which copy would drop. */
+.markdown-body :is([data-md-chip], [data-md-sev]) > span { font-size: 0; }
+/* palette hues pulled 20% toward --color-fg: the bare palette is under
+   4.5:1 on its own tint in light (orange 3.7:1). The pull raises contrast
+   in either direction, since fg is the far end from bg. */
+.markdown-body [data-md-sev] {
+  font-weight: 600;
+  color: color-mix(in srgb, var(--sev) 80%, var(--color-fg));
+  background: color-mix(in srgb, var(--sev) 10%, transparent);
 }
-.markdown-body [data-md-sev="major"] {
-  color: var(--color-warn);
-  background: color-mix(in srgb, var(--color-warn) 16%, transparent);
-}
-.markdown-body [data-md-sev="minor"] {
-  color: var(--color-info);
-  background: color-mix(in srgb, var(--color-info) 16%, transparent);
-}
+.markdown-body [data-md-sev="critical"] { --sev: var(--color-palette-red); }
+.markdown-body [data-md-sev="major"] { --sev: var(--color-palette-orange); }
+.markdown-body [data-md-sev="minor"] { --sev: var(--color-palette-blue); }
 
 /* footnotes: the notes list under a rule at the end, and the flash a jump
    (reference to note, back link to reference) lands with. */

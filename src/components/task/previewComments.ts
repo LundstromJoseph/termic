@@ -269,10 +269,19 @@ export function usePreviewComments({ hostRef, scrollerRef, taskId, file, text, f
     return () => document.removeEventListener("selectionchange", hide);
   }, [pill]);
 
+  /** A new draft replaces the open composer, typed text and all, so one the
+   *  user has typed into wins: it takes focus and the new draft is dropped. */
+  function keepTyped(): boolean {
+    const ta = slotsRef.current.get("draft")?.el.querySelector("textarea");
+    if (!ta?.value.trim()) return false;
+    ta.focus();
+    return true;
+  }
+
   function openDraft() {
     if (!pill) return;
     const sel = window.getSelection();
-    setDraft({ ...narrowSelection(text, pill.startLine, pill.endLine, sel?.toString() ?? ""), body: "" });
+    if (!keepTyped()) setDraft({ ...narrowSelection(text, pill.startLine, pill.endLine, sel?.toString() ?? ""), body: "" });
     setPill(null);
     sel?.removeAllRanges();
   }
@@ -280,7 +289,7 @@ export function usePreviewComments({ hostRef, scrollerRef, taskId, file, text, f
   function openBlock(el: HTMLElement) {
     const r = elRange(el);
     if (!taskId || !file || !r) return;
-    setDraft({ ...blockDraft(text, r), body: "" });
+    if (!keepTyped()) setDraft({ ...blockDraft(text, r), body: "" });
     setPill(null);
   }
 

@@ -24,6 +24,15 @@ const SOURCE = [
   "over two source lines.",                             // 11
   "",                                                   // 12
   '<p><span data-md-chip="x-9" class="md-chip">forged</span></p>', // 13
+  "",                                                   // 14
+  "- [[finding-2]] critical: A broken thing.",          // 15
+  "- [[finding-3]] minor: A small thing.",              // 16
+  "",                                                   // 17
+  '<a href="other.md">',                                // 18
+  "",                                                   // 19
+  "[[link-1]] Inside a link.",                          // 20
+  "",                                                   // 21
+  "</a>",                                               // 22
   "",
 ].join("\n");
 
@@ -69,6 +78,11 @@ describe("comments on a termic view report", () => {
     ta.dispatchEvent(new Event("input"));
     (Array.from(c.querySelectorAll("button")).find(x => x.textContent === "Add to pending") as HTMLElement).click();
   }, body);
+  const cancelComposer = async () => {
+    await browser.execute(() =>
+      window.__report!.host().querySelector<HTMLElement>(".tc-comment-composer .tc-btn-cancel")!.click());
+    await browser.waitUntil(async () => !(await composer()), { timeout: 5_000, timeoutMsg: "the composer did not close" });
+  };
   // -1 while no preview is on screen (a reopened tab still loading)
   const cardCount = () => browser.execute(() => window.__report!.host()?.querySelectorAll(".tc-comment-card").length ?? -1);
   /** Open the bar from the agent tab and click `file`'s group button, in ONE
@@ -135,22 +149,33 @@ describe("comments on a termic view report", () => {
     );
   });
 
-  it("[[id]] openers render as chips with a severity badge, and a document's own chip attr does not", async () => {
+  it("[[id]] openers render as chips with severity badges that clear 4.5:1, and a document's own chip attr does not", async () => {
     const read = () => browser.execute(() => {
       const host = window.__report!.host();
-      const sev = host.querySelector<HTMLElement>('[data-md-chip="finding-1"] + [data-md-sev]')!;
-      // the token's resolved colour, read off a probe in the same subtree
-      const probe = document.createElement("span");
-      probe.style.color = "var(--color-warn)";
-      host.appendChild(probe);
-      const warn = getComputedStyle(probe).color;
-      probe.remove();
+      // a canvas composites the computed colours (color-mix comes back as
+      // color(srgb ...)), backdrop first, so the ratio is what is drawn
+      const g = Object.assign(document.createElement("canvas"), { width: 1, height: 1 }).getContext("2d")!;
+      const paint = (layers: string[]) => {
+        g.clearRect(0, 0, 1, 1);
+        for (const c of layers) { g.fillStyle = c; g.fillRect(0, 0, 1, 1); }
+        return Array.from(g.getImageData(0, 0, 1, 1).data);
+      };
+      const lum = (rgb: number[]) => {
+        const [r, gr, b] = rgb.slice(0, 3).map(v => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; });
+        return 0.2126 * r + 0.7152 * gr + 0.0722 * b;
+      };
+      const contrast = (el: HTMLElement) => {
+        const bgs: string[] = [];
+        for (let n: HTMLElement | null = el; n; n = n.parentElement) bgs.unshift(getComputedStyle(n).backgroundColor);
+        const bg = paint(bgs), fg = paint([...bgs, getComputedStyle(el).color]);
+        const [hi, lo] = [lum(bg), lum(fg)].sort((a, b) => b - a);
+        return { opaque: bg[3] === 255, ratio: Math.round((hi + 0.05) / (lo + 0.05) * 100) / 100 };
+      };
       const forged = Array.from(host.querySelectorAll("span")).find(s => s.textContent === "forged")!;
       return {
         chips: Array.from(host.querySelectorAll("[data-md-chip]"), c => c.getAttribute("data-md-chip")),
-        sev: sev.getAttribute("data-md-sev"),
-        sevColor: getComputedStyle(sev).color,
-        warn,
+        sevs: Array.from(host.querySelectorAll<HTMLElement>("[data-md-chip] + [data-md-sev]"),
+          s => ({ sev: s.getAttribute("data-md-sev"), ...contrast(s) })),
         forgedAttr: forged.hasAttribute("data-md-chip"),
         forgedDisplay: getComputedStyle(forged).display,
       };
@@ -170,9 +195,13 @@ describe("comments on a termic view report", () => {
 
         const r = await read();
 
-        expect(r.chips).toEqual(["decision-1", "step-1", "finding-1"]);
-        expect(r.sev).toBe("major");
-        expect(r.sevColor).toBe(r.warn);
+        console.log(`badge contrast, ${mode}:`, r.sevs.map(s => `${s.sev} ${s.ratio}`).join(", "));
+        expect(r.chips).toEqual(["decision-1", "step-1", "finding-1", "finding-2", "finding-3", "link-1"]);
+        expect(r.sevs.map(s => s.sev)).toEqual(["major", "critical", "minor"]);
+        for (const s of r.sevs) {
+          expect(s.opaque).toBe(true);
+          expect(s.ratio).toBeGreaterThanOrEqual(4.5);
+        }
         expect(r.forgedAttr).toBe(false);
         expect(r.forgedDisplay).toBe("inline");
         await snap(`report-comments-chips-${mode}.png`);
@@ -182,15 +211,62 @@ describe("comments on a termic view report", () => {
     }
   });
 
+  it("a chip line selects and copies as its source, the brackets and colon there but not drawn", async () => {
+    const r = await browser.execute(() => {
+      const li = window.__report!.host().querySelector('[data-md-chip="finding-1"]')!.closest("li")!;
+      const sel = window.getSelection()!;
+      sel.selectAllChildren(li);
+      const text = sel.toString();
+      sel.removeAllRanges();
+      return {
+        text,
+        hiddenWidths: Array.from(li.querySelectorAll(":is([data-md-chip], [data-md-sev]) > span"), s => s.getBoundingClientRect().width),
+      };
+    });
+
+    expect(r.text).toBe("[[finding-1]] major: A forged chip.");
+    expect(r.hiddenWidths).toEqual([0, 0, 0]);
+  });
+
   it("a chip click opens the composer on its list item, quoting the item's source", async () => {
     await browser.execute(() =>
       window.__report!.host().querySelector<HTMLElement>('[data-md-chip="step-1"]')!.click());
     await browser.waitUntil(async () => !!(await composer()), { timeout: 5_000, timeoutMsg: "the chip did not open the composer" });
 
     expect(await composer()).toEqual({ loc: "report.md · line 7", quote: "- [[step-1]] Add the rule." });
+  });
+
+  it("a chip click leaves an open composer with typed text alone and focuses it", async () => {
+    await browser.execute(() => {
+      const host = window.__report!.host();
+      const ta = host.querySelector<HTMLTextAreaElement>(".tc-comment-composer textarea")!;
+      ta.value = "half a thought";
+      // it took focus when it opened; the click has to give it back
+      ta.blur();
+      host.querySelector<HTMLElement>('[data-md-chip="finding-1"]')!.click();
+    });
+
+    // the focus and the replacement it stands in for are decided in one handler
+    await browser.waitUntil(() => browser.execute(() =>
+      document.activeElement === window.__report!.host().querySelector(".tc-comment-composer textarea")),
+    { timeout: 5_000, timeoutMsg: "the typed composer never took focus" });
+    expect(await composer()).toEqual({ loc: "report.md · line 7", quote: "- [[step-1]] Add the rule." });
+    expect(await browser.execute(() =>
+      window.__report!.host().querySelector<HTMLTextAreaElement>(".tc-comment-composer textarea")!.value)).toBe("half a thought");
+    await cancelComposer();
+  });
+
+  it("a chip inside a document's link opens the composer and does not follow the link", async () => {
+    const before = (await tabs()).length;
+
     await browser.execute(() =>
-      window.__report!.host().querySelector<HTMLElement>(".tc-comment-composer .tc-btn-cancel")!.click());
-    await browser.waitUntil(async () => !(await composer()), { timeout: 5_000, timeoutMsg: "the composer did not close" });
+      window.__report!.host().querySelector<HTMLElement>('[data-md-chip="link-1"]')!.click());
+    await browser.waitUntil(async () => !!(await composer()), { timeout: 5_000, timeoutMsg: "the chip did not open the composer" });
+
+    expect(await composer()).toEqual({ loc: "report.md · line 20", quote: "[[link-1]] Inside a link." });
+    expect((await tabs()).length).toBe(before);
+    expect(await activeTab()).toBe(extTabId);
+    await cancelComposer();
   });
 
   it("a selection in a paragraph takes a comment, which shows as a card and in the bar", async () => {

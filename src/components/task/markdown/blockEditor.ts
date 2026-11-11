@@ -26,6 +26,7 @@ import { copyToClipboard } from "@/lib/clipboard";
 import { usePrefs, resolveTheme } from "@/store/prefs";
 import { useUI } from "@/store/ui";
 import { inChrome, newSlot } from "./previewSlots";
+import { CHIP_ATTR } from "@/lib/markdown/extensions/idChips";
 
 const t = (key: string, opts?: Record<string, unknown>) => i18n.t(`panels:mdEdit.${key}`, opts);
 const rangeLabel = (a: number, b: number) => a === b ? t("lineOne", { line: a }) : t("lineRange", { start: a, end: b });
@@ -322,11 +323,12 @@ export function useBlockEditor({ hostRef, edit, text, focusPane }: {
     else if (host.lastChild !== s.slot) host.append(s.slot);
   }
 
-  /** Never on a link: its first click already followed it. */
+  /** Never on a link or an id chip: its first click already followed the
+   *  link or opened the composer. */
   function onDoubleClick(e: React.MouseEvent) {
     const host = hostRef.current;
     if (!host || !live.current.edit?.canEdit) return;
-    if ((e.target as Element).closest("a")) return;
+    if ((e.target as Element).closest(`a, [${CHIP_ATTR}]`)) return;
     const el = editableBlock(e.target as Element, host);
     if (!el) return;
     window.getSelection()?.removeAllRanges();

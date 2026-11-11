@@ -535,7 +535,7 @@ describe("folds", () => {
 describe("idChips", () => {
   const chips = (host: Element) => Array.from(host.querySelectorAll("[data-md-chip]"), c => c.getAttribute("data-md-chip"));
 
-  it("turns an id opening a root paragraph into a chip that shows the id, followed by the rest of the text", () => {
+  it("turns an id opening a root paragraph into a chip, keeping the brackets and the space as text so the paragraph reads as typed", () => {
     const { host } = render("[[decision-1]] Keep it.\n");
 
     const p = Array.from(host.querySelectorAll("p")).at(-1)!;
@@ -543,8 +543,8 @@ describe("idChips", () => {
     const chip = p.firstElementChild!;
     expect(p.tagName).toBe("P");
     expect(chip.getAttribute("data-md-chip")).toBe("decision-1");
-    expect(chip.textContent).toBe("decision-1");
-    expect(p.textContent).toBe("decision-1Keep it.");
+    expect(Array.from(chip.children, c => c.textContent)).toEqual(["[[", "]]"]);
+    expect(p.textContent).toBe("[[decision-1]] Keep it.");
   });
 
   it("chips an id opening a tight list item, a loose list item and a blockquote paragraph", () => {
@@ -553,14 +553,14 @@ describe("idChips", () => {
     expect(chips(host)).toEqual(["a-1", "a-2", "a-3"]);
   });
 
-  it("renders a severity after the id as a badge and drops its colon", () => {
+  it("renders a severity after the id as a badge, keeping its colon and both spaces as text", () => {
     const { host } = render("[[finding-1]] major: x\n");
 
     const sev = host.querySelector("[data-md-chip] + [data-md-sev]")!;
 
     expect(sev.getAttribute("data-md-sev")).toBe("major");
-    expect(sev.textContent).toBe("major");
-    expect(sev.parentElement!.textContent).toBe("finding-1majorx");
+    expect(Array.from(sev.children, c => c.textContent)).toEqual([":"]);
+    expect(sev.parentElement!.textContent).toBe("[[finding-1]] major: x");
   });
 
   it("leaves an id as text mid-paragraph, on a second line, in a heading, a code span or a table cell", () => {
@@ -579,6 +579,19 @@ describe("idChips", () => {
     expect(chips(host)).toEqual([]);
   });
 
+  it("leaves an id glued to bold, a code span or raw HTML as text", () => {
+    const { host } = render("[[b-1]]**x**\n\n[[b-2]]`x`\n\n[[b-3]]<b>x</b>\n");
+
+    expect(chips(host)).toEqual([]);
+    expect(host.textContent).toContain("[[b-1]]x");
+  });
+
+  it("chips an id that ends its paragraph's first line, before a soft or a hard break", () => {
+    const { host } = render("[[c-1]]\nnext\n\n[[c-2]]\\\nnext\n\n[[c-3]]\n");
+
+    expect(chips(host)).toEqual(["c-1", "c-2", "c-3"]);
+  });
+
   it("drops a chip or severity attr a document writes itself", () => {
     const { host } = render('<p><span data-md-chip="x-9">f</span></p>\n\n<p><span data-md-sev="critical">c</span></p>\n');
 
@@ -591,8 +604,8 @@ describe("idChips", () => {
 
     const p = host.querySelector("[data-md-chip]")!.parentElement!;
 
-    expect(p.firstElementChild!.textContent).toBe("a-1");
+    expect(p.firstElementChild!.getAttribute("data-md-chip")).toBe("a-1");
     expect(p.querySelector("strong")!.textContent).toBe("x");
-    expect(p.textContent).toBe("a-1x & <y");
+    expect(p.textContent).toBe("[[a-1]] x & <y");
   });
 });

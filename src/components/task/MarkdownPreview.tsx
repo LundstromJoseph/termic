@@ -599,6 +599,17 @@ function scrollMarkIntoView(scroller: HTMLElement, el: HTMLElement): void {
   scroller.scrollTo({ top: Math.max(0, top) });
 }
 
+/** A click on an id chip opens its block's composer, where comments are on
+ *  (`openBlock` given). True when the click was the chip's and nothing else
+ *  may take it. Exported for tests. */
+export function chipClick(target: Element, host: HTMLElement | null, openBlock: ((el: HTMLElement) => void) | undefined): boolean {
+  const chip = openBlock && target.closest?.(`[${CHIP_ATTR}]`);
+  if (!chip) return false;
+  const block = chip.closest<HTMLElement>("[data-src-line]");
+  if (block && host?.contains(block)) openBlock(block);
+  return true;
+}
+
 export function MarkdownPreview(
   { text, themeDark, linkify = true, ctx, revealHeading, onRevealConsumed, visible = true,
     ownsFind, editorVisible = false, syncView = null, commentFile, edit,
@@ -1171,11 +1182,8 @@ export function MarkdownPreview(
   // can't render (images, archives) reveal in the OS file manager instead.
   async function onClick(e: React.MouseEvent) {
     // first, so a chip inside a document's <a> never follows the link
-    const chip = (e.target as Element).closest?.(`[${CHIP_ATTR}]`);
-    if (chip && commentFile && ctx) {
+    if (chipClick(e.target as Element, hostRef.current, commentFile && ctx ? comments.openBlock : undefined)) {
       e.preventDefault();
-      const block = chip.closest<HTMLElement>("[data-src-line]");
-      if (block && hostRef.current?.contains(block)) comments.openBlock(block);
       return;
     }
     const box = (e.target as HTMLElement).closest<HTMLInputElement>("input[data-task-line]");

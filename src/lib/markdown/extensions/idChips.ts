@@ -10,8 +10,8 @@ import { stampAttr } from "../trust";
 
 export const CHIP_ATTR = "data-md-chip";
 export const SEV_ATTR = "data-md-sev";
-const ID_RE = /^\[\[([a-z]+-\d+)\]\](?=[ \t]|$)[ \t]*/;
-const SEV_RE = /^(critical|major|minor):[ \t]*/;
+const ID_RE = /^\[\[([a-z]+-\d+)\]\](?=[ \t]|$)/;
+const SEV_RE = /^([ \t]+)(critical|major|minor):/;
 
 export const idChips: MdExtension = {
   name: "idChips",
@@ -23,11 +23,15 @@ export const idChips: MdExtension = {
       for (let i = 1; i < ts.length; i++) {
         const inline = ts[i];
         if (inline.type !== "inline" || ts[i - 1].type !== "paragraph_open") continue;
-        const first = inline.children?.[0];
+        const kids = inline.children!;
+        const first = kids[0];
         if (first?.type !== "text") continue;
         const id = ID_RE.exec(first.content);
         if (!id) continue;
         let rest = first.content.slice(id[0].length);
+        // `$` is the end of this text token, not the line: markup glued to
+        // the id (`[[a-1]]**x**`) starts a new token right after it
+        if (!rest && kids[1] && kids[1].type !== "softbreak" && kids[1].type !== "hardbreak") continue;
         const out = [];
         const chip = new state.Token("md_chip", "span", 0);
         chip.content = id[1];
@@ -35,20 +39,27 @@ export const idChips: MdExtension = {
         out.push(chip);
         const sev = SEV_RE.exec(rest);
         if (sev) {
+          const gap = new state.Token("text", "", 0);
+          gap.content = sev[1];
           const badge = new state.Token("md_sev", "span", 0);
-          badge.content = sev[1];
-          stampAttr(badge, SEV_ATTR, sev[1]);
-          out.push(badge);
+          badge.content = sev[2];
+          stampAttr(badge, SEV_ATTR, sev[2]);
+          out.push(gap, badge);
           rest = rest.slice(sev[0].length);
         }
         if (rest) {
           first.content = rest;
           out.push(first);
         }
-        inline.children!.splice(0, 1, ...out);
+        kids.splice(0, 1, ...out);
       }
     });
-    md.renderer.rules.md_chip = md.renderer.rules.md_sev = (tokens, i, _o, _e, self) =>
-      `<span${self.renderAttrs(tokens[i])}>${md.utils.escapeHtml(tokens[i].content)}</span>`;
+    // the brackets and the colon stay in the DOM, hidden by CSS, so copy,
+    // find and a selection's quote read the source as typed
+    const esc = md.utils.escapeHtml;
+    md.renderer.rules.md_chip = (tokens, i, _o, _e, self) =>
+      `<span${self.renderAttrs(tokens[i])}><span>[[</span>${esc(tokens[i].content)}<span>]]</span></span>`;
+    md.renderer.rules.md_sev = (tokens, i, _o, _e, self) =>
+      `<span${self.renderAttrs(tokens[i])}>${esc(tokens[i].content)}<span>:</span></span>`;
   },
 };

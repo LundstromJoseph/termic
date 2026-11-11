@@ -12,7 +12,7 @@ vi.mock("@/store/ui", () => ({ useUI: { getState: vi.fn() } }));
 
 import { taskFileReadBase64 } from "@/lib/ipc";
 import {
-  attemptReveal, captureReveal, consumeNavRevalidate, expireRevealGrace, gateRemoteImages, hydrateTaskImages,
+  attemptReveal, captureReveal, chipClick, consumeNavRevalidate, expireRevealGrace, gateRemoteImages, hydrateTaskImages,
   IMG_CACHE_MAX_ENTRIES, imgCacheInsert, markFindMatches, newNavRevalidateState, newRevealState,
   remoteImageBannerKind, renderSanitized, unmarkFind,
   type ImgCache, type MarkdownCtx,
@@ -647,5 +647,41 @@ describe("review comment slots", () => {
     expect(html).not.toContain("data-tc-");
     const h = host(html);
     expect(markFindMatches(h, "hidden")).toHaveLength(1);
+  });
+});
+
+describe("chipClick", () => {
+  beforeEach(() => { document.body.innerHTML = ""; });
+  const chipIn = (html: string) => {
+    const h = host(html);
+    return { h, chip: h.querySelector<HTMLElement>("[data-md-chip]")! };
+  };
+
+  it("with comments off a chip click is not taken, so the link around it still handles it", () => {
+    const { h, chip } = chipIn('<a href="x.md"><p data-src-line="3"><span data-md-chip="a-1">a-1</span> x</p></a>');
+
+    const taken = chipClick(chip, h, undefined);
+
+    expect(taken).toBe(false);
+  });
+
+  it("with comments on a click on a chip's hidden bracket inside a link opens the block's composer and takes the click from the link", () => {
+    const { h, chip } = chipIn('<a href="x.md"><p data-src-line="3"><span data-md-chip="a-1"><span>[[</span>a-1<span>]]</span></span> x</p></a>');
+    const open = vi.fn();
+
+    const taken = chipClick(chip.firstElementChild!, h, open);
+
+    expect(taken).toBe(true);
+    expect(open).toHaveBeenCalledWith(h.querySelector("p"));
+  });
+
+  it("a click outside any chip is not taken", () => {
+    const { h } = chipIn('<p data-src-line="3"><span data-md-chip="a-1">a-1</span> x</p>');
+    const open = vi.fn();
+
+    const taken = chipClick(h.querySelector("p")!, h, open);
+
+    expect(taken).toBe(false);
+    expect(open).not.toHaveBeenCalled();
   });
 });
