@@ -51,6 +51,7 @@ import { READER_DEFAULTS, readerClass, readerStyle, type ReaderSettings } from "
 import { revealHidden } from "@/lib/markdown/reveal";
 import { applyFolds } from "@/lib/markdown/extensions/folds";
 import { findHeading } from "@/lib/markdown/extensions/headingLinks";
+import { CHIP_ATTR } from "@/lib/markdown/extensions/idChips";
 import { useUI } from "@/store/ui";
 import { useTranslation } from "react-i18next";
 import { i18n } from "@/lib/i18n";
@@ -1169,6 +1170,14 @@ export function MarkdownPreview(
   // non-markdown tab has no MarkdownPane to ever consume it. Targets an editor
   // can't render (images, archives) reveal in the OS file manager instead.
   async function onClick(e: React.MouseEvent) {
+    // first, so a chip inside a document's <a> never follows the link
+    const chip = (e.target as Element).closest?.(`[${CHIP_ATTR}]`);
+    if (chip && commentFile && ctx) {
+      e.preventDefault();
+      const block = chip.closest<HTMLElement>("[data-src-line]");
+      if (block && hostRef.current?.contains(block)) comments.openBlock(block);
+      return;
+    }
     const box = (e.target as HTMLElement).closest<HTMLInputElement>("input[data-task-line]");
     if (box) { onTaskClick(e, box); return; }
     const a = (e.target as HTMLElement).closest("a");
@@ -1400,7 +1409,7 @@ export function MarkdownPreview(
         <div
           ref={hostRef}
           data-selectable
-          className={`markdown-body ${readerClass(reader)}`}
+          className={`markdown-body ${readerClass(reader)}${commentFile && ctx ? " md-comments" : ""}`}
           style={readerStyle(reader) as React.CSSProperties}
           onClick={onClick}
           onDoubleClick={blockEditor.onDoubleClick}

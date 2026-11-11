@@ -531,3 +531,68 @@ describe("folds", () => {
     expect(Array.from(host.querySelectorAll(".md-fold-toggle"), b => b.parentElement!.textContent)).toEqual(["H2", "H3"]);
   });
 });
+
+describe("idChips", () => {
+  const chips = (host: Element) => Array.from(host.querySelectorAll("[data-md-chip]"), c => c.getAttribute("data-md-chip"));
+
+  it("turns an id opening a root paragraph into a chip that shows the id, followed by the rest of the text", () => {
+    const { host } = render("[[decision-1]] Keep it.\n");
+
+    const p = Array.from(host.querySelectorAll("p")).at(-1)!;
+
+    const chip = p.firstElementChild!;
+    expect(p.tagName).toBe("P");
+    expect(chip.getAttribute("data-md-chip")).toBe("decision-1");
+    expect(chip.textContent).toBe("decision-1");
+    expect(p.textContent).toBe("decision-1Keep it.");
+  });
+
+  it("chips an id opening a tight list item, a loose list item and a blockquote paragraph", () => {
+    const { host } = render("- [[a-1]] tight\n- x\n\n***\n\n- [[a-2]] loose\n\n- y\n\n> [[a-3]] quoted\n");
+
+    expect(chips(host)).toEqual(["a-1", "a-2", "a-3"]);
+  });
+
+  it("renders a severity after the id as a badge and drops its colon", () => {
+    const { host } = render("[[finding-1]] major: x\n");
+
+    const sev = host.querySelector("[data-md-chip] + [data-md-sev]")!;
+
+    expect(sev.getAttribute("data-md-sev")).toBe("major");
+    expect(sev.textContent).toBe("major");
+    expect(sev.parentElement!.textContent).toBe("finding-1majorx");
+  });
+
+  it("leaves an id as text mid-paragraph, on a second line, in a heading, a code span or a table cell", () => {
+    const { host } = render([
+      "a [[b-1]]", "", "a\n[[b-2]] c", "", "## [[b-3]] x", "", "`[[b-4]]` y", "",
+      "| h |\n| - |\n| [[b-5]] c |", "",
+    ].join("\n"));
+
+    expect(chips(host)).toEqual([]);
+    expect(host.textContent).toContain("[[b-1]]");
+  });
+
+  it("leaves an uppercase id, an id with no number and an id glued to the next word as text", () => {
+    const { host } = render("[[B-1]] x\n\n[[b]] x\n\n[[b-1]]x\n");
+
+    expect(chips(host)).toEqual([]);
+  });
+
+  it("drops a chip or severity attr a document writes itself", () => {
+    const { host } = render('<p><span data-md-chip="x-9">f</span></p>\n\n<p><span data-md-sev="critical">c</span></p>\n');
+
+    expect(host.querySelector("[data-md-chip], [data-md-sev]")).toBeNull();
+    expect(host.textContent).toContain("f");
+  });
+
+  it("keeps inline markup after the chip rendered and the text escaped", () => {
+    const { host } = render("[[a-1]] **x** & <y\n");
+
+    const p = host.querySelector("[data-md-chip]")!.parentElement!;
+
+    expect(p.firstElementChild!.textContent).toBe("a-1");
+    expect(p.querySelector("strong")!.textContent).toBe("x");
+    expect(p.textContent).toBe("a-1x & <y");
+  });
+});

@@ -135,6 +135,64 @@ describe("comments on a termic view report", () => {
     );
   });
 
+  it("[[id]] openers render as chips with a severity badge, and a document's own chip attr does not", async () => {
+    const read = () => browser.execute(() => {
+      const host = window.__report!.host();
+      const sev = host.querySelector<HTMLElement>('[data-md-chip="finding-1"] + [data-md-sev]')!;
+      // the token's resolved colour, read off a probe in the same subtree
+      const probe = document.createElement("span");
+      probe.style.color = "var(--color-warn)";
+      host.appendChild(probe);
+      const warn = getComputedStyle(probe).color;
+      probe.remove();
+      const forged = Array.from(host.querySelectorAll("span")).find(s => s.textContent === "forged")!;
+      return {
+        chips: Array.from(host.querySelectorAll("[data-md-chip]"), c => c.getAttribute("data-md-chip")),
+        sev: sev.getAttribute("data-md-sev"),
+        sevColor: getComputedStyle(sev).color,
+        warn,
+        forgedAttr: forged.hasAttribute("data-md-chip"),
+        forgedDisplay: getComputedStyle(forged).display,
+      };
+    });
+    const setTheme = async (mode: string) => {
+      await browser.execute((m) => window.__termic!.usePrefs.getState().setThemeMode(m), mode);
+      await browser.waitUntil(
+        () => browser.execute((c) => document.documentElement.classList.contains(c), mode),
+        { timeout: 8_000, timeoutMsg: `theme never became ${mode}` },
+      );
+    };
+    const original = await browser.execute(() => window.__termic!.usePrefs.getState().themeMode);
+
+    try {
+      for (const mode of ["light", "dark"]) {
+        await setTheme(mode);
+
+        const r = await read();
+
+        expect(r.chips).toEqual(["decision-1", "step-1", "finding-1"]);
+        expect(r.sev).toBe("major");
+        expect(r.sevColor).toBe(r.warn);
+        expect(r.forgedAttr).toBe(false);
+        expect(r.forgedDisplay).toBe("inline");
+        await snap(`report-comments-chips-${mode}.png`);
+      }
+    } finally {
+      await browser.execute((m) => window.__termic!.usePrefs.getState().setThemeMode(m), original);
+    }
+  });
+
+  it("a chip click opens the composer on its list item, quoting the item's source", async () => {
+    await browser.execute(() =>
+      window.__report!.host().querySelector<HTMLElement>('[data-md-chip="step-1"]')!.click());
+    await browser.waitUntil(async () => !!(await composer()), { timeout: 5_000, timeoutMsg: "the chip did not open the composer" });
+
+    expect(await composer()).toEqual({ loc: "report.md · line 7", quote: "- [[step-1]] Add the rule." });
+    await browser.execute(() =>
+      window.__report!.host().querySelector<HTMLElement>(".tc-comment-composer .tc-btn-cancel")!.click());
+    await browser.waitUntil(async () => !(await composer()), { timeout: 5_000, timeoutMsg: "the composer did not close" });
+  });
+
   it("a selection in a paragraph takes a comment, which shows as a card and in the bar", async () => {
     await browser.execute(() => {
       (document.activeElement as HTMLElement | null)?.blur();

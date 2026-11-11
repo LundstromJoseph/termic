@@ -1557,6 +1557,41 @@ html.termic-mod-held .xterm .xterm-cursor-pointer { cursor: pointer; }
 .markdown-body .tc-fold-closed > .md-fold-toggle { transform: rotate(-90deg); }
 .markdown-body .md-fold-toggle:hover { color: var(--color-accent); }
 
+/* id chips (extensions/idChips): `[[step-1]]` opening a paragraph, and the
+   severity badge after it. Clickable only where the preview takes comments.
+   major takes warn deliberately: there is no orange token. */
+.markdown-body :is([data-md-chip], [data-md-sev]) {
+  display: inline-block;
+  margin-right: 0.35em;
+  padding: 0 0.4em;
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 0.8em;
+}
+.markdown-body [data-md-chip] {
+  border: 1px solid var(--color-border);
+  background: var(--color-bg-2);
+  color: var(--color-fg-dim);
+}
+.markdown-body.md-comments [data-md-chip] { cursor: pointer; }
+.markdown-body.md-comments [data-md-chip]:hover {
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+}
+.markdown-body [data-md-sev] { font-weight: 600; }
+.markdown-body [data-md-sev="critical"] {
+  color: var(--color-err);
+  background: color-mix(in srgb, var(--color-err) 16%, transparent);
+}
+.markdown-body [data-md-sev="major"] {
+  color: var(--color-warn);
+  background: color-mix(in srgb, var(--color-warn) 16%, transparent);
+}
+.markdown-body [data-md-sev="minor"] {
+  color: var(--color-info);
+  background: color-mix(in srgb, var(--color-info) 16%, transparent);
+}
+
 /* footnotes: the notes list under a rule at the end, and the flash a jump
    (reference to note, back link to reference) lands with. */
 .markdown-body ol.footnotes {

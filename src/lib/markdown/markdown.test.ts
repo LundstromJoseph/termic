@@ -35,6 +35,7 @@ describe("engine allowlist", () => {
       "type", "checked", "data-task-line", TRUST_MARK,
       "data-fn", "data-fnref",
       "data-fold-default",
+      "data-md-chip", "data-md-sev",
     ]));
   });
 

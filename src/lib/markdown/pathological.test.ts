@@ -279,3 +279,28 @@ describe("folds", () => {
     expect(closed.every((c, i) => c === (i % 3 === 0))).toBe(true);
   });
 });
+
+describe("idChips", () => {
+  const count = (html: string, attr: string) => html.split(`${attr}=`).length - 1;
+
+  it("50k chipped paragraphs with a severity each render one chip and one badge apiece", () => {
+    const n = big(50_000);
+
+    const { html } = renderDoc("[[s-1]] major: x\n\n".repeat(n));
+
+    expect(count(html, "data-md-chip")).toBe(n);
+    expect(count(html, "data-md-sev")).toBe(n);
+  });
+
+  it("a 1M-char unclosed `[[aaa...` paragraph renders no chip", () => {
+    const { html } = renderDoc("[[" + "a".repeat(big(1_000_000)));
+
+    expect(count(html, "data-md-chip")).toBe(0);
+  });
+
+  it("a 1M-digit id missing its second closing bracket renders no chip", () => {
+    const { html } = renderDoc("[[a-" + "1".repeat(big(1_000_000)) + "]");
+
+    expect(count(html, "data-md-chip")).toBe(0);
+  });
+});

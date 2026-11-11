@@ -218,6 +218,22 @@ extensions" at the end of `src/index.css`; strings are `panels:mdExt.*`.
   output over 256 KB is cached as an error; `maxSize: 20`. The unclosed
   `$$` scan remembers its last miss per block context (container type,
   indent, level), so `$$` lines never rescan the run they sit in.
+- `idChips`: `[[step-1]]` (lowercase letters, `-`, digits) opening a
+  paragraph, followed by whitespace or the end of the line, renders as
+  `<span data-md-chip="step-1">step-1</span>`, without the brackets, so a
+  copy reads `step-1`. A `critical:` / `major:` / `minor:` right after it
+  renders as `<span data-md-sev="major">major</span>` with the colon
+  dropped. A core rule pushed after `text_join` checks only the first text
+  child of each paragraph's inline token, so paragraphs at the root, in
+  list items (tight or loose), blockquotes and footnotes get chips, and
+  headings, table cells, code and a paragraph's second line do not.
+  `[[Step-1]]`, `[[step]]` and `[[step-1]]x` stay text, as does a paragraph
+  opening with a link, code span or raw HTML. Accepted: `\[[a-1]]` chips,
+  since `text_join` has merged the escape. Two anchored regexes per
+  paragraph, no hydrate, no `viewState`. Chips render in every preview (a
+  report reads the same in a diff); `MarkdownPreview` makes them clickable
+  only where comments are on, a click opening the block's composer. Trusts
+  `data-md-chip`, `data-md-sev`.
 - `taskList` and `breakout`: below. `breakout` is registered last.
 
 `breakout` is a core rule that wraps each TOP-LEVEL table, fence, indented
@@ -258,7 +274,10 @@ about the source cannot be taken off the DOM as-is.
 
 - **Trusted attrs**: set only through `stampAttr(token, name, value)`,
   which prefixes a per-load nonce the document cannot know. `claim()`
-  unwraps ours to the bare value and removes every other value.
+  unwraps ours to the bare value and removes every other value. The id
+  chip and severity attrs (`data-md-chip`, `data-md-sev`) are trusted, so
+  a document's own `<span data-md-chip>` gets neither the chip look nor
+  the click.
 - **Trusted tags**: elements only we create (a task checkbox `<input>`).
   Ours carry `trustMark()` (`data-md-trust` = nonce); `claim()` removes
   every element of that tag without it and strips the mark from the rest.

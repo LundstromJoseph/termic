@@ -28,12 +28,13 @@ import { footnotes } from "./extensions/footnotes";
 import { deflist } from "./extensions/deflist";
 import { mark } from "./extensions/mark";
 import { math } from "./extensions/math";
+import { idChips } from "./extensions/idChips";
 
 /** Registration order is plugin order. breakout goes last: its core rule
  *  wraps finished blocks, after every other rule has shaped them. */
 export const EXTENSIONS: readonly MdExtension[] = [
   srcLines, fence, frontMatter, alerts, details, taskList, codeHeader, headingLinks,
-  folds, footnotes, deflist, mark, math, breakout,
+  folds, footnotes, deflist, mark, math, idChips, breakout,
 ];
 
 /** Everything the preview is allowed to render, whether markdown-it emitted it
