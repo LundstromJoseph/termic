@@ -7,6 +7,7 @@
 // `.tc-comment-*` rules in index.css.
 
 import { i18n } from "@/lib/i18n";
+import { baseName } from "@/lib/osPath";
 import { useReviewComments, type ReviewComment } from "@/store/reviewComments";
 import { sendCommentsToAgent } from "@/lib/sendComments";
 import { sendReviewComments } from "@/lib/sendReviewComments";
@@ -14,8 +15,8 @@ import type { ReviewThread } from "@/lib/types";
 
 const t = (key: string, opts?: Record<string, unknown>) => i18n.t(`panels:reviewExt.${key}`, opts);
 
-function locLabel(start: number | null, end: number | null, file: string): string {
-  const base = file.split("/").pop() || file;
+export function locLabel(start: number | null, end: number | null, file: string): string {
+  const base = baseName(file);
   if (start == null) return t("locWholeFile", { file: base });
   if (end != null && end !== start) return t("locLines", { file: base, start, end });
   return t("locLine", { file: base, start });
