@@ -638,8 +638,9 @@ export function MarkdownPreview(
     /** The source editor to keep in scroll step with while both are on
      *  screen (split view). Null/absent = no sync. */
     syncView?: EditorView | null;
-    /** Task-relative path of the file, when it is a task file that takes
-     *  review comments (needs `ctx` for the task id). Absent = no comments. */
+    /** Task-relative path of the file, or the absolute path of an external
+     *  one, when it takes review comments (needs `ctx` for the task id).
+     *  Absent = no comments. */
     commentFile?: string;
     /** Where edits made ON the preview go (task checkboxes, block edits):
      *  the markdown tab's editor buffer. Absent, or `canEdit` false, and the
@@ -711,6 +712,9 @@ export function MarkdownPreview(
     // an editable preview's numbers carry the block editor's pencil.
     // blockEditor is declared below; this only runs on a click
     onEdit: canEdit ? el => { blockEditor.open(el); } : undefined,
+    // the comment +, wherever the preview takes comments. comments is
+    // declared below; this only runs on a click
+    onComment: commentFile && ctx ? el => { comments.openBlock(el); } : undefined,
     layoutKey: `${reader.measure}|${reader.wide}|${reader.size}|${reader.font}|${reader.leading}`,
   });
   const comments = usePreviewComments({

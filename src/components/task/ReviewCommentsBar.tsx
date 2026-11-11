@@ -22,6 +22,8 @@ import { sendPendingComments } from "@/lib/sendReviewComments";
 import { useReview, useReviews, selectReview } from "@/store/reviews";
 import { isStaleDraft } from "@/lib/reviewScope";
 import { isTerminalCli } from "@/lib/agents";
+import { isAbsoluteToken } from "@/lib/termLinkOpener";
+import { baseName } from "@/lib/osPath";
 import { cn } from "@/lib/utils";
 import { MessagesSquare, X, Send, Trash2 } from "lucide-react";
 import type { TerminalTab } from "@/lib/types";
@@ -98,11 +100,25 @@ export function ReviewCommentsBar({ taskId, compact = false, className }: {
   const hasPlain = comments.some(c => !c.reviewId);
   const hasReview = comments.some(c => c.reviewId && !stale.has(c.id));
 
+  // an absolute path is an external file (termic view), which has no diff.
+  // Its open tab is only focused: openPreviewTab would re-read it, moving the
+  // cards under line numbers the comments were made against
+  const isExternal = (file: string, reviewId?: string) => !reviewId && isAbsoluteToken(file);
   function jumpTo(file: string, reviewId?: string) {
-    const base = `Δ ${file.split("/").pop() || file}`;
-    openPreviewTab(taskId, reviewId
-      ? { type: "diff", path: file, scope: `review:${reviewId}`, title: `${base} · ${reviewId}` }
-      : { type: "diff", path: file, title: file.split("/").pop() || file });
+    const ext = (tabsForTask ?? []).find(t => t.type === "external" && t.path === file);
+    if (ext) useApp.getState().setActiveTabId(taskId, ext.id);
+    else if (isExternal(file, reviewId)) {
+      openPreviewTab(taskId, { type: "external", path: file, title: baseName(file) });
+      // in preview, as `termic view` opens it: the source view shows no
+      // cards for an external file
+      const tab = (useApp.getState().tabs[taskId] ?? []).find(t => t.type === "external" && t.path === file);
+      if (tab) useApp.getState().patchTab(taskId, tab.id, { mdView: "preview" });
+    } else {
+      const base = `Δ ${file.split("/").pop() || file}`;
+      openPreviewTab(taskId, reviewId
+        ? { type: "diff", path: file, scope: `review:${reviewId}`, title: `${base} · ${reviewId}` }
+        : { type: "diff", path: file, title: file.split("/").pop() || file });
+    }
     setOpen(false);
   }
 
@@ -182,7 +198,7 @@ export function ReviewCommentsBar({ taskId, compact = false, className }: {
               <div className="flex min-w-0 items-baseline gap-1.5">
                 <button
                   onClick={() => jumpTo(file, reviewId)}
-                  title={t("reviewBar.openDiff")}
+                  title={isExternal(file, reviewId) ? t("reviewBar.openFile") : t("reviewBar.openDiff")}
                   className="min-w-0 truncate text-left font-mono text-[11px] text-[var(--color-fg-dim)] hover:text-[var(--color-accent)]"
                 >
                   {file}

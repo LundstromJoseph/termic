@@ -218,7 +218,7 @@ export function MarkdownPane(
     selRef.current.set(r);
     setHasSel(!!r);
   }, []);
-  const commentFile = tab.type === "edit" ? tab.path : undefined;
+  const commentFile = tab.type === "edit" || tab.type === "external" ? tab.path : undefined;
 
   const external = tab.type === "external";
   const ctx = { taskId: task.id, filePath, epoch: fsRev, memberDirs, external };

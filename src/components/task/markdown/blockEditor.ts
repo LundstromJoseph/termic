@@ -46,6 +46,8 @@ export function editableBlock(target: Element, host: HTMLElement): HTMLElement |
 
 /** The gutter pencil's tooltip for a hovered number's range. */
 export const editBlockTitle = (r: LineRange) => t("editBlock", { range: rangeLabel(r.startLine, r.endLine) });
+/** The gutter +'s tooltip. */
+export const commentBlockTitle = (r: LineRange) => t("commentBlock", { range: rangeLabel(r.startLine, r.endLine) });
 
 /** `s` without its trailing newlines. A loop, not /\n+$/: that regex is
  *  quadratic on a long run of blank lines followed by text. */

@@ -7,7 +7,8 @@ vi.mock("@/store/ui", () => ({ useUI: { getState: vi.fn() } }));
 vi.mock("@/lib/sendComments", () => ({ sendCommentsToAgent: vi.fn() }));
 
 import { claimDocument, renderSanitized } from "./MarkdownPreview";
-import { narrowSelection, placeSlots, selectionLines } from "./previewComments";
+import { elRange } from "@/lib/markdown/lines";
+import { blockDraft, narrowSelection, placeSlots, selectionLines } from "./previewComments";
 
 // DOMPurify under happy-dom unwraps the FIRST element of its input (a
 // test-env quirk, WebKit keeps it), so the doc opens with a sacrificial line.
@@ -114,6 +115,24 @@ describe("narrowSelection", () => {
   });
   it("falls back to the source lines for an all-whitespace selection", () => {
     expect(narrowSelection(SRC, 3, 4, "  ").quote).toBe("Some **bold** text\nover two lines.");
+  });
+});
+
+describe("blockDraft", () => {
+  it("quotes a hard-wrapped paragraph's source lines over its whole range", () => {
+    const p = render().querySelector("p[data-src-line]") as HTMLElement;
+
+    const draft = blockDraft(SRC, elRange(p)!);
+
+    expect(draft).toEqual({ startLine: 3, endLine: 4, quote: "Some **bold** text\nover two lines." });
+  });
+
+  it("quotes only a list item's own line, not the whole list", () => {
+    const li = render().querySelectorAll("li")[1] as HTMLElement;
+
+    const draft = blockDraft(SRC, elRange(li)!);
+
+    expect(draft).toEqual({ startLine: 7, endLine: 7, quote: "- two" });
   });
 });
 

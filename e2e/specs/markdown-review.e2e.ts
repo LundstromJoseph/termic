@@ -294,7 +294,7 @@ describe("markdown review menu", () => {
       { timeout: 5_000, timeoutMsg: "the top did not make the first heading current" });
   });
 
-  it("the gutter pencil opens the block editor on its block", async () => {
+  it("the gutter pencil and + open the block editor and the composer", async () => {
     // hover the paragraph at line 3 until its number carries the pencil (the
     // edit target arrives once the hidden editor has loaded the file)
     await browser.waitUntil(() => browser.execute(() => {
@@ -304,6 +304,9 @@ describe("markdown review menu", () => {
       host.parentElement!.querySelector(".md-gl")?.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
       return !!host.parentElement!.querySelector('.md-gl [data-act="edit"]');
     }), { timeout: 10_000, timeoutMsg: "no pencil on the hovered number" });
+    // a task file takes comments, so the number carries the + too
+    expect(await browser.execute(() =>
+      !!window.__mdReview!.host().parentElement!.querySelector('.md-gl [data-act="comment"]'))).toBe(true);
     await browser.execute(() => window.__mdReview!.host().parentElement!.querySelector<HTMLElement>('.md-gl [data-act="edit"]')!.click());
     await browser.waitUntil(
       () => browser.execute(() => {
@@ -321,6 +324,22 @@ describe("markdown review menu", () => {
     await browser.waitUntil(() => browser.execute(() => !window.__mdReview!.host().querySelector(".tc-block-editor")),
       { timeout: 5_000, timeoutMsg: "Cancel left the block editor open" });
     expect(readFileSync(path.join(fixture, DOC), "utf8")).toBe(before);
+
+    // the + opens the comment composer on the same block
+    await browser.execute(() => window.__mdReview!.host().parentElement!.querySelector<HTMLElement>('.md-gl [data-act="comment"]')!.click());
+    await browser.waitUntil(
+      () => browser.execute(() => window.__mdReview!.host().querySelector(".tc-comment-composer .tc-comment-loc")?.textContent ?? ""),
+      { timeout: 5_000, timeoutMsg: "the + did not open the composer" },
+    );
+    expect(await browser.execute(() => {
+      const c = window.__mdReview!.host().querySelector(".tc-comment-composer")!;
+      return { loc: c.querySelector(".tc-comment-loc")!.textContent, quote: c.querySelector(".tc-comment-quote")!.textContent };
+    })).toEqual({ loc: `${DOC} · line 3`, quote: expect.stringMatching(/^Paragraph 1\.0 /) });
+    // Escape closes it without adding a comment
+    await browser.execute(() => window.__mdReview!.host().querySelector<HTMLTextAreaElement>(".tc-comment-composer textarea")!
+      .dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true })));
+    await browser.waitUntil(() => browser.execute(() => !window.__mdReview!.host().querySelector(".tc-comment-composer")),
+      { timeout: 5_000, timeoutMsg: "Escape left the composer open" });
   });
 
   it("split view has its own outline switch, off by default", async () => {

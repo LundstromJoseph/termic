@@ -2,7 +2,8 @@
 // drawn in the left margin beside its first line. Hover mode numbers the
 // block under the pointer, always mode every leaf block. Hovering a number
 // shows its whole range and its actions (copy a `path:337-342` reference,
-// and on an editable preview the block editor's pencil). See docs/ui.md
+// the comment + where the preview takes comments, and on an editable preview
+// the block editor's pencil). See docs/ui.md
 // "Markdown preview".
 //
 // Perf rules, because a long spec has thousands of blocks:
@@ -24,13 +25,14 @@ import { copyToClipboard } from "@/lib/clipboard";
 import { SLOT_ATTR } from "@/lib/markdown/trust";
 import { elRange, labelBox, lineRef, rangeText, type LineRange } from "@/lib/markdown/lines";
 import type { LineNumbers } from "@/lib/markdown/reader";
-import { editBlockTitle } from "./blockEditor";
+import { commentBlockTitle, editBlockTitle } from "./blockEditor";
 
 // app constants, never document content: the only innerHTML here
 const icon = (paths: string) =>
   `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths}</svg>`;
-// lucide `copy` and `pencil`
+// lucide `copy`, `plus` and `pencil`
 const COPY_ICON = icon('<rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>');
+const COMMENT_ICON = icon('<path d="M5 12h14"/><path d="M12 5v14"/>');
 const EDIT_ICON = icon('<path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"/><path d="m15 5 4 4"/>');
 
 const t = (key: string, opts?: Record<string, unknown>) => i18n.t(`panels:mdReader.${key}`, opts);
@@ -62,7 +64,7 @@ export function gutterLeaves(host: HTMLElement): HTMLElement[] {
     .filter(el => !el.querySelector("[data-src-line]") && el.getClientRects().length > 0);
 }
 
-export function useLineGutter({ scrollerRef, hostRef, layerRef, mode, refPath, onEdit, layoutKey }: {
+export function useLineGutter({ scrollerRef, hostRef, layerRef, mode, refPath, onEdit, onComment, layoutKey }: {
   scrollerRef: RefObject<HTMLElement | null>;
   hostRef: RefObject<HTMLElement | null>;
   /** the empty overlay element, a child of the scroller */
@@ -72,11 +74,13 @@ export function useLineGutter({ scrollerRef, hostRef, layerRef, mode, refPath, o
   refPath?: string;
   /** present when the preview can edit: the pencil, on the hovered block */
   onEdit?: (el: HTMLElement) => void;
+  /** present when the preview takes comments: the +, on the hovered block */
+  onComment?: (el: HTMLElement) => void;
   /** changes whenever a reader setting does, which may reflow every block */
   layoutKey: string;
 }): { refresh(): void } {
-  const live = useRef({ mode, refPath, onEdit });
-  live.current = { mode, refPath, onEdit };
+  const live = useRef({ mode, refPath, onEdit, onComment });
+  live.current = { mode, refPath, onEdit, onComment };
   // labels: block -> its label; owners: the reverse, for a label's events
   const st = useRef({
     hovered: null as HTMLElement | null, raf: 0,
@@ -164,6 +168,7 @@ export function useLineGutter({ scrollerRef, hostRef, layerRef, mode, refPath, o
       btn.innerHTML = svg;
     };
     add("copy", COPY_ICON, t("copyRef", { ref: lineRef(live.current.refPath, range) }));
+    if (live.current.onComment) add("comment", COMMENT_ICON, commentBlockTitle(range));
     if (live.current.onEdit) add("edit", EDIT_ICON, editBlockTitle(range));
   }
 
@@ -207,6 +212,7 @@ export function useLineGutter({ scrollerRef, hostRef, layerRef, mode, refPath, o
       if (!hit) return;
       const id = (e.target as Element).closest<HTMLElement>("[data-act]")?.dataset.act ?? "copy";
       if (id === "edit") live.current.onEdit?.(hit.el);
+      else if (id === "comment") live.current.onComment?.(hit.el);
       else copyLineRef(live.current.refPath, hit.range);
     };
     // a label click must not drop the reader's selection or move focus
@@ -235,7 +241,7 @@ export function useLineGutter({ scrollerRef, hostRef, layerRef, mode, refPath, o
 
   // a mode or reader setting change may reflow every block
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(schedule, [mode, layoutKey, refPath, !!onEdit]);
+  useEffect(schedule, [mode, layoutKey, refPath, !!onEdit, !!onComment]);
 
   return { refresh: schedule };
 }

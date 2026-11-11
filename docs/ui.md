@@ -2038,7 +2038,8 @@ under the pointer (the list item, not the list; the table row), Always
 numbers every leaf block, Off draws nothing. A number is the block's first
 source line beside its first rendered line; hovering it opens the range
 (`337-342`) and its actions to its right, and a click copies `path:337-342`
-(`refPath`, the task-relative file, else the bare range) with the copy toast.
+(`refPath`: the task-relative file, the absolute path of an external file,
+else the bare range) with the copy toast.
 The document's padding, the gaps between blocks and a list's own box keep
 the current block, so the pointer can travel from a block to its number
 without losing it. Numbers are per block on purpose: a per-visual-line
@@ -2053,12 +2054,23 @@ number means nothing once the width or font changes.
   reader setting change and a `<details>` toggle, coalesced into one frame,
   every read before any write. Hover measures one block when the hovered
   block changes; in Always mode a hover only flips a class.
-- A number's buttons (copy, and on an editable preview the pencil, which
-  opens the block editor on that block, the table for a row) are built the
-  first time the pointer reaches it, not per paint: Always mode has a label
-  per leaf block and repaints on every rebuild. There is no caller-supplied
-  action list; the pencil is `useLineGutter`'s `onEdit`, which
-  `MarkdownPreview` passes whenever its `edit` target can edit.
+- A number's buttons are copy, `+` and the pencil, built the first time the
+  pointer reaches it, not per paint: Always mode has a label per leaf block
+  and repaints on every rebuild. `+` shows wherever the preview takes
+  comments (task files and external files) and opens the comment composer
+  on the block, quoting its source lines. The pencil shows on an editable
+  preview only and opens the block editor on that block, the table for a
+  row. There is no caller-supplied action list: `+` is `useLineGutter`'s
+  `onComment`, which `MarkdownPreview` passes whenever it has a
+  `commentFile`, and the pencil is `onEdit`, passed whenever its `edit`
+  target can edit.
+- Preview comments work on external tabs (`termic view`) too. Their `file`
+  is the absolute path, so the bar's file button focuses that tab instead
+  of opening a diff, and reopens it when it was closed. An open tab is only
+  focused, never re-read: a re-read would move the cards under line numbers
+  the comments were made against. The editor's card anchoring
+  (`reviewCommentsExt`) runs for task files only, so an external file's
+  ranges do not follow a rewrite; the quote carries the text.
 
 **Review menu (`Aa`).** `ReviewMenu` (`components/task/markdown/ReviewMenu.tsx`)
 on the markdown tab's preview toolbar, after the line chip and the outline

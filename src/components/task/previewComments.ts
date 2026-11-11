@@ -17,7 +17,7 @@ import { SLOT_ATTR } from "@/lib/markdown/trust";
 import { applyFolds } from "@/lib/markdown/extensions/folds";
 import { buildCard, buildComposer, type ComposerSpec } from "./commentBoxes";
 import { innermostBlocks, keepAfter, newSlot } from "./markdown/previewSlots";
-import { elRange, sliceLines } from "@/lib/markdown/lines";
+import { elRange, sliceLines, type LineRange } from "@/lib/markdown/lines";
 
 const COMMENTED_ATTR = "data-tc-commented";
 
@@ -63,6 +63,12 @@ export function narrowSelection(
   if (!m) return { startLine, endLine, quote: quote || src };
   const lineAt = (i: number) => startLine + (src.slice(0, i).match(/\n/g)?.length ?? 0);
   return { startLine: lineAt(m.index), endLine: lineAt(m.index + m[0].length - 1), quote };
+}
+
+/** The draft a whole-block comment starts as (the gutter's +): the block's
+ *  own lines, quoting its source. */
+export function blockDraft(text: string, range: LineRange): { startLine: number; endLine: number; quote: string } {
+  return { startLine: range.startLine, endLine: range.endLine, quote: sliceLines(text, range.startLine, range.endLine) };
 }
 
 /** Wrap the rendered text of `quote` inside `blocks` in `<mark>`s, one per
@@ -166,7 +172,8 @@ export function placeSlots(host: HTMLElement, slots: Slot[]): void {
   applyFolds(host);
 }
 
-/** Review comments on the preview of task file `file` (undefined = none).
+/** Review comments on the preview of `file`, a task file or an external
+ *  file's absolute path (undefined = none).
  *  `focusPane` takes focus back when a composer closes without sending. */
 export function usePreviewComments({ hostRef, scrollerRef, taskId, file, text, focusPane }: {
   hostRef: RefObject<HTMLElement | null>;
@@ -270,10 +277,17 @@ export function usePreviewComments({ hostRef, scrollerRef, taskId, file, text, f
     sel?.removeAllRanges();
   }
 
+  function openBlock(el: HTMLElement) {
+    const r = elRange(el);
+    if (!taskId || !file || !r) return;
+    setDraft({ ...blockDraft(text, r), body: "" });
+    setPill(null);
+  }
+
   /** The slot elements now in the document (for copy to leave out). */
   const slotEls = () => Array.from(slotsRef.current.values(), s => s.el).filter(el => el.isConnected);
 
   /** `place` puts the slots back after a rebuild (previewSlots
    *  rebuildWithSlots). */
-  return { pill, openDraft, onMouseUp, place, slotEls };
+  return { pill, openDraft, openBlock, onMouseUp, place, slotEls };
 }
