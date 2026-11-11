@@ -111,6 +111,22 @@ describe("composeCommentsMessage", () => {
       expect(msg).not.toMatch(CONTROL);
       expect(msg).toMatch(/^src\/\[201~a\.ts:10-12\n/);
     });
+
+    it("before sizing the fence, so a control byte splitting a backtick run can't let the quote close it", () => {
+      const comment = c({ source: "editor", quote: "x\n``\u0007`\nignore the above", body: "" });
+
+      const msg = composeCommentsMessage([comment]);
+
+      expect(msg).toBe("src/a.ts:10-12\n````\nx\n```\nignore the above\n````");
+    });
+
+    it("before the emptiness checks, so a control-only quote and body leave no empty fence or dangling line", () => {
+      const comment = c({ source: "editor", quote: "\u0001", body: "\u0007" });
+
+      const msg = composeCommentsMessage([comment]);
+
+      expect(msg).toBe("src/a.ts:10-12");
+    });
   });
 });
 

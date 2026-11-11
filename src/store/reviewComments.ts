@@ -141,9 +141,11 @@ export function useTaskComments(taskId: string): ReviewComment[] {
 /** Fence quoted source so multi-line snippets stay intact and the agent reads
  *  them as a reference, not as instructions. The fence is longer than any
  *  backtick run inside the quote, so a quoted ``` line (e.g. from a markdown
- *  file) can't close the block early. */
+ *  file) can't close the block early. Strips control characters before
+ *  measuring: stripping afterwards can join two runs into one as long as the
+ *  fence. */
 export function fenceQuote(quote: string): string {
-  const q = quote.replace(/\n+$/, "");
+  const q = stripControl(quote).replace(/\n+$/, "");
   const longest = (q.match(/`+/g) ?? []).reduce((m, r) => Math.max(m, r.length), 0);
   const fence = "`".repeat(Math.max(3, longest + 1));
   return `${fence}\n${q}\n${fence}`;
@@ -180,11 +182,12 @@ export function composeCommentsMessage(comments: ReviewComment[]): string {
             : `${file}:${c.startLine}`;
 
       let block = loc;
-      if (c.quote.trim()) block += `\n${fenceQuote(c.quote)}`;
+      if (stripControl(c.quote).trim()) block += `\n${fenceQuote(c.quote)}`;
       // A comment body is optional when there is a quote: sending a selection
       // with nothing to say about it is a real gesture ("look at this"). Don't
       // leave a dangling blank line behind the fence for it.
-      if (c.body.trim()) block += `\n${c.body.trim()}`;
+      const body = stripControl(c.body).trim();
+      if (body) block += `\n${body}`;
       blocks.push(block);
     }
   }

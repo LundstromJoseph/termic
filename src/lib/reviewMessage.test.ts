@@ -86,4 +86,20 @@ describe("composeReviewMessage", () => {
     expect(msg.split("\n")[0]).toMatch(/^\[Termic review r1 "Split it" /);
     expect(msg).toContain("\n\nsrc/a.ts:1-2 (thread r1-t1)\n```\nab\nc\n```\nfix[201~rm -rf /\tx");
   });
+
+  it("strips the quote before sizing its fence, so a control byte splitting a backtick run can't let the quote close it", () => {
+    const msg = composeReviewMessage(REVIEW, [
+      { thread: thread("r1-t1", [1, 1], "``\u0007`"), comment: said("fence"), newThread: false },
+    ]);
+
+    expect(msg).toContain("\n````\n```\n````\nfence");
+  });
+
+  it("leaves out the fence for a quote of control characters only", () => {
+    const msg = composeReviewMessage(REVIEW, [
+      { thread: thread("r1-t1", [1, 1], "\u0001"), comment: said("ok"), newThread: false },
+    ]);
+
+    expect(msg.endsWith("\n\nsrc/a.ts:1 (thread r1-t1)\nok")).toBe(true);
+  });
 });

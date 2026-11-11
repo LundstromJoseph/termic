@@ -30,7 +30,7 @@ export function composeReviewMessage(review: Review, posted: PostedItem[]): stri
     const note = newThread ? ", new thread"
       : thread.outdated ? `, opened in iteration ${thread.iteration}, outdated in iteration ${thread.outdated}` : "";
     let block = `${loc} (thread ${thread.id}${note})`;
-    if (thread.quote.trim()) block += `\n${fenceQuote(thread.quote)}`;
+    if (stripControl(thread.quote).trim()) block += `\n${fenceQuote(thread.quote)}`;
     return `${block}\n${comment.body}`;
   });
   return stripControl(`${head}\n\n${blocks.join("\n\n")}`);
