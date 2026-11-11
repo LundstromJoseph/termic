@@ -13,6 +13,7 @@ import { forgeName, issueNoun, azureWorkItemCommentsCommand } from "@/lib/forge"
 import { usePromptLibrary } from "@/store/prompts";
 import { WORK_ISSUE_PROMPT, WORK_ISSUES_PROMPT } from "@/lib/builtinPrompts";
 import { slugify, branchify } from "@/lib/utils";
+import { stripControl } from "./controlChars";
 
 /** How much issue body we inline. Long issues exist (design docs pasted into
  *  a description); past a few thousand characters the agent is better served
@@ -81,14 +82,7 @@ export function issueBranch(
   return branchify(prefix ? `${prefix}/${stem}` : stem);
 }
 
-/** Issue text lands in a bracketed paste to the agent's PTY: a control byte
- *  in it (ESC[201~ ends the paste early, then the rest - including \r - lands
- *  as live keystrokes) is worse than a lost character. Strip C0/C1 except
- *  \n and \t, the only ones the prompt's own structure uses. Same idea as
- *  `commentPromptFor` in store/pr, which flattens single-line text instead. */
-function san(s: string): string {
-  return s.replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, "");
-}
+const san = stripControl;
 
 /** The cleaning `issueContext` applies to a body before it measures it.
  *  Exported for the forge list snapshot, which has to cut a body the way

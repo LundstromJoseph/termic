@@ -4,6 +4,7 @@
 // answers in the terminal where the user is not reading.
 
 import { fenceQuote } from "@/store/reviewComments";
+import { stripControl } from "./controlChars";
 import { threadAnchor } from "./reviewScope";
 import type { Review, ReviewThread, ReviewThreadComment } from "./types";
 
@@ -32,5 +33,5 @@ export function composeReviewMessage(review: Review, posted: PostedItem[]): stri
     if (thread.quote.trim()) block += `\n${fenceQuote(thread.quote)}`;
     return `${block}\n${comment.body}`;
   });
-  return `${head}\n\n${blocks.join("\n\n")}`;
+  return stripControl(`${head}\n\n${blocks.join("\n\n")}`);
 }

@@ -80,6 +80,38 @@ describe("composeCommentsMessage", () => {
   it("is empty for an empty batch", () => {
     expect(composeCommentsMessage([])).toBe("");
   });
+
+  describe("strips control characters so the message cannot break out of its bracketed paste", () => {
+    const CONTROL = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/;
+
+    it("from a diff comment's body, keeping the tab and the text after each stripped byte", () => {
+      const comment = c({ source: "diff", body: "fix\u001b[201~\rrm -rf /\tx" });
+
+      const msg = composeCommentsMessage([comment]);
+
+      expect(msg).not.toMatch(CONTROL);
+      expect(msg).toMatch(/^I reviewed your changes/);
+      expect(msg).toContain("\nfix[201~rm -rf /\tx");
+    });
+
+    it("from an editor comment's quote, turning a CRLF quote into LF only", () => {
+      const comment = c({ source: "editor", quote: "a\u009bb\u0007c\r\nd", body: "" });
+
+      const msg = composeCommentsMessage([comment]);
+
+      expect(msg).not.toMatch(CONTROL);
+      expect(msg).toBe("src/a.ts:10-12\n```\nabc\nd\n```");
+    });
+
+    it("from the file name", () => {
+      const comment = c({ source: "editor", file: "src/\u001b[201~a.ts" });
+
+      const msg = composeCommentsMessage([comment]);
+
+      expect(msg).not.toMatch(CONTROL);
+      expect(msg).toMatch(/^src\/\[201~a\.ts:10-12\n/);
+    });
+  });
 });
 
 describe("store", () => {

@@ -74,4 +74,16 @@ describe("composeReviewMessage", () => {
 
     expect(msg).toContain("\n````\n```js\n````\n");
   });
+
+  it("strips control characters from the title, file, quote and body, keeping tabs, newlines and the text around them", () => {
+    const evil: ReviewThread = { ...thread("r1-t1", [1, 2], "a\u009bb\r\nc"), file: "src/\u001ba.ts" };
+
+    const msg = composeReviewMessage({ ...REVIEW, title: "Split\u0007 it" }, [
+      { thread: evil, comment: said("fix\u001b[201~\rrm -rf /\tx"), newThread: false },
+    ]);
+
+    expect(msg).not.toMatch(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/);
+    expect(msg.split("\n")[0]).toMatch(/^\[Termic review r1 "Split it" /);
+    expect(msg).toContain("\n\nsrc/a.ts:1-2 (thread r1-t1)\n```\nab\nc\n```\nfix[201~rm -rf /\tx");
+  });
 });

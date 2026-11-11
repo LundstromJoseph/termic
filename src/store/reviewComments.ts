@@ -11,6 +11,7 @@
 // snippet stays greppable, so the agent can still locate the spot.
 
 import { create } from "zustand";
+import { stripControl } from "@/lib/controlChars";
 
 export interface ReviewComment {
   id: string;
@@ -192,12 +193,13 @@ export function composeCommentsMessage(comments: ReviewComment[]): string {
   // source file are "here is some code, here is what I want" — prefixing them
   // with "I reviewed your changes" tells the agent it authored code it may
   // never have touched, and invites it to answer as if defending a diff.
-  if (!comments.some(c => c.source !== "editor")) return blocks.join("\n\n");
+  // The message goes out as one bracketed paste (deliverMessage), see lib/controlChars.ts.
+  if (!comments.some(c => c.source !== "editor")) return stripControl(blocks.join("\n\n"));
 
   const intro =
     comments.length === 1
       ? "I reviewed your changes and left an inline comment:"
       : `I reviewed your changes and left ${comments.length} inline comments:`;
 
-  return `${intro}\n\n${blocks.join("\n\n")}`;
+  return stripControl(`${intro}\n\n${blocks.join("\n\n")}`);
 }
