@@ -115,6 +115,7 @@ must be hex.
     "hover": "rgba(224,222,244,0.05)", "sel": "rgba(196,167,231,0.22)",
     "accent": "#c4a7e7", "accent-soft": "rgba(196,167,231,0.22)", "accent-deep": "#6f5b9e",
     "accent-fg": "#232136",
+    "comment": "#c4a7e7", "comment-soft": "rgba(196,167,231,0.16)",
     "ok": "#9ccfd8", "ok-fg": "#232136", "warn": "#f6c177", "err": "#eb6f92",
     "palette-red": "#eb6f92", "palette-orange": "#e89f6f", "palette-yellow": "#f6c177",
     "palette-green": "#97c9a3", "palette-teal": "#9ccfd8", "palette-blue": "#3e8fb0",
@@ -167,6 +168,8 @@ just `bg` and `accent` and still look coherent.
 | `accent-soft` | accent-tinted backgrounds (usually low-alpha rgba) |
 | `accent-deep` | accent for filled buttons |
 | `accent-fg` | ink on a solid `accent` fill (count badges, filled CTAs). Defaults to white; set a dark ink if your accent is light |
+| `comment` | review comments: the commented-line stripe and the comment cards' left rail. Keep it apart from `err` and the accent so a commented line never reads as a deletion |
+| `comment-soft` | fill behind commented lines and quoted text (usually low-alpha rgba) |
 | `ok` | success green |
 | `ok-fg` | ink on a solid `ok` fill (toggle knobs). Defaults to white |
 | `warn` | warning yellow |

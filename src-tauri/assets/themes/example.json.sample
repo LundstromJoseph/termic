@@ -17,6 +17,8 @@
     "accent-soft": "rgba(196,167,231,0.22)",
     "accent-deep": "#6f5b9e",
     "accent-fg": "#232136",
+    "comment": "#c4a7e7",
+    "comment-soft": "rgba(196,167,231,0.16)",
     "ok": "#9ccfd8",
     "ok-fg": "#232136",
     "warn": "#f6c177",

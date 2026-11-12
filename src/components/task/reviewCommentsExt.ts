@@ -2,7 +2,7 @@
 // PR-style review surface (GH issue #28): select lines → "Add comment",
 // type feedback, and it's held in the reviewComments store until the user
 // sends the whole batch to an agent. Committed comments render as cards
-// pinned under their range; commented lines get a left accent stripe.
+// pinned under their range; commented lines get a left stripe.
 //
 // This is framework-free DOM (CodeMirror widgets aren't React). It talks to
 // the Zustand store directly for persistence, and pushes store changes back
@@ -815,11 +815,11 @@ export function dispatchFileComment(view: EditorView) {
 
 const baseTheme = EditorView.baseTheme({
   ".tc-commented-line": {
-    backgroundColor: "var(--color-accent-soft)",
-    boxShadow: "inset 2px 0 0 0 var(--color-accent)",
+    backgroundColor: "var(--color-comment-soft)",
+    boxShadow: "inset 2px 0 0 0 var(--color-comment)",
   },
   ".tc-add-comment-tip": { background: "transparent", border: "none" },
-  // Inline thread cards: an accent left rail ties them to the commented-line
+  // Inline thread cards: a comment-color rail ties them to the commented-line
   // stripe, a flat fill (no popover shadow) so they read as part of the diff,
   // not floating over it. Vertical spacing belongs HERE, inside `blockShell`,
   // never on the shell itself (GH #157).

@@ -318,16 +318,17 @@ describe("deriveChrome / imported themes", () => {
       const [hi, lo] = [rl(a), rl(b)].sort((x, y) => y - x);
       return (hi + 0.05) / (lo + 0.05);
     };
-    for (const k of ["accent", "ok", "warn", "err"]) expect(ratio(ui[k], ui.bg), k).toBeGreaterThanOrEqual(3);
+    for (const k of ["accent", "comment", "ok", "warn", "err"]) expect(ratio(ui[k], ui.bg), k).toBeGreaterThanOrEqual(3);
     expect(ratio(deriveChrome(monokai).ui["accent-deep"], "#ffffff")).toBeGreaterThanOrEqual(4.5);
     // ink on the accent fill comes from the theme's own pair
     expect([ui.bg, ui.fg]).toContain(ui["accent-fg"]);
     expect(ratio(ui["accent-fg"], ui.accent)).toBeGreaterThanOrEqual(3);
   });
 
-  it("maps status colors from ANSI and honours a supplied accent", () => {
+  it("maps status colors and the comment color from ANSI and honours a supplied accent", () => {
     expect(deriveChrome(monokai).ui.err).toBe("#f92672");
     expect(deriveChrome(monokai).ui.ok).toBe("#a6e22e");
+    expect(deriveChrome(monokai).ui.comment).toBe("#ae81ff");
     expect(deriveChrome(monokai, "#fd971f").ui.accent).toBe("#fd971f");
   });
 

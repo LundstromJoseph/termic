@@ -66,6 +66,11 @@
      stays for brand continuity, and this token is the lever if the
      shipped theme should ever clear 4.5:1 too. */
   --color-accent-fg: #ffffff;
+  /* Review comments: the commented-line stripe, the quoted-text mark and the
+     comment cards' left rail. Not the accent: the default terracotta reads
+     as a deleted line next to the diff's red. */
+  --color-comment:      #a78bfa;
+  --color-comment-soft: rgba(167, 139, 250, 0.16);
   --color-ok:        #4caf50;
   /* Ink on a solid --color-ok fill (the AgentsSection toggle tracks).
      Deliberately NOT --color-accent-fg: a theme may pair a light accent
@@ -251,6 +256,8 @@
     --color-accent:      #c25e3d;       /* shifted slightly for contrast on light bg */
     --color-accent-soft: rgba(194, 94, 61, 0.20);
     --color-accent-deep: #a04a2c;       /* button bg on cream surfaces */
+    --color-comment:      #7c5cd6;      /* ~4.6:1 on bg */
+    --color-comment-soft: rgba(124, 92, 214, 0.16);
     /* Fill the "modified" chip with the SOLID-fill token rather than the
        text-tuned accent, and ink it white: #a04a2c + white is ~5.7:1,
        where #c25e3d + black was ~5:1 and unreadable at chip size. The
@@ -807,24 +814,24 @@ html.termic-mod-held .xterm .xterm-cursor-pointer { cursor: pointer; }
 /* a block a review comment points at (previewComments placeSlots): the
    editor's commented-line stripe, hung just outside the text column. */
 .markdown-body [data-tc-commented] {
-  background: var(--color-accent-soft);
-  box-shadow: -8px 0 0 0 var(--color-accent-soft), -10px 0 0 0 var(--color-accent);
+  background: var(--color-comment-soft);
+  box-shadow: -8px 0 0 0 var(--color-comment-soft), -10px 0 0 0 var(--color-comment);
 }
 /* the exact text a review comment quotes (previewComments markQuote); the
    block rule above is the fallback when that text is not in the rendering.
    Same <mark> treatment as find, for the same WKWebView reason. */
 .markdown-body mark.tc-md-quote {
-  background-color: var(--color-accent-soft);
+  background-color: var(--color-comment-soft);
   color: inherit;
   font: inherit;
   border-radius: 2px;
-  box-shadow: inset 0 -2px 0 0 var(--color-accent);
+  box-shadow: inset 0 -2px 0 0 var(--color-comment);
 }
 .markdown-body .tc-comment-card,
 .markdown-body .tc-comment-composer { margin: 8px 0; }
 
 /* Review comment boxes (components/task/commentBoxes.ts), shared by the
-   editor/diff widgets and the markdown preview. An accent left rail ties them
+   editor/diff widgets and the markdown preview. A comment-color rail ties them
    to the commented-line stripe, a flat fill (no popover shadow) so they read
    as part of the document, not floating over it. Each host adds its own
    layout (reviewCommentsExt's baseTheme: margins, sticky). */
@@ -832,7 +839,7 @@ html.termic-mod-held .xterm .xterm-cursor-pointer { cursor: pointer; }
   padding: 8px 11px 9px;
   border-radius: 8px;
   border: 1px solid var(--color-border-soft);
-  border-left: 2.5px solid var(--color-accent);
+  border-left: 2.5px solid var(--color-comment);
   background: var(--color-bg-2);
   font-family: system-ui, -apple-system, sans-serif;
 }
@@ -881,7 +888,7 @@ html.termic-mod-held .xterm .xterm-cursor-pointer { cursor: pointer; }
   color: var(--color-fg-dim);
 }
 .tc-thread-entry[data-by="agent"] .tc-thread-author { color: var(--color-accent); }
-/* a resolved thread: no accent rail, and collapsed to its header until the
+/* a resolved thread: no comment rail, and collapsed to its header until the
    location toggle opens it. No transition on the rail: WKWebView never
    repaints a transitioned themed border-color. */
 .tc-thread-card[data-resolved="true"] { border-left-color: var(--color-border); }

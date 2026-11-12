@@ -46,6 +46,7 @@ export const UI_KEYS = [
   "border", "border-soft",
   "hover", "sel",
   "accent", "accent-soft", "accent-deep", "accent-fg",
+  "comment", "comment-soft",
   "ok", "ok-fg", "warn", "err",
   // Palette ramp: hue-named accents for user-assigned marks (project-group
   // folders consume it). Optional like everything else — omitted keys keep
@@ -250,6 +251,8 @@ export function deriveChrome(
     // so it has to carry white text whatever the theme's accent is
     "accent-deep": toHex(withContrast(accent, [255, 255, 255], [0, 0, 0], 4.5)),
     "accent-fg": toHex(inkOn(accent, bg, fg)),
+    comment: toHex(magenta),
+    "comment-soft": rgba(magenta, 0.16),
     ok: toHex(green),
     "ok-fg": toHex(inkOn(green, bg, fg)),
     warn: toHex(yellow),
