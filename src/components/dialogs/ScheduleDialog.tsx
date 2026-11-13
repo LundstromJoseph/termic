@@ -9,8 +9,8 @@
 // The sandbox is seeded from the project the way New Task seeds it, except
 // Docker: scheduled runs do not support it, so a Docker default seeds NOTHING
 // and Create waits for a choice, rather than quietly running on the host.
-// A Seatbelt choice opens the cage's allow-lists in a second column, the
-// layout New Task uses, and the dialog takes New Task's two widths for it.
+// A Seatbelt choice opens the cage's allow-lists in a second column and the
+// dialog widens for it.
 
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -23,14 +23,16 @@ import { AppDialog } from "@/components/ui/Dialog";
 import { Button } from "@/components/ui/Button";
 import { Checkbox } from "@/components/ui/Checkbox";
 import { Input } from "@/components/ui/Input";
-import { SandboxPicker, KeychainBlockField } from "@/components/SandboxPicker";
+import { SandboxPicker, KeychainBlockField, SandboxPresetRow } from "@/components/SandboxPicker";
+import { RolePicker, roleCageNote, roleDisabledReason, withRoleCage } from "@/components/secretsUi/RolePicker";
+import { useSecrets, ensureSecretsSync } from "@/store/secrets";
+import { roleDefault } from "@/lib/secretsUi";
 import { CliIcon, CLI_BRAND_COLOR } from "@/icons/cli";
 import { isTerminalCli, visibleCliIds, workDoneCapable, defaultCliFirst } from "@/lib/agents";
 import { settingsLoad } from "@/lib/ipc";
 import { cn } from "@/lib/utils";
 import { IS_MAC, SEATBELT_AVAILABLE } from "@/lib/platform";
 import { mergeLists, projectYoloDefault, yoloForCreate } from "@/lib/projectSandboxDefault";
-import { SANDBOX_PRESETS, presetHint, presetLabel } from "@/lib/sandboxPresets";
 import { selectionToFields, type CadenceKind, type SandboxSelection } from "@/lib/types";
 import { createSchedule, updateSchedule } from "@/lib/schedules/runner";
 import {
@@ -78,6 +80,13 @@ export function ScheduleDialog() {
   const [sbRw, setSbRw] = useState("");
   const [sbHosts, setSbHosts] = useState("");
   const [blockKc, setBlockKc] = useState(false);
+  // Secrets role for a NEW parent ("" = No secrets); its runs copy it
+  // (runSpecFromParent). Same coupling as New Task: a role turns the block
+  // on, and clearing the block or leaving Enforce clears the role.
+  const [rolePick, setRolePick] = useState("");
+  ensureSecretsSync();
+  const roles = useSecrets(s => s.roles);
+  const secretDefs = useSecrets(s => s.secrets);
   const [catchUp, setCatchUp] = useState(false);
   const [keepRuns, setKeepRuns] = useState(DEFAULT_KEEP_RUNS);
   const [reportDays, setReportDays] = useState<number | null>(DEFAULT_REPORT_DAYS);
@@ -121,7 +130,15 @@ export function ScheduleDialog() {
     setDockerSeeded(seeded === "docker");
     setSelection(seeded === "docker" ? null : seeded);
     setYolo(projectYoloDefault(p, usePrefs.getState().defaultYolo));
-    setBlockKc(false);
+    // a default role (project's, then the agent's) starts picked with the
+    // Keychain block it needs, as in New Task. Starting at "" read as an
+    // explicit No secrets once the block was ticked, overriding the default.
+    const role0 = roleDefault(p, agents.find(a => a.id === (cli || agentChoices[0]?.id)));
+    const sel0 = seeded === "docker" ? null : selectionToFields(seeded);
+    const roleOk0 = !!role0 && !!sel0 && !sel0.docker && (sel0.mode === "enforce" || sel0.mode === "enforce-fs")
+      && useSecrets.getState().roles.some(r => r.id === role0.id);
+    setBlockKc(roleOk0);
+    setRolePick(roleOk0 ? role0!.id : "");
     // Depends on the TARGET only: re-seeding when the task list moves would
     // throw away what the user typed.
   }, [target]);
@@ -152,6 +169,12 @@ export function ScheduleDialog() {
   const sandboxMode = selection ? selectionToFields(selection).mode : "off";
   // enforcing modes only, and only sent while shown (same rule as New Task).
   const kcRow = sandboxMode === "enforce" || sandboxMode === "enforce-fs";
+  const roleAgent = agents.find(a => a.id === cli);
+  const roleDef = roleDefault(project, roleAgent);
+  const roleDisabled = roleDisabledReason(t, { docker: false, mode: sandboxMode, seatbelt: SEATBELT_AVAILABLE });
+  const roleGate = kcRow && blockKc;
+  const pickRole = (id: string) => { setRolePick(id); if (id) setBlockKc(true); };
+  const chooseBlockKc = (v: boolean) => { setBlockKc(v); if (!v) setRolePick(""); };
   // The second column exists only while a Seatbelt mode is picked, so there
   // is no ghost width when the cage is off.
   const cage = newParent && sandboxMode !== "off";
@@ -191,7 +214,10 @@ export function ScheduleDialog() {
         const { mode } = selectionToFields(sel);
         const sandbox = mode === "off"
           ? { enabled: false, rwPaths: [], allowedHosts: [] }
-          : { enabled: true, mode, rwPaths: splitLines(sbRw), allowedHosts: splitLines(sbHosts), blockKeychain: kcRow && blockKc };
+          : {
+              enabled: true, mode, rwPaths: splitLines(sbRw), allowedHosts: splitLines(sbHosts), blockKeychain: kcRow && blockKc,
+              role: roleGate ? rolePick : null,
+            };
         await createSchedule({
           projectId,
           agent: {
@@ -221,8 +247,8 @@ export function ScheduleDialog() {
       open={open}
       onOpenChange={v => { if (!v) close(); }}
       title={title}
-      // New Task's two widths, on the one thing they depend on: whether
-      // there is a right column. A `w-*` here does nothing, because
+      // two widths, on the one thing they depend on: whether there is a
+      // right column. A `w-*` here does nothing, because
       // AppDialog's own `max-w-md` still caps it.
       className={cage ? "max-w-[72rem]" : "max-w-xl"}
       stickyFooter={
@@ -377,13 +403,33 @@ export function ScheduleDialog() {
           <Field label={t("schedule.sandbox")}>
             <SandboxPicker
               value={selection}
-              onChange={s => { setSelection(s); setDockerSeeded(false); }}
+              onChange={s => {
+                setSelection(s); setDockerSeeded(false);
+                const m = selectionToFields(s).mode;
+                if (m !== "enforce" && m !== "enforce-fs") setRolePick("");
+              }}
               seatbeltUnavailable={!SEATBELT_AVAILABLE}
               dockerOffered={false}
               dockerUnavailableReason={t("schedule.dockerUnavailable")}
               compact
             />
-            {kcRow && <KeychainBlockField checked={blockKc} onChange={setBlockKc} compact />}
+            {kcRow && <KeychainBlockField checked={blockKc} onChange={chooseBlockKc} compact />}
+            {roles.length > 0 && (
+              <div className="mt-1">
+                <RolePicker
+                  roles={roles}
+                  secrets={secretDefs}
+                  value={roleGate ? rolePick : ""}
+                  onChange={withRoleCage(sandboxMode, m => { setSelection(m); setDockerSeeded(false); }, pickRole)}
+                  seededFrom={roleGate && roleDef && rolePick && rolePick === roleDef.id
+                    ? (roleDef.source === "project" ? { source: "project" } : { source: "agent", agent: roleAgent?.display_name || cli })
+                    : null}
+                  disabledReason={roleDisabled}
+                  note={roleCageNote(t, { docker: false, mode: sandboxMode })}
+                  compact
+                />
+              </div>
+            )}
             {dockerSeeded && !selection && (
               <p className="text-[11.5px] text-[var(--color-warn)]" data-testid="schedule-docker-pick">{t("schedule.dockerPick")}</p>
             )}
@@ -451,20 +497,12 @@ export function ScheduleDialog() {
           <div className="text-[11.5px] uppercase tracking-[0.1em] text-[var(--color-fg-faint)]">
             {t("schedule.sandboxConfigTitle")}
           </div>
-          <div className="flex flex-wrap items-center gap-2 text-[12px]">
-            <span className="text-[var(--color-fg-faint)]">{t("newTask.presetLabel")}</span>
-            {SANDBOX_PRESETS.map(p => (
-              <button
-                key={p.id}
-                type="button"
-                title={presetHint(p)}
-                onClick={() => { setSbRw(p.rwPaths.join("\n")); setSbHosts(p.allowedHosts.join("\n")); }}
-                className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-0.5 text-[12px] text-[var(--color-fg-dim)] hover:border-[var(--color-accent-soft)] hover:text-[var(--color-fg)]"
-              >
-                {presetLabel(p)}
-              </button>
-            ))}
-          </div>
+          <SandboxPresetRow
+            mode={sandboxMode}
+            rw={sbRw}
+            hosts={sbHosts}
+            onPick={p => { setSbRw(p.rwPaths.join("\n")); setSbHosts(p.allowedHosts.join("\n")); }}
+          />
           <Field label={t("newTask.allowedPathsLabel")} hint={t("newTask.allowedPathsHint")}>
             <textarea
               data-testid="schedule-rw-paths"

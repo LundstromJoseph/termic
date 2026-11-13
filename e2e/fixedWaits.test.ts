@@ -47,6 +47,12 @@ const ALLOWED: Record<string, { count: number; why: string }> = {
     why: "a settle window against IPC still in flight from the case before, plus "
       + "two 'the task did not change' negatives after a shortcut",
   },
+  "secrets-task.e2e.ts": {
+    count: 2,
+    why: "two negatives: after Allow the blocked row must NOT come back, and a "
+      + "project default set after a task must NOT raise its uncaged notice. Both "
+      + "need the footer's 2s poll (and the popover's 1.5s) to run at least once",
+  },
   "settings.e2e.ts": {
     count: 1,
     why: "AgentsSection writes its copy 500ms after an edit and the timer outlives "

@@ -6,9 +6,10 @@
 // or onto the main tab strip (move tab back to the main pane). Whole-pane
 // drag-to-rearrange was removed: it hijacked pointer events from the pills.
 
+import { shellRoleTarget } from "@/lib/shellSecrets";
 import { useState, useMemo, useRef, useEffect } from "react";
 import { useTranslation } from "react-i18next";
-import type { Task, Tab } from "@/lib/types";
+import type { Task, Tab, TerminalTab } from "@/lib/types";
 import type { PaneLeaf } from "@/lib/splitTree";
 import { useApp } from "@/store/app";
 import { useUI } from "@/store/ui";
@@ -75,10 +76,14 @@ export function PaneHeader({ leaf, task, onClose }: PaneHeaderProps) {
   // elementFromPoint sees underneath.
   function hitTestDropTarget(clientX: number, clientY: number): { el: HTMLElement | null; toPaneId: string | null; zone: DropZone } | null {
     const raw = document.elementFromPoint(clientX, clientY) as HTMLElement | null;
+    // scoped to this task: every visited task stays mounted, and a hidden
+    // task's main pane measures 0x0, which reads as "center" and turns an
+    // edge drop into a plain move.
+    const scope = `[data-task-id="${CSS.escape(task.id)}"]`;
     const mainHighlight = () =>
-      document.querySelector("[data-main-content][data-split-leaf]") as HTMLElement | null;
+      document.querySelector(`${scope} [data-main-content][data-split-leaf]`) as HTMLElement | null;
     const paneHighlight = (id: string) =>
-      document.querySelector(`[data-split-leaf][data-pane-id="${CSS.escape(id)}"]`) as HTMLElement | null;
+      document.querySelector(`${scope} [data-split-leaf][data-pane-id="${CSS.escape(id)}"]`) as HTMLElement | null;
     const zoneOf = (el: HTMLElement | null): DropZone =>
       el ? detectDropZone(el.getBoundingClientRect(), clientX, clientY) : "center";
 
@@ -244,6 +249,7 @@ export function PaneHeader({ leaf, task, onClose }: PaneHeaderProps) {
       onSplitDown={() => moveTabToSplit(task.id, tab.id, paneId, 'bottom')}
       canSplitOut={paneTabs.length > 1}
       onMoveToSplit={() => startMenuMove(tab.id)}
+      shell={shellRoleTarget(task.id, tab as TerminalTab)}
     >
       <TabPill
         task={task}

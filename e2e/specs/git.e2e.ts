@@ -2,7 +2,7 @@ import { execSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { archiveTask, clickByText, clickMenuItem, clickWhenVisible, createWorktreeTask, dismissOverlays, ensureActiveTask, openRightTab, flushEditorMeasure, openTask, requireTermicApi, setInputValue, snap, waitForAppShell, waitForText, waitForTextGone, waitGone, waitVisible, waitForAttr, rmTree } from "../helpers";
+import { archiveTask, clickByText, clickMenuItem, clickWhenVisible, createWorktreeTask, dismissOverlays, ensureActiveTask, openRightTab, flushEditorMeasure, openTask, requireTermicApi, setInputValue, snap, waitForAppShell, waitForText, waitForTextGone, waitGone, waitVisible, waitForAttr, rmTree, textOf, newTaskSection, settledSnap } from "../helpers";
 
 /** `execSync` for git against the shared fixture, retrying a moment on
  *  `index.lock`. The app runs its own git on this repo (the Git panel's status
@@ -2798,11 +2798,10 @@ describe("the route into an issue task", () => {
     // The column's own heading is uppercased in CSS, and innerText returns it
     // transformed - so assert on the hint below it, which is not.
     await waitForText("Open issues, most recently updated first.");
-    // And the rest of the form is right there beside it. The task type is the
-    // tab row now (the duplicate "Task type" field below it is gone), so this
-    // asserts the tab rather than a label that no longer exists.
+    // And the fields a pick fills are right there beside it, in the same
+    // Task pane. The agent moved to its own section of the rail.
     await waitVisible('[data-testid="task-type-worktree"]');
-    await waitForText("Default CLI");
+    await waitVisible('[data-testid="new-task-pane-task"] [data-testid="new-task-name"]');
   });
 
   it("says why a non-forge repo has no issues instead of showing an empty list", async () => {
@@ -2904,6 +2903,140 @@ describe("the forge pickers: work that pulled you in", () => {
     // forge cannot be reached, and All open would only fail the same way.
     expect(await browser.execute(() => !!document.querySelector('[data-testid="pr-scope"]'))).toBe(false);
     await snap("pr-pane-no-forge.png");
+  });
+
+  it("lists your PRs and the review queue in one scroller, rows truncated", async () => {
+    // Seeded through the shared list cache (the fixture is no forge, so the
+    // re-fetch fails and the painted rows stay). Long titles are the case:
+    // they used to push a sideways scrollbar under the review list, and yours
+    // grew to the bottom with a gap above the review queue.
+    const pr = (n: number, title: string, draft = false) => ({
+      provider: "github", number: n, title, url: "", body: "", author: "alice",
+      head_ref: `feature/e2e-${n}`, cross_repository: false, draft, updated_at: "2026-11-01T10:00:00Z",
+    });
+    const long = "Add a read-only integration API with personal access tokens and per-project scopes";
+    await browser.execute((id, mine, review) => {
+      const t = window.__termic!;
+      const entry = (scope: string, prs: unknown[]) => ({
+        query: { projectId: id, kind: "prs", scope }, status: "ok", okAt: Date.now(), fetchedAt: Date.now(),
+        ok: { provider: "github", remote_url: "", status: "ok", message: "", prs },
+      });
+      t.useForgeLists.setState((s: any) => ({
+        entries: { ...s.entries, [`${id}:prs:mine:30`]: entry("mine", mine), [`${id}:prs:review:30`]: entry("review", review) },
+      }));
+    }, projectId, [pr(23, long, true)], [pr(30, long), pr(28, long, true), pr(27, "Short one")]);
+    await clickWhenVisible('[data-source-tab="new"]');
+    await clickWhenVisible('[data-source-tab="pr"]');
+    await waitVisible('[data-testid="pr-review-section"]');
+    // the column slides in from the right (termic-slide-in-right); measure
+    // and snap it where it lands, not mid-slide.
+    const slid = () => browser.execute(() => (document.querySelector('[data-testid="new-task-picker"]') as HTMLElement)
+      .getAnimations().every(a => a.playState === "finished"));
+    await browser.waitUntil(slid, { timeout: 3_000, timeoutMsg: "the picker never finished sliding in" });
+    const m = await browser.execute(() => {
+      const lists = document.querySelector('[data-testid="pr-lists"]') as HTMLElement;
+      const mine = lists.querySelector("ul")!.getBoundingClientRect();
+      const review = document.querySelector('[data-testid="pr-review-section"]')!.getBoundingClientRect();
+      return { overflowX: lists.scrollWidth - lists.clientWidth, gap: Math.round(review.top - mine.bottom), rows: lists.querySelectorAll('[data-testid="pr-row"]').length };
+    });
+    expect(m.rows).toBe(4);
+    expect(m.overflowX).toBe(0);
+    expect(m.gap).toBeLessThanOrEqual(16);
+    await snap("pr-pane-lists.png");
+    // a worktree offers every source; they still sit on one line.
+    await clickWhenVisible('[data-testid="task-type-worktree"]');
+    await browser.waitUntil(() => browser.execute(() => document.querySelectorAll('[data-source-tab]').length >= 4),
+      { timeout: 5_000, timeoutMsg: "the worktree sources never showed" });
+    // switching the task type keeps the same column: no second slide.
+    expect(await browser.execute(() => (document.querySelector('[data-testid="new-task-picker"]') as HTMLElement)
+      .getAnimations().filter(a => a.playState === "running").length)).toBe(0);
+    const tops = await browser.execute(() => [...new Set([...document.querySelectorAll('[data-source-tab]')]
+      .map(b => Math.round(b.getBoundingClientRect().top)))].length);
+    expect(tops).toBe(1);
+    await snap("pr-pane-lists-worktree.png");
+    // leaving the source shrinks a stand-in away while the form grows back.
+    await clickWhenVisible('[data-source-tab="new"]');
+    await waitGone('[data-testid="new-task-picker"]');
+    await browser.waitUntil(() => browser.execute(() => !document.querySelector('[data-testid="new-task-picker-leaving"]')),
+      { timeout: 3_000, timeoutMsg: "the closing stand-in never went away" });
+    // back on the PR source, as the next case expects it.
+    await clickWhenVisible('[data-source-tab="pr"]');
+    await waitVisible('[data-testid="pr-column"]');
+  });
+
+  // The picker sits in Task, beside the fields a pick fills. How the task
+  // runs moved to other sections of the rail, whose entries say what they hold,
+  // and a YOLO warning in one of them is flagged from wherever you are.
+  it("keeps the picker in Task and flags the Agent section from it", async () => {
+    const state = () => browser.execute(() => {
+      const shown = (sel: string) => {
+        const el = document.querySelector(sel) as HTMLElement | null;
+        return el ? el.getClientRects().length > 0 : null;
+      };
+      return {
+        section: document.querySelector("#new-task-form")?.getAttribute("data-section"),
+        picker: shown('[data-testid="pr-column"]'),
+        inTask: !!document.querySelector('[data-testid="new-task-pane-task"] [data-testid="pr-column"]'),
+      };
+    });
+    const size = () => browser.execute(() => {
+      const b = document.querySelector("#new-task-form")!.closest('[role="dialog"]')!.getBoundingClientRect();
+      return { w: Math.round(b.width), h: Math.round(b.height) };
+    });
+    const agentWarn = () => browser.execute(() =>
+      document.querySelector('[data-testid="rail-agent"] [data-testid="rail-warn"]')?.getAttribute("data-warn") ?? null);
+    const pickerSize = await size();
+    expect(await state()).toEqual({ section: "task", picker: true, inTask: true });
+    expect(await textOf('[data-testid="rail-task-sub"]')).toMatch(/, from a PR$/);
+    await browser.execute(() => {
+      const box = document.querySelector('[data-testid="pr-number-input"]') as HTMLInputElement;
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(box, "4242");
+      box.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+
+    await newTaskSection("isolation");
+    // Hidden, NOT unmounted: the picker keeps what was typed into it.
+    expect(await state()).toEqual({ section: "isolation", picker: false, inTask: true });
+    expect(await size()).toEqual(pickerSize);
+    await clickWhenVisible('[role="dialog"] [data-sandbox-option="off"]');
+    expect(await textOf('[data-testid="rail-isolation-sub"]')).toBe("Off");
+
+    // Uncaged YOLO must be flagged from the picker. YOLO only exists for an
+    // agent, so pick one rather than trusting the project default.
+    await newTaskSection("agent");
+    await browser.execute(() => {
+      const dlg = document.querySelector("#new-task-form")!.closest('[role="dialog"]')!;
+      ([...dlg.querySelectorAll("button")].find((b) => b.textContent?.trim() === "FakeAgent") as HTMLElement).click();
+    });
+    const yoloBox = '[data-testid="new-task-yolo"] input[type="checkbox"]';
+    await waitVisible(yoloBox);
+    const yoloOn = () => browser.execute((s) => (document.querySelector(s) as HTMLInputElement).checked, yoloBox);
+    const wasOn = await yoloOn();
+    if (!wasOn) await clickWhenVisible(yoloBox);
+    await newTaskSection("task");
+    expect(await state()).toEqual({ section: "task", picker: true, inTask: true });
+    expect(await agentWarn()).toBe("uncaged");
+    expect(await browser.execute(() =>
+      (document.querySelector('[data-testid="pr-number-input"]') as HTMLInputElement).value)).toBe("4242");
+    await settledSnap("new-task-c-pr-picker.png");
+    // A files-only cage turns YOLO on with the network open, and the entry
+    // says so too, in amber. Enforcing (FS) is Seatbelt, so macOS only.
+    await newTaskSection("isolation");
+    const fsOk = await browser.execute(() =>
+      !((document.querySelector('[role="dialog"] [data-sandbox-option="enforce-fs"]') as HTMLButtonElement | null)?.disabled ?? true));
+    if (fsOk) {
+      await clickWhenVisible('[role="dialog"] [data-sandbox-option="enforce-fs"]');
+      await browser.waitUntil(async () => (await agentWarn()) === "net-open",
+        { timeoutMsg: "Enforcing (FS) with YOLO did not flag the open network" });
+      await clickWhenVisible('[role="dialog"] [data-sandbox-option="off"]');
+    }
+    // Back to how the next case expects it.
+    if (!wasOn) {
+      await newTaskSection("agent");
+      await clickWhenVisible(yoloBox);
+      await browser.waitUntil(async () => (await agentWarn()) === null, { timeoutMsg: "the YOLO flag stayed after unticking" });
+    }
+    await newTaskSection("task");
   });
 
   it("leaving the PR source closes the pane", async () => {

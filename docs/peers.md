@@ -134,7 +134,8 @@ either, since a selector finds a pair by both.
 here that sent that pair work (its `contacts`) is the answer the task is
 waiting for, so it gets `now` on arrival and skips the agent's queue
 (`report_back_now`). New work going the other way, into a task that never
-contacted the sender, still queues behind the agent's turn. Set by the
+contacted the sender, follows the sender's choice (immediate unless it
+passed `--queue`). Set by the
 receiving Termic, not asked of the sending agent, which cannot tell the two
 apart. Either machine can be B; both
 can be in pairing mode at once. Leaving the Settings page closes it.
@@ -256,6 +257,19 @@ the other machine (best effort, 5 s). If the other machine is offline it
 keeps a dead key that opens nothing here; its next call gets 401, it
 marks the pair `revoked_by_peer`, and Settings tells that person "No
 longer paired on the other computer. Unpair here too."
+
+Every call is stamped with the sender's clock and refused outside 5
+minutes of the receiver's. Pairing has no such check, so two machines
+whose clocks disagree (a Windows laptop with a wrong time zone, say)
+would pair fine and then have every call refused. So pairing checks it
+too: the confirm is stamped, and a machine showing the code refuses one
+outside the window with a sealed 409 carrying its clock, stores nothing,
+and closes pairing mode; the typing side says "<machine>'s clock is 7 h
+57 min ahead of this machine's" and pairs nothing. A paired sender with a stale
+stamp gets a sealed 409 carrying the receiver's clock, not the bare 401,
+so the caller reports "<machine>'s clock is 7 h 57 min ahead of this
+machine's" and does not mark the pair revoked. Older versions answer it
+with the 401.
 
 Renaming is local: it sets this machine's name for the peer, the other
 machine is not told, and either name or the id (a prefix of 6+

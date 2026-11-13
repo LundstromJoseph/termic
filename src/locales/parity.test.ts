@@ -30,7 +30,7 @@ describe("locale parity (en vs zh-CN)", () => {
   // (sidebar, task, backend at the time of writing) are still parity-checked
   // below but allowed to be empty until their area is extracted; move each
   // into this list as its extraction lands, until it equals NAMESPACES.
-  const EXTRACTED: readonly string[] = ["common", "settings", "dialogs", "panels", "chrome", "sidebar", "task", "backend"];
+  const EXTRACTED: readonly string[] = ["common", "settings", "dialogs", "panels", "chrome", "sidebar", "task", "backend", "secrets"];
 
   for (const ns of NAMESPACES) {
     it(`namespace "${ns}" has identical keys`, () => {
@@ -49,6 +49,22 @@ describe("locale parity (en vs zh-CN)", () => {
       for (const key of Object.keys(a)) {
         expect(placeholders(b[key]), `${ns}:${key} placeholder mismatch`).toEqual(placeholders(a[key]));
       }
+    });
+  }
+});
+
+// a `<Trans>` component named after an HTML void element (`<link>`, `<br>`,
+// `<img>`, ...) is closed by the parser on sight, so its content renders as
+// plain text and the component never mounts (docs/i18n.md). Name it anything
+// else, `<action>` say.
+const VOID_TAG = /<(area|base|br|col|embed|hr|img|input|link|meta|source|track|wbr)>/;
+
+describe("Trans tag names", () => {
+  for (const [lang, tree] of [["en", en], ["zh-CN", zhCN]] as const) {
+    it(`${lang} uses no void element as a component tag`, () => {
+      const bad = NAMESPACES.flatMap(ns =>
+        Object.entries(flatten(tree[ns] as Tree)).filter(([, v]) => VOID_TAG.test(v)).map(([k]) => `${ns}:${k}`));
+      expect(bad).toEqual([]);
     });
   }
 });

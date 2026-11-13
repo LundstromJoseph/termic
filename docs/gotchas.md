@@ -471,6 +471,19 @@ a defence.
 change. That is what `transition-colors` was wanted for anyway; it just also
 covers `border-color`, which is the broken one.
 
+**A themed background freezes too.** `ui/Checkbox` swaps
+`bg-[var(--color-bg)]` for `bg-[var(--color-accent-deep)]`, and the roles
+matrix (`e2e/specs/secrets-api-key.e2e.ts`) showed checked boxes still
+computing the unchecked background after three seconds, under both
+`transition-colors` and `transition-[color,background-color]`. Dropping the
+transition fixed it; each transition put it back. So for a control whose
+FILL carries the state, drop the transition: a 150ms fade on a checkbox is
+not worth a box that never fills. The sandbox mode cards (`SandboxPicker`)
+and role cards (`RolePicker`) froze the same way when picking a role moved
+the selection programmatically: OFF and No secrets kept the selected border
+1.5s later. Both dropped the transition; `secrets-task.e2e.ts` asserts the
+painted border.
+
 This is easy to miss in review because the JSX is obviously correct, and easy
 to miss in tests because `aria-checked` (the thing a spec naturally asserts) is
 right. It took a screenshot to notice and a computed-style assertion to prove.
@@ -622,6 +635,23 @@ resume, then no `pty-exit` and no respawn. The waiter now does what
 `pty_kill` does after a 200 ms drain. `conpty_osc_probe` measures both
 halves (EOF or not with the pseudoconsole open, then once it is closed),
 with macOS as the control.
+
+## A Dock-launched app gets 256 fds, and every terminal costs 4
+
+launchd's default `maxfiles` soft limit is 256, and a GUI app opened from
+the Dock or Finder inherits it. A dev build started from a shell inherits
+the shell's (usually much higher) limit, so this never reproduces under
+`npm run tauri:dev`. Each host PTY holds 4 fds on `/dev/ptmx` (master,
+reader dup, writer dup, `SudoWatch` dup) over a ~70 fd baseline, so about
+50 terminals across all tasks made the next `openpty` fail with "Too many
+open files (os error 24)". It looked like a leak and was not: the ptmx
+count tracked live terminals exactly.
+
+`fd_limit::raise` lifts the soft limit to 1024 at the top of `run()`.
+Children inherit it on purpose (portable-pty gives no `pre_exec` hook to
+restore the original the way Ghostty does), which is why the number is
+modest rather than the hard limit. If you add an fd per PTY, redo the
+arithmetic in `fd_limit.rs`.
 
 ## A Windows path that mixes separators opens Documents, and reports success
 
@@ -1069,6 +1099,24 @@ another, and exercised only on the empty case. `a_plugin_install_upgrades_over_a
 now installs, fakes an old version on disk, and upgrades; with the parse moved
 back it fails with "termic.js is not valid JSON" (the control was run).
 
+## An agent's plugin process may not be the process termic spawned
+
+opencode 2 kept the `plugins/` directory and the in-process plugin idea, so the
+opencode 1 module looked like it only needed a new export shape. It did not:
+opencode 2's server plugins run in ONE background service per machine, spawned
+detached with the environment of whichever client started it, and the TUI in
+termic's pty is only a client. A plugin reading `$TERMIC_PTY` there reads some
+other task's terminal, and its event stream carries every location the service
+serves. The fix is to report from the process termic actually spawned (the TUI
+plugin, `plugins/termic/tui.js`) and to follow only sessions that TUI shows.
+
+Before trusting "in-process" for an agent, find out which process: for a
+client/server agent, the env, the tty and the event stream all belong to
+whoever owns the server. Also, the old module was not merely stale under
+opencode 2, it was REFUSED by the loader ("Plugin must export a default
+definition"), which from termic's side is indistinguishable from an agent that
+never reports. See docs/agent-hooks.md "opencode 2".
+
 ## Two senders on one signal cannot be told apart
 
 termic's hooks said "turn started / over" with OSC `133;C` / `133;D`, and so
@@ -1111,6 +1159,16 @@ script exits), and the in-process plugins open the tty `O_NONBLOCK`, since a
 blocking write there would freeze the agent itself.
 `a_hook_never_blocks_on_a_terminal_that_will_not_read` drives each script at a
 FIFO with no reader; with the bound removed it hangs (the control was run).
+It now carries its own 5s deadline, so a broken bound fails it instead.
+
+The bound is a SIBLING kill: a background `( sleep 2; kill $w )` signals the
+writer, which is not its child. The cage profile allowed `signal` only to
+`self` and `children`, so inside a Termic cage that kill got EPERM, the
+watchdog was a no-op, and a caged agent's hook on a dead pty blocked forever,
+which is the bug above with the fix silently off. It also hung `cargo test`
+for any agent running it from a task. The profile now allows
+`(target same-sandbox)`; `a_caged_process_can_signal_its_sibling_but_not_another_cage`
+pins both the sibling kill and that one cage cannot signal another.
 
 ## Reporting nothing is reporting something, and the state machine believes it
 
@@ -1429,3 +1487,35 @@ Two traps from reproducing it, both of which cost a wrong conclusion first:
   "The log contains my message" passed on a line from the previous run. Count
   the lines before the action and wait for the count to grow.
 
+## A PTY's env starts as Termic's whole env: skipping a var does not drop it
+
+`portable_pty::CommandBuilder::new` seeds the builder with every variable of
+the current process (`get_base_env`), before `pty_spawn` copies anything. So a
+copy loop that `continue`s past a var leaves the inherited copy in place, and
+the child gets it anyway. The other agent session's markers
+(`CLAUDE_CODE_SESSION_ID`, the messaging socket and token) reached every
+spawned agent this way for as long as the skip existed, and the kept-out env
+list (sandbox.md "Env vars kept out of agents") did nothing until it was
+caught by an e2e case reading what the spawned process received.
+
+Drop a var with `env_remove`, which `inherit_env` (lib.rs) does for every var
+its predicate names; `inherit_env_removes_what_it_drops` pins it, with the
+control that the builder really does start with the var. A unit test of the
+predicate alone cannot catch this: the predicate was right the whole time.
+
+## An (i) that takes focus when a dialog opens eats the first Escape
+
+Radix's dialog focuses the first tabbable element on open unless something
+inside already holds focus, and a Radix tooltip opens on FOCUS, not only on
+hover. So a dialog whose first tabbable is an `InfoTip` (the New Task
+dialog's task-type (i)) opens with that tooltip up, and Escape closes the
+tooltip, not the dialog: the dialog then needs a second Escape. The e2e
+suite found it as a dialog left open behind the next spec's Edit task
+dialog, whose unscoped `[data-testid="sandbox-rw-paths"]` read New Task's
+textarea instead. Controlled: removing the fix brings the failure back.
+
+Point `onOpenAutoFocus` at the field the user types into first
+(`e.preventDefault()` and focus it), as `NewTaskDialog` does for Name.
+`autoFocus` on the input alone did not win that race. A tooltip open from
+HOVER does the same: with the pointer resting on an (i) or a blocked Create,
+the first Escape closes the tooltip.

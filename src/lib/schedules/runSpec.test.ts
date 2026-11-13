@@ -22,6 +22,7 @@ describe("runSpecFromParent: the one inheritance point", () => {
       sandbox_rw_paths: ["/Users/u/cache"],
       sandbox_allowed_hosts: ["grafana.acme.com"],
       sandbox_block_keychain: true,
+      role: "reviewer",
       accounts: { codex: "work" },
     }));
     expect(spec).toEqual({
@@ -29,7 +30,7 @@ describe("runSpecFromParent: the one inheritance point", () => {
       agentArgs: ["--model", "o4"],
       yolo: true,
       // a blocked parent never schedules an unblocked run.
-      sandbox: { enabled: true, mode: "enforce-fs", rwPaths: ["/Users/u/cache"], allowedHosts: ["grafana.acme.com"], blockKeychain: true },
+      sandbox: { enabled: true, mode: "enforce-fs", rwPaths: ["/Users/u/cache"], allowedHosts: ["grafana.acme.com"], blockKeychain: true, role: "reviewer" },
       accounts: { codex: "work" },
       memberPaths: undefined,
     });
@@ -39,6 +40,13 @@ describe("runSpecFromParent: the one inheritance point", () => {
     expect(runSpecFromParent(parent())).toMatchObject({
       yolo: false, sandbox: { enabled: false, rwPaths: [], allowedHosts: [] }, accounts: {},
     });
+  });
+
+  it("a blocked parent with no role schedules No secrets, never a seed", () => {
+    // null would reach create as "take the defaults" and could give the run
+    // a role the parent does not run.
+    const spec = runSpecFromParent(parent({ sandbox_mode: "enforce", sandbox_block_keychain: true, role: null }));
+    expect(spec.sandbox).toMatchObject({ blockKeychain: true, role: "" });
   });
 
   it("reads a legacy sandbox_enabled record as enforce", () => {

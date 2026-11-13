@@ -14,7 +14,12 @@ export interface RunSpec {
   cli: string;
   agentArgs: string[];
   yolo: boolean;
-  sandbox: { enabled: boolean; mode?: SandboxMode; rwPaths: string[]; allowedHosts: string[]; blockKeychain?: boolean };
+  sandbox: {
+    enabled: boolean; mode?: SandboxMode; rwPaths: string[]; allowedHosts: string[]; blockKeychain?: boolean;
+    /** Secrets role: the parent's id, or "" for No secrets. Never null,
+     *  which create would read as "seed the defaults". */
+    role?: string | null;
+  };
   /** Agent id -> account name, applied with `taskSetAccount` before mount. */
   accounts: Record<string, string>;
   /** Multi-repo projects: which members to link. Undefined elsewhere. */
@@ -55,6 +60,10 @@ export function runSpecFromParent(parent: Task, project?: Pick<Project, "type"> 
           rwPaths: [...(parent.sandbox_rw_paths ?? [])],
           allowedHosts: [...(parent.sandbox_allowed_hosts ?? [])],
           blockKeychain: !!parent.sandbox_block_keychain,
+          // the parent's own role. A parent with none runs No secrets, so
+          // the run does too: null here would be seeded at create and could
+          // hand the run a role its parent does not have.
+          role: parent.role ?? "",
         },
     accounts: { ...(parent.accounts ?? {}) },
     memberPaths: project?.type === "multi"

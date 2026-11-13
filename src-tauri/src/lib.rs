@@ -34,8 +34,12 @@ use uuid::Uuid;
 pub mod agent_hooks;
 pub mod agent_usage;
 pub mod codex_trust;
+mod fd_limit;
 mod sandbox;
 mod proxy;
+mod secrets;
+mod env_guard;
+mod broker;
 mod proc_ctl;
 mod fs_link;
 #[cfg(windows)]
@@ -162,6 +166,12 @@ pub struct Project {
     /// tasks to Monitoring.
     #[serde(default)]
     pub default_sandbox_mode: Option<SandboxMode>,
+    /// Secrets role new tasks of this project start with (secrets.rs).
+    /// Beats the agent's default. Read only at creation (`seed_task_role`),
+    /// so a change here never moves an existing task. None = each agent's
+    /// default; `Some("")` = No secrets.
+    #[serde(default)]
+    pub default_role: Option<String>,
     /// New tasks of this project default to DOCKER rather than Seatbelt.
     /// Mutually exclusive with the two above in effect: when this is on, a
     /// create that does not pin an engine itself resolves to Docker and the
@@ -587,6 +597,24 @@ pub struct Task {
     /// file instead. See docs/sandbox.md "Keychain".
     #[serde(default)]
     pub sandbox_block_keychain: bool,
+    /// The task's Secrets role id (secrets.rs), owned by the task: set at
+    /// creation (the project's or agent's default seeds it when the creator
+    /// picks none, `seed_task_role`) and never re-read from a default.
+    /// Only applies while the Keychain is blocked.
+    ///
+    /// The one rule every writer follows: `Some("")` is No secrets, and
+    /// `None` is "never seeded", which only a task that has not been
+    /// through a create path or `migrate_task_roles_seeded` can be. Anything
+    /// that clears a role writes `Some("")`, never `None`, or a later seed
+    /// (a scheduled run's create, a migration retry) would read the gap as
+    /// "take the defaults" and hand the task a role it had dropped. A role
+    /// id may sit on a task whose block is off only because seeding put it
+    /// there; `checked_role` refuses to store one from the picker.
+    #[serde(default)]
+    pub role: Option<String>,
+    /// Allows saved from the Secrets popover with the "this task" scope.
+    #[serde(default)]
+    pub secret_allows: Vec<secrets::TaskAllow>,
     /// Per-task YOLO (auto-approve / bypass-permissions) flag.
     /// Applied to EVERY agent launched in this task. Only meaningful
     /// when the task is NOT enforce-sandboxed — under Enforcing the
@@ -932,6 +960,17 @@ impl Task {
         self.sandbox_block_keychain && !self.docker_sandbox_enabled
             && matches!(self.effective_sandbox_mode(), SandboxMode::Enforce | SandboxMode::EnforceFs)
     }
+
+    /// A role only means something while the Keychain is blocked (secrets.rs
+    /// `resolve_role`), so every path that sets up or changes the sandbox
+    /// drops it once the block no longer applies. Turning the block back on
+    /// later then starts from No secrets, not a forgotten pick. A role never
+    /// set stays unset, so a create path still seeds it (see `Task::role`).
+    pub fn drop_role_unless_keychain_blocked(&mut self) {
+        if !self.keychain_blocked() && self.role.is_some() {
+            self.role = Some(String::new());
+        }
+    }
 }
 
 /// One entry in a multi-repo task's composition: a user-picked member
@@ -1045,6 +1084,11 @@ pub struct CreateTaskArgs {
     /// the first spawn is already cut off. Unset → off.
     #[serde(default)]
     pub sandbox_block_keychain: Option<bool>,
+    /// Secrets role (`Task::role`): an id, `""` for explicit No secrets,
+    /// unset to take the defaults (`seed_task_role`). A role id is dropped
+    /// unless the Keychain block applies.
+    #[serde(default)]
+    pub role: Option<String>,
     /// Run this task's agent in Docker instead of Seatbelt. PINNED at
     /// creation like `sandbox_enabled` above - mutually exclusive with it
     /// (the frontend's engine selector only ever sends one of the two as
@@ -1342,9 +1386,6 @@ fn ensure_account_store(agent_id: &str, account: &str, realm: LoginRealm, agents
         return;
     }
     let Some(store) = login_store_dir(agent_id, Some(account), realm) else { return };
-    if store.join(ACCOUNT_FARM_MARKER).exists() {
-        return;
-    }
     let base = docker::base_agent_id(agents, agent_id);
     let entries = agent_dirs::shared_config_entries(base);
     if entries.is_empty() {
@@ -1358,9 +1399,250 @@ fn ensure_account_store(agent_id: &str, account: &str, realm: LoginRealm, agents
     if primary == store {
         return;
     }
+    // Not marker-gated: MCP servers live in a file the account owns, so they
+    // are a copy and have to be refreshed on every spawn to stay the same.
+    if base == "claude" {
+        sync_claude_mcp(&primary, &store);
+        // The primary's own CLAUDE_CONFIG_DIR (a clone), or None for claude's
+        // default, which is what names its Keychain item.
+        let primary_env = agent_dirs::resolve_agent(agents, agent_id)
+            .and_then(|a| a.env.get("CLAUDE_CONFIG_DIR").cloned())
+            .map(|raw| agent_dirs::expand_home(&raw, &home))
+            .filter(|p| !p.as_os_str().is_empty());
+        sync_claude_mcp_oauth(&primary, primary_env.as_deref(), &store);
+    }
+    if store.join(ACCOUNT_FARM_MARKER).exists() {
+        return;
+    }
     if let Err(e) = build_account_farm(&primary, &store, entries) {
         dlog(&format!("[accounts] could not wire {agent_id}/{account}: {e}"));
     }
+}
+
+/// Which MCP server names the last sync copied into an account, per scope
+/// ("" = user scope, else a project path), so a server REMOVED from the
+/// primary is removed from the account too, while one the user added on the
+/// account itself is left alone.
+const CLAUDE_MCP_SYNCED: &str = ".termic-mcp-synced.json";
+
+/// claude's MCP config, the part the symlink farm cannot reach.
+///
+/// User-scope servers (`mcpServers`) and project-local ones
+/// (`projects[path].mcpServers`, plus the `.mcp.json` approvals) live in
+/// `.claude.json`, which an account must NOT share: it also holds the account
+/// identity. So the MCP keys are COPIED from the primary's file into the
+/// account's own, primary winning, on every spawn. Codex needs none of this:
+/// its servers are in `config.toml`, which the farm shares.
+///
+/// Only into a `.claude.json` claude has already created: writing one into a
+/// fresh store would make it read as signed in (`farm_planted`). The first
+/// session on a new account (the sign-in tab) therefore runs without them.
+fn sync_claude_mcp(primary: &Path, store: &Path) {
+    // claude's default dir keeps the file at HOME root (`~/.claude.json`); a
+    // relocated one (CLAUDE_CONFIG_DIR) keeps it inside.
+    let src = [primary.join(".claude.json"), primary.parent().map(|p| p.join(".claude.json")).unwrap_or_default()]
+        .into_iter()
+        .find(|p| p.is_file());
+    let dst = store.join(".claude.json");
+    let (Some(src), true) = (src, dst.is_file()) else { return };
+    let read = |p: &Path| fs::read_to_string(p).ok().and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok());
+    let (Some(from), Some(mut to)) = (read(&src), read(&dst)) else { return };
+    let mut synced = read(&store.join(CLAUDE_MCP_SYNCED)).unwrap_or_else(|| serde_json::json!({}));
+    if !merge_claude_mcp(&from, &mut to, &mut synced) {
+        return;
+    }
+    let (Ok(doc), Ok(marks)) = (serde_json::to_vec_pretty(&to), serde_json::to_vec(&synced)) else { return };
+    if let Err(e) = write_atomic(&dst, &doc).and_then(|_| write_atomic(&store.join(CLAUDE_MCP_SYNCED), &marks)) {
+        dlog(&format!("[accounts] could not sync MCP servers into {}: {e}", store.display()));
+    }
+}
+
+/// claude's MCP OAuth sign-ins, copied from the primary login into an account.
+///
+/// The ONE place termic handles a credential, and deliberately narrow (see
+/// docs/agent-accounts.md "MCP sign-ins"). claude keeps them in the same blob
+/// as the login (`mcpOAuth` beside `claudeAiOauth`), so syncing the server
+/// list alone left every OAuth server on a second account asking to sign in
+/// again. Only `mcpOAuth` entries move, never `claudeAiOauth`; only entries the
+/// account LACKS, so a sign-in that already works is never replaced; and only
+/// into an account that is signed in, so no credential is ever created.
+///
+/// A copied entry shares its refresh token with the primary's. A server that
+/// rotates refresh tokens can make one copy stale, which puts that account
+/// back to "sign in once": the state it was in without this.
+fn sync_claude_mcp_oauth(primary: &Path, primary_env: Option<&Path>, store: &Path) {
+    let Some(from) = claude_cred::read(primary, primary_env) else { return };
+    let Some(mut to) = claude_cred::read(store, Some(store)) else { return };
+    if merge_mcp_oauth(&from, &mut to) == 0 {
+        return;
+    }
+    if let Err(e) = claude_cred::write(store, Some(store), &to) {
+        dlog(&format!("[accounts] could not copy MCP sign-ins into {}: {e}", store.display()));
+    }
+}
+
+/// Adds the primary's `mcpOAuth` entries the account lacks. Returns how many.
+fn merge_mcp_oauth(from: &serde_json::Value, to: &mut serde_json::Value) -> usize {
+    let Some(src) = from.get("mcpOAuth").and_then(|v| v.as_object()) else { return 0 };
+    let Some(to) = to.as_object_mut() else { return 0 };
+    let dst = to.entry("mcpOAuth").or_insert_with(|| serde_json::json!({}));
+    let Some(dst) = dst.as_object_mut() else { return 0 };
+    let mut added = 0;
+    for (k, v) in src {
+        if !dst.contains_key(k) {
+            dst.insert(k.clone(), v.clone());
+            added += 1;
+        }
+    }
+    added
+}
+
+/// Where claude keeps its credential blob: the Keychain on macOS, under a
+/// service named from the CLAUDE_CONFIG_DIR it ran with, and
+/// `<config dir>/.credentials.json` everywhere else.
+mod claude_cred {
+    use std::path::Path;
+
+    #[cfg(not(target_os = "macos"))]
+    pub fn read(dir: &Path, _env: Option<&Path>) -> Option<serde_json::Value> {
+        serde_json::from_slice(&std::fs::read(dir.join(".credentials.json")).ok()?).ok()
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    pub fn write(dir: &Path, _env: Option<&Path>, v: &serde_json::Value) -> Result<(), String> {
+        let bytes = serde_json::to_vec(v).map_err(|e| e.to_string())?;
+        crate::write_atomic_private(&dir.join(".credentials.json"), &bytes).map_err(|e| e.to_string())
+    }
+
+    /// claude's own naming: no suffix for its default dir, else the first 8
+    /// hex of sha256 over the CLAUDE_CONFIG_DIR string it was given.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub fn service(env: Option<&Path>) -> String {
+        use sha2::{Digest, Sha256};
+        match env {
+            None => "Claude Code-credentials".into(),
+            Some(d) => {
+                let h = Sha256::digest(d.to_string_lossy().as_bytes());
+                let hex: String = h.iter().map(|b| format!("{b:02x}")).collect();
+                format!("Claude Code-credentials-{}", &hex[..8])
+            }
+        }
+    }
+
+    // Through /usr/bin/security, as claude itself does: the item's ACL trusts
+    // that binary, so there is no Keychain prompt. termic's own binary would
+    // get one on every account.
+    #[cfg(target_os = "macos")]
+    pub fn read(_dir: &Path, env: Option<&Path>) -> Option<serde_json::Value> {
+        let out = std::process::Command::new("/usr/bin/security")
+            .args(["find-generic-password", "-s", &service(env), "-w"])
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let raw = String::from_utf8(out.stdout).ok()?;
+        let raw = raw.trim();
+        serde_json::from_str(raw).ok().or_else(|| {
+            // Non-printable data comes back hex-encoded.
+            let bytes: Option<Vec<u8>> = (0..raw.len()).step_by(2)
+                .map(|i| raw.get(i..i + 2).and_then(|h| u8::from_str_radix(h, 16).ok()))
+                .collect();
+            serde_json::from_slice(&bytes?).ok()
+        })
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn write(_dir: &Path, env: Option<&Path>, v: &serde_json::Value) -> Result<(), String> {
+        let svc = service(env);
+        // The item's account attribute, so -U updates it rather than adding a
+        // second item beside it.
+        let attrs = std::process::Command::new("/usr/bin/security")
+            .args(["find-generic-password", "-s", &svc])
+            .output()
+            .map_err(|e| e.to_string())?;
+        let attrs = String::from_utf8_lossy(&attrs.stdout);
+        let acct = attrs.lines()
+            .find_map(|l| l.trim().strip_prefix("\"acct\"<blob>=\"")?.strip_suffix('"').map(String::from))
+            .ok_or("no Keychain item to update")?;
+        let hex: String = serde_json::to_vec(v).map_err(|e| e.to_string())?
+            .iter().map(|b| format!("{b:02x}")).collect();
+        // On argv, as claude does once a blob outgrows `security -i`'s line
+        // limit (a real one with three MCP sign-ins is ~5 KB of hex). It adds
+        // no exposure: macOS shows a process's args only to the same user
+        // and root, and the same user can already read this item, unprompted,
+        // with this same binary.
+        let st = std::process::Command::new("/usr/bin/security")
+            .args(["add-generic-password", "-U", "-a", &acct, "-s", &svc, "-X", &hex])
+            .stdout(std::process::Stdio::null())
+            .status()
+            .map_err(|e| e.to_string())?;
+        if st.success() { Ok(()) } else { Err(format!("security exited {st}")) }
+    }
+}
+
+/// The pure half of `sync_claude_mcp`. Returns whether `to` changed.
+fn merge_claude_mcp(from: &serde_json::Value, to: &mut serde_json::Value, synced: &mut serde_json::Value) -> bool {
+    use serde_json::{Map, Value};
+    // One `mcpServers` map: primary's entries win, ones we copied last time
+    // and the primary has since dropped go, the account's own stay.
+    fn merge_servers(from: Option<&Value>, to: &mut Map<String, Value>, prev: &[String]) -> Vec<String> {
+        let from = from.and_then(Value::as_object);
+        let target = to.entry("mcpServers").or_insert_with(|| Value::Object(Map::new()));
+        let Some(target) = target.as_object_mut() else { return Vec::new() };
+        for name in prev {
+            if from.map_or(true, |f| !f.contains_key(name)) {
+                target.remove(name);
+            }
+        }
+        let Some(from) = from else { return Vec::new() };
+        for (k, v) in from {
+            target.insert(k.clone(), v.clone());
+        }
+        from.keys().cloned().collect()
+    }
+    let before = to.clone();
+    let prev = |scope: &str, synced: &Value| -> Vec<String> {
+        synced.get(scope).and_then(Value::as_array).map(|a| a.iter().filter_map(|s| s.as_str().map(String::from)).collect()).unwrap_or_default()
+    };
+    let Some(to_obj) = to.as_object_mut() else { return false };
+    let mut marks = Map::new();
+    let names = merge_servers(from.get("mcpServers"), to_obj, &prev("", synced));
+    marks.insert(String::new(), names.into());
+    let empty = Map::new();
+    let from_projects = from.get("projects").and_then(Value::as_object).unwrap_or(&empty);
+    // Every project either side has servers for, so a project-local server
+    // removed from the primary is removed here too.
+    let mut paths: Vec<String> = from_projects.keys().cloned().collect();
+    if let Some(m) = synced.as_object() {
+        paths.extend(m.keys().filter(|k| !k.is_empty() && !from_projects.contains_key(*k)).cloned());
+    }
+    for path in paths {
+        let fp = from_projects.get(&path);
+        let has_any = fp.and_then(|p| p.get("mcpServers")).and_then(Value::as_object).is_some_and(|m| !m.is_empty());
+        let had = !prev(&path, synced).is_empty();
+        let approvals = ["enabledMcpjsonServers", "disabledMcpjsonServers", "disabledMcpServers", "enableAllProjectMcpServers"];
+        let has_approvals = fp.is_some_and(|p| approvals.iter().any(|k| p.get(k).is_some()));
+        // Do not create a project entry for every repo the primary ever opened.
+        if !has_any && !had && !has_approvals {
+            continue;
+        }
+        let projects = to_obj.entry("projects").or_insert_with(|| Value::Object(Map::new()));
+        let Some(projects) = projects.as_object_mut() else { continue };
+        let tp = projects.entry(path.clone()).or_insert_with(|| Value::Object(Map::new()));
+        let Some(tp) = tp.as_object_mut() else { continue };
+        let names = merge_servers(fp.and_then(|p| p.get("mcpServers")), tp, &prev(&path, synced));
+        for k in approvals {
+            if let Some(v) = fp.and_then(|p| p.get(k)) {
+                tp.insert(k.to_string(), v.clone());
+            }
+        }
+        if !names.is_empty() {
+            marks.insert(path, names.into());
+        }
+    }
+    *synced = Value::Object(marks);
+    *to != before
 }
 
 /// The environment that points an agent at the chosen account's login.
@@ -1671,6 +1953,18 @@ fn project_tasks_root(default_path: &str, p: &Project) -> Result<PathBuf, String
 /// partial file. The parent dir is deliberately not fsynced: a hard power cut
 /// can lose the last write, but the file always reads as an intact version.
 pub(crate) fn write_atomic(dest: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    write_atomic_mode(dest, bytes, false)
+}
+
+/// `write_atomic` for a secret: owner-only (0600 on unix) whatever the old
+/// file's mode, and a brand-new file never takes the umask's world-readable
+/// default. Fails instead of writing when the mode cannot be set.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+pub(crate) fn write_atomic_private(dest: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    write_atomic_mode(dest, bytes, true)
+}
+
+fn write_atomic_mode(dest: &Path, bytes: &[u8], private: bool) -> std::io::Result<()> {
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     // Resolve symlinks: rename would replace the link itself with a regular
     // file; we must write through to its target. canonicalize fails on a
@@ -1696,11 +1990,28 @@ pub(crate) fn write_atomic(dest: &Path, bytes: &[u8]) -> std::io::Result<()> {
         SEQ.fetch_add(1, Ordering::Relaxed),
     ));
     let write = || -> std::io::Result<()> {
+        // A secret's temp file is BORN owner-only. Creating it with the umask
+        // default and tightening after left a moment where another user could
+        // open it, and an fd opened then keeps reading after the chmod.
+        #[cfg(unix)]
+        let mut f = if private {
+            use std::os::unix::fs::OpenOptionsExt;
+            fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp)?
+        } else {
+            fs::File::create(&tmp)?
+        };
+        #[cfg(not(unix))]
         let mut f = fs::File::create(&tmp)?;
+        // and set explicitly too: `mode` is filtered through the umask.
+        #[cfg(unix)]
+        if private {
+            use std::os::unix::fs::PermissionsExt;
+            f.set_permissions(fs::Permissions::from_mode(0o600))?;
+        }
         // A fresh temp inode gets default perms; carry the old mode so a
         // tightened (e.g. chmod 600) file stays tightened. Log, don't fail:
         // some mounts (FUSE/SMB) reject chmod but the write itself is fine.
-        if let Ok(meta) = fs::metadata(dest) {
+        if let Some(meta) = fs::metadata(dest).ok().filter(|_| !private) {
             if let Err(e) = f.set_permissions(meta.permissions()) {
                 eprintln!("[write_atomic] could not carry mode onto {}: {e}", dest.display());
             }
@@ -2172,6 +2483,16 @@ fn task_dir_scans() -> u64 {
 }
 
 /// One profile's tasks. For listing, and for anything scoped to a window.
+/// One task's record, read straight from its file: for a per-request path
+/// (the broker's live rules) where scanning every profile would not do.
+pub(crate) fn load_task_in(profile: &ProfileId, task_id: &str) -> Option<Task> {
+    if !secrets::id_ok(task_id) { return None; }
+    let f = tasks_dir_in(profile).ok()?.join(format!("{task_id}.json"));
+    let mut t: Task = serde_json::from_str(&fs::read_to_string(f).ok()?).ok()?;
+    t.profile = profile.clone();
+    Some(t)
+}
+
 fn load_tasks_in(id: &ProfileId) -> Vec<Task> {
     #[cfg(test)]
     TASK_DIR_SCANS.with(|c| c.set(c.get() + 1));
@@ -2734,6 +3055,47 @@ fn apply_hooks_auto_default_migration(s: &mut Settings) -> bool {
     s.auto_install_hooks = true;
     s.hooks_auto_default_migrated = true;
     true
+}
+
+/// One-time write of every task's role, for the switch to "defaults seed,
+/// tasks own" (docs/data-model.md). A task with no role used to follow its
+/// project's default, then the default of whichever agent spawned, at every
+/// spawn; this stores what that resolves to today for its PRIMARY agent
+/// (`task.cli`), and a later edit to a default no longer moves it. A second
+/// agent in the same task now runs that role too, which is the one thing
+/// that can change at upgrade. Not gated on the Keychain block, which still
+/// applies at spawn. Stamped once on the root profile; a retry after a
+/// failed write cannot re-seed a task whose role was dropped meanwhile,
+/// since a drop writes `Some("")` (see `Task::role`).
+fn migrate_task_roles_seeded() {
+    let mut s = load_settings_inner();
+    if s.task_roles_seeded_migrated { return; }
+    let mut tasks = load_tasks_all();
+    let mut agents: HashMap<ProfileId, Vec<Agent>> = HashMap::new();
+    let changed = seed_unset_roles(&mut tasks, &load_projects_all(), |p| {
+        agents.entry(p.clone()).or_insert_with(|| load_settings_in(p).agents).clone()
+    });
+    let mut ok = true;
+    for t in tasks.iter().filter(|t| changed.contains(&t.id)) {
+        ok &= save_task(t).is_ok();
+    }
+    log_migration(&format!("task roles seeded: {} of {} tasks", changed.len(), tasks.len()));
+    // a failed write leaves the marker off, so the next launch retries.
+    if ok {
+        s.task_roles_seeded_migrated = true;
+        let _ = save_settings_inner(&s);
+    }
+}
+
+/// Pure half of `migrate_task_roles_seeded`: seed every task with no role,
+/// returning the ids it changed. Idempotent.
+fn seed_unset_roles(tasks: &mut [Task], projects: &[Project], mut agents: impl FnMut(&ProfileId) -> Vec<Agent>) -> Vec<String> {
+    let mut changed = Vec::new();
+    for t in tasks.iter_mut().filter(|t| t.role.is_none()) {
+        t.role = Some(seeded_role(t, projects, &agents(&t.profile)));
+        changed.push(t.id.clone());
+    }
+    changed
 }
 
 /// Exclusive migration lock, released on drop. Guards against two concurrent
@@ -3433,6 +3795,10 @@ struct PtySlot {
     /// read directly, hence the allow.
     #[allow(dead_code)]
     sandbox: Option<SandboxBundle>,
+    /// A shell's Secrets role (broker + proxy), dropped with the PTY. Held
+    /// for its Drop, never read.
+    #[allow(dead_code)]
+    shell: Option<sandbox::ShellBundle>,
     /// Keychain-reachable hold for a task agent spawned with no bundle
     /// (a bundle carries its own). Held for its Drop, never read.
     #[allow(dead_code)]
@@ -3707,6 +4073,12 @@ pub(crate) fn find_role_pty(
     kind: &str,
 ) -> Result<String, String> {
     let map = manager.inner.lock();
+    // a shell running a Secrets role is off limits to the CLI: anything that
+    // reaches the control socket (a Monitor agent, another task's uncaged
+    // agent) could otherwise type commands that run under the role.
+    if map.values().any(|slot| slot.shell.is_some() && slot.role.as_ref().is_some_and(|r| r.task_id == task_id && r.kind == kind)) {
+        return Err("this task's terminal is running a Secrets role, which the CLI cannot reach; restart it as a plain shell first".into());
+    }
     let mut candidates: Vec<(&String, &PtySlot)> = map
         .iter()
         .filter(|(_, slot)| {
@@ -3951,6 +4323,52 @@ pub struct SpawnArgs {
     /// its task, which is a labelling loss and nothing more.
     #[serde(default)]
     pub owner: Option<PtyOwner>,
+    /// A Secrets role for a SHELL spawn (`task_id` stays None). None = a
+    /// plain shell, byte-for-byte today's spawn (`plan_shell_secrets`).
+    #[serde(default)]
+    pub shell_secrets: Option<ShellSecrets>,
+}
+
+/// Which task and tab a shell running a role belongs to, and the role. The
+/// task only names the profile the role lives in; the shell is never caged
+/// and gets no task allows (docs/sandbox.md "Shells").
+#[derive(Deserialize, Clone, Debug)]
+pub struct ShellSecrets {
+    pub task_id: String,
+    pub tab_id: String,
+    pub role: String,
+}
+
+/// What a shell's role resolves to, before anything starts.
+struct ShellRolePlan {
+    key: String,
+    task: Task,
+    setup: sandbox::BrokerSetup,
+}
+
+/// The shell half of a spawn's plan, pure so the invariant is a unit test:
+/// no `shell_secrets` is `Ok(None)` without reading anything, and then
+/// `pty_spawn` starts no broker or proxy, adds no env and registers no root.
+/// A role asked for where it cannot apply is an error, never a plain shell.
+/// `lookup` is (task id) -> the task and its profile's (roles, secrets).
+fn plan_shell_secrets(
+    args: &SpawnArgs,
+    macos: bool,
+    lookup: impl FnOnce(&str) -> Option<(Task, Vec<secrets::Role>, Vec<secrets::SecretDef>)>,
+) -> Result<Option<ShellRolePlan>, String> {
+    let Some(s) = &args.shell_secrets else { return Ok(None) };
+    if args.task_id.is_some() {
+        return Err("a Secrets role for an agent comes from its task, not from shell_secrets".into());
+    }
+    if !macos { return Err("Secrets roles in a terminal need macOS".into()); }
+    let (task, roles, secrets) = lookup(&s.task_id).ok_or("this terminal's task no longer exists")?;
+    let role = roles.into_iter().find(|r| r.id == s.role)
+        .ok_or("that Secrets role no longer exists. Pick another from the tab's menu.")?;
+    Ok(Some(ShellRolePlan {
+        key: broker::shell_key(&s.task_id, &s.tab_id),
+        task,
+        setup: sandbox::BrokerSetup { role, secrets },
+    }))
 }
 fn default_rows() -> u16 { 40 }
 fn default_cols() -> u16 { 120 }
@@ -4015,6 +4433,36 @@ fn live_sandbox_lists(task: &Task) -> (Vec<String>, Vec<String>) {
         }
     }
     (dedup_strings(rw), dedup_strings(hosts))
+}
+
+/// The Secrets role an agent spawn of `task` runs with (secrets.rs): the
+/// task's own pick, whichever of its agents this is. Defaults only seeded
+/// that pick at creation (`seed_task_role`). None unless this spawn's
+/// profile blocks the Keychain, the same gate the profile uses.
+fn spawn_broker_setup(task: &Task) -> Option<sandbox::BrokerSetup> {
+    if !sandbox::blocks_keychain(task, task.effective_sandbox_mode()) { return None; }
+    let settings = load_settings_in(&task.profile);
+    let role = secrets::resolve_role(task.role.as_deref(), true, &settings.roles)?.clone();
+    Some(sandbox::BrokerSetup { role, secrets: settings.secrets })
+}
+
+/// What `seed_task_role` writes for `task`: its project's default role, else
+/// the default of its primary agent (`task.cli`), else No secrets. Pure, so
+/// the create paths and the migration share one tested rule.
+fn seeded_role(task: &Task, projects: &[Project], agents: &[Agent]) -> String {
+    let project = projects.iter().find(|p| p.id == task.project_id).and_then(|p| p.default_role.as_deref());
+    let agent = agents.iter().find(|a| a.id == task.cli).and_then(|a| a.default_role.as_deref());
+    secrets::seed_role(project, agent)
+}
+
+/// Give a task its role at creation when the caller picked none. Called by
+/// every create path after `drop_role_unless_keychain_blocked`, so it is not
+/// gated on the block: like the migration, a task that blocks its Keychain
+/// later starts from the role its defaults gave it then.
+fn seed_task_role(task: &mut Task) {
+    if task.role.is_some() { return; }
+    let agents = load_settings_in(&task.profile).agents;
+    task.role = Some(seeded_role(task, &load_projects_all(), &agents));
 }
 
 fn dedup_strings(v: Vec<String>) -> Vec<String> {
@@ -4241,6 +4689,30 @@ fn pty_alive(state: State<'_, PtyManager>, id: String) -> bool {
     state.inner.lock().contains_key(&id)
 }
 
+/// Names of what runs under a PTY's root (its descendants, not the root
+/// itself), for "restarting ends these" confirms. Empty when nothing does,
+/// or off macOS where there is no lookup (the caller then confirms
+/// generically). Capped, so a fork bomb cannot make it slow.
+#[tauri::command]
+fn pty_children(state: State<'_, PtyManager>, id: String) -> Vec<String> {
+    let Some(root) = state.inner.lock().get(&id).and_then(|s| s.child_pid) else { return Vec::new() };
+    descendant_names(root)
+}
+
+#[cfg(target_os = "macos")]
+fn descendant_names(root: u32) -> Vec<String> {
+    let (mut out, mut queue) = (Vec::new(), procmon::child_pids(root));
+    while let Some(pid) = queue.pop() {
+        if out.len() >= 32 { break; }
+        if let Some((_, name)) = procmon::short_info(pid) { out.push(name); }
+        queue.extend(procmon::child_pids(pid));
+    }
+    out
+}
+
+#[cfg(not(target_os = "macos"))]
+fn descendant_names(_root: u32) -> Vec<String> { Vec::new() }
+
 /// The webview says it has registered its `pty://<id>` listener, so output
 /// may go on the wire. MUST be called by every caller of `pty_spawn`, right
 /// after `listen()` resolves: until it lands the flusher holds the child's
@@ -4304,6 +4776,17 @@ fn pty_spawn(
     state: State<'_, PtyManager>,
     args: SpawnArgs,
 ) -> Result<SpawnResult, String> {
+    // a shell running a Secrets role (docs/sandbox.md "Shells"). None for
+    // every other spawn, and nothing below changes for those.
+    let shell_bundle = match plan_shell_secrets(&args, sandbox::available(), |tid| {
+        let task = load_tasks_all().into_iter().find(|t| t.id == tid)?;
+        let s = load_settings_in(&task.profile);
+        Some((task, s.roles, s.secrets))
+    })? {
+        Some(p) => Some(sandbox::provision_shell(&p.key, &p.task, &p.setup)
+            .map_err(|e| format!("Couldn't start this terminal with the {} role: {e}", p.setup.role.name))?),
+        None => None,
+    };
     let pty = NativePtySystem::default();
     let pair = pty
         .openpty(PtySize {
@@ -4466,7 +4949,7 @@ fn pty_spawn(
             task
         })
     {
-        Some(task) => match sandbox::provision(&task, args.agent_id.as_deref(), task.effective_sandbox_mode()) {
+        Some(task) => match sandbox::provision(&task, args.agent_id.as_deref(), task.effective_sandbox_mode(), spawn_broker_setup(&task)) {
             Ok(bundle) => {
                 let port = bundle.proxy.as_ref().map(|p| p.port).unwrap_or(0);
                 let effective_cli = args.agent_id.as_deref().unwrap_or(&task.cli);
@@ -4489,6 +4972,15 @@ fn pty_spawn(
         },
     }};
 
+    let (effective_cmd, effective_args) = match &shell_bundle {
+        Some(b) => {
+            let (c, a) = sandbox::wrap_shell_command(b, &effective_cmd, &effective_args);
+            dlog(&format!("[pty_spawn] shell role={} key={}", b.role_name, b.key()));
+            (c, a)
+        }
+        None => (effective_cmd, effective_args),
+    };
+
     // a task agent that ended up with no Seatbelt bundle (Off, or provision
     // failed) reaches the Keychain too. Count it, so a block saved while it
     // runs reads "applies on restart" instead of "blocked". Docker is out:
@@ -4498,9 +4990,19 @@ fn pty_spawn(
         _ => None,
     };
 
-    // Windows: resolve a bare name ourselves (see shell_env::resolve_program),
-    // against the PATH the child gets below.
+    // resolve a bare name ourselves (see shell_env::resolve_program), against
+    // the PATH the child gets below. Off Windows a name left bare makes
+    // portable-pty try `<cwd>/<name>` first, and the cwd is a worktree an
+    // agent can write: refuse rather than run what it planted.
     let effective_cmd = shell_env::resolve_program(&effective_cmd, &shell_env::spawn_env().0);
+    if cfg!(unix)
+        && !effective_cmd.contains('/')
+        && std::path::Path::new(&args.cwd).join(&effective_cmd).exists()
+    {
+        return Err(format!(
+            "refusing to start {effective_cmd}: not found on PATH, and the working directory holds a file by that name"
+        ));
+    }
     let mut cmd = CommandBuilder::new(&effective_cmd);
     for a in &effective_args {
         cmd.arg(a);
@@ -4527,10 +5029,27 @@ fn pty_spawn(
     // An explicit list, not a `CLAUDE_*` prefix sweep: `CLAUDE_CONFIG_DIR` is
     // a legitimate setting a user relocates a cloned agent with, and dropping
     // it would silently point a second account back at the first.
-    for (k, v) in std::env::vars() {
-        if agent_session_marker(&k) { continue }
-        cmd.env(k, v);
-    }
+    //
+    // MINUS what Settings > Secrets keeps out of agent tabs (env_guard.rs).
+    // Agent TABS only: a registry terminal carries an agent_id too, and
+    // terminals see everything. Docker needs nothing: its container gets no
+    // host env.
+    let is_agent_spawn = args.role.as_ref().map(|r| r.kind == "agent").unwrap_or(false)
+        || args.agent_id.is_some();
+    let is_agent_tab = args.role.as_ref().is_some_and(|r| r.kind == "agent");
+    let guard = (is_agent_tab && !is_docker).then(|| {
+        let s = load_settings_in(&spawn_profile);
+        let agent_id = args.agent_id.clone()
+            .or_else(|| spawn_task.as_ref().map(|t| t.cli.clone()))
+            .unwrap_or_default();
+        let pass = s.agents.iter().find(|a| a.id == agent_id).map(|a| a.pass_env.clone()).unwrap_or_default();
+        let own = env_guard::own_login(docker::base_agent_id(&s.agents, &agent_id));
+        // the task's INTENDED cage, so a failed provision still keeps them out
+        let caged = spawn_task.as_ref().is_some_and(|t| t.effective_sandbox_mode() != SandboxMode::Off);
+        env_guard::Guard::new(&s.env_guard, &pass, own, caged)
+    });
+    let kept_out = |k: &str, v: &str| guard.as_ref().is_some_and(|g| g.keeps_out(k, v));
+    inherit_env(&mut cmd, |k, v| agent_session_marker(k) || kept_out(k, v));
     // MINUS a Linux AppImage's own library environment, which would make
     // every system binary in the terminal load OUR bundled libraries (on
     // Ubuntu 25.10+ that kills `env` and `ls`). See appimage_env.rs.
@@ -4559,6 +5078,7 @@ fn pty_spawn(
     // filter what a compromised agent could exfiltrate with it.
     if sandbox_bundle.is_none() && !is_docker {
         for (k, v) in login_inject {
+            if kept_out(&k, &v) { continue }
             cmd.env(k, v);
         }
     } else if is_docker {
@@ -4583,8 +5103,11 @@ fn pty_spawn(
     #[cfg(unix)]
     let share_history = args.env.get(SHARE_HISTORY_ENV).is_some_and(|v| v == "1");
     cmd.env_remove(SHARE_HISTORY_ENV);
+    // a shell's role wraps it in `env`; the shell is still the original cmd.
     #[cfg(unix)]
-    if share_history && !is_docker && sandbox_bundle.is_none() && is_zsh_command(&effective_cmd) {
+    let shim_cmd = if shell_bundle.is_some() { args.cmd.as_str() } else { effective_cmd.as_str() };
+    #[cfg(unix)]
+    if share_history && !is_docker && sandbox_bundle.is_none() && is_zsh_command(shim_cmd) {
         if let Some(dir) = zsh_history_shim_dir() {
             // A caller's own ZDOTDIR (task .env, or the app's environment)
             // must still decide where the real dotfiles live.
@@ -4616,8 +5139,6 @@ fn pty_spawn(
     // the shapes relocate XDG_DATA_HOME / XDG_CONFIG_HOME, which every
     // XDG-aware tool in that interactive shell reads, so the user's own
     // commands would start writing into an account's login store.
-    let is_agent_spawn = args.role.as_ref().map(|r| r.kind == "agent").unwrap_or(false)
-        || args.agent_id.is_some();
     if !is_docker_spawn && is_agent_spawn {
         let agent_id = args.agent_id.clone()
             .or_else(|| spawn_task.as_ref().map(|t| t.cli.clone()))
@@ -4801,6 +5322,10 @@ fn pty_spawn(
     // denies against.
     if let (Some(pid), Some(wid), false) = (child_pid, args.task_id.as_deref(), is_docker) {
         sandbox::register_root_pid(wid, pid);
+    }
+    // a shell's role: its own tree is the only one its broker admits.
+    if let (Some(pid), Some(b)) = (child_pid, &shell_bundle) {
+        sandbox::register_root_pid(b.key(), pid);
     }
 
     let master = pair.master;
@@ -5005,7 +5530,8 @@ fn pty_spawn(
     let app_w = app.clone();
     let id_w = id.clone();
     let state_w = state.inner.clone();
-    let ws_for_waiter = args.task_id.clone();
+    // task_id and a shell role never come together (`plan_shell_secrets`).
+    let ws_for_waiter = args.task_id.clone().or_else(|| shell_bundle.as_ref().map(|b| b.key().to_string()));
     let pid_for_waiter = child_pid;
     let done_w = reader_done.clone();
     let buf_w = pty_buf.clone();
@@ -5106,6 +5632,7 @@ fn pty_spawn(
             master,
             child_pid,
             sandbox: sandbox_bundle,
+            shell: shell_bundle,
             keychain: keychain_hold,
             task_id: args.task_id.clone(),
             role: args.role.clone(),
@@ -5146,6 +5673,13 @@ fn pty_kill(state: State<'_, PtyManager>, pty_id: String) -> Result<(), String> 
     let slot = state.inner.lock().remove(&pty_id);
     if let Some(mut slot) = slot {
         caffeinate::exited(&pty_id);
+        // a shell's role ends now, not after the grace below: a Restart
+        // respawns into the same tab, reusing the key, and the dying tree
+        // must not pass the new broker's peer check or keep its evidence.
+        if let Some(b) = slot.shell.take() {
+            if let Some(pid) = slot.child_pid { sandbox::unregister_root_pid(b.key(), pid); }
+            broker::forget_shell(b.key());
+        }
         // Hang up, then SIGTERM, a short grace, then SIGKILL
         // (`graceful_then_kill`, the same contract quit/archive/tab-close
         // already use). A bare SIGKILL gave an interactive shell no chance
@@ -5264,7 +5798,10 @@ fn slug_of_window(reg: &profiles::Registry, window: &tauri::Window) -> Option<St
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountView {
+    /// The account's identity: its store path and every API take this.
     pub name: String,
+    /// What to SHOW: the user's label, or the name when there is none.
+    pub label: String,
     /// True once the agent has actually written something into this account's
     /// store. "Named but never signed in" is a legitimate state: it is what a
     /// second machine looks like, and what the Docker realm looks like before
@@ -5346,7 +5883,9 @@ fn account_signed_in(agent_id: &str, account: &str, realm: LoginRealm, agents: &
 /// carries more than one link in the file's link count; a file the agent
 /// wrote fresh has exactly one.
 fn farm_planted(entry: &std::fs::DirEntry) -> bool {
-    if entry.file_name() == std::ffi::OsStr::new(ACCOUNT_FARM_MARKER) {
+    if entry.file_name() == std::ffi::OsStr::new(ACCOUNT_FARM_MARKER)
+        || entry.file_name() == std::ffi::OsStr::new(CLAUDE_MCP_SYNCED)
+    {
         return true;
     }
     #[cfg(windows)]
@@ -5414,6 +5953,7 @@ fn accounts_view_for(agent_id: &str, agents: &[Agent], realm: LoginRealm) -> Age
     AgentAccountsView {
         accounts: entry.map(|e| e.accounts.iter().map(|n| AccountView {
             name: n.clone(),
+            label: e.account_labels.get(n).cloned().unwrap_or_else(|| n.clone()),
             signed_in: account_signed_in(agent_id, n, realm, agents),
             is_default: e.default_account.as_deref() == Some(n.as_str()),
         }).collect()).unwrap_or_default(),
@@ -5511,6 +6051,7 @@ fn account_remove(window: tauri::Window, agent_id: String, name: String) -> Resu
         return Err(format!("no such agent: {agent_id}"));
     };
     entry.accounts.retain(|a| a != &name);
+    entry.account_labels.remove(&name);
     if entry.default_account.as_deref() == Some(name.as_str()) {
         entry.default_account = entry.accounts.first().cloned();
     }
@@ -5527,6 +6068,43 @@ fn account_remove(window: tauri::Window, agent_id: String, name: String) -> Resu
     // that profile out of an account it never touched. Removing the login
     // itself is the agent's own `logout`.
     { use tauri::Manager; emit_accounts_changed(window.app_handle()); }
+    Ok(())
+}
+
+/// Give an account a display label (GH #278). The NAME stays: it is the
+/// store's path, and for claude its Keychain item, so moving it would sign the
+/// account out. An empty label, or one equal to the name, clears it.
+#[tauri::command]
+fn account_set_label(window: tauri::Window, agent_id: String, name: String, label: String) -> Result<(), String> {
+    let label = label.trim().to_string();
+    let profile = window_profile(&window);
+    let mut settings = load_settings_in(&profile);
+    let Some(entry) = settings.agents.iter_mut().find(|a| a.id == agent_id) else {
+        return Err(format!("no such agent: {agent_id}"));
+    };
+    set_account_label(entry, &name, &label)?;
+    save_settings_in(&profile, &settings)?;
+    { use tauri::Manager; emit_accounts_changed(window.app_handle()); }
+    Ok(())
+}
+
+fn set_account_label(entry: &mut Agent, name: &str, label: &str) -> Result<(), String> {
+    if !entry.accounts.iter().any(|a| a == name) {
+        return Err(format!("{name:?} is not one of this agent's accounts"));
+    }
+    // Two accounts showing the same text are two rows nobody can tell apart.
+    let clash = entry.accounts.iter().filter(|a| *a != name).any(|a| {
+        let shown = entry.account_labels.get(a).map(String::as_str).unwrap_or(a);
+        shown.eq_ignore_ascii_case(label)
+    });
+    if clash {
+        return Err(format!("another account is already called {label:?}"));
+    }
+    if label.is_empty() || label == name {
+        entry.account_labels.remove(name);
+    } else {
+        entry.account_labels.insert(name.to_string(), label.to_string());
+    }
     Ok(())
 }
 
@@ -6244,6 +6822,7 @@ fn project_add(window: tauri::Window, root_path: String, non_git: Option<bool>) 
     let remote = if non_git { String::new() } else { detect_default_remote(&canon) };
     let base = if non_git { String::new() } else { detect_base_branch(&canon, &remote).unwrap_or_else(|_| "main".into()) };
     let p = Project {
+        default_role: None,
         // The one thing that genuinely cannot come from a record: a NEW
         // project joins the profile whose window asked for it.
         profile: window_profile(&window),
@@ -6466,6 +7045,7 @@ fn project_add_multi(window: tauri::Window, root_path: String, name: String, mem
     let base = if non_git { String::new() } else { detect_base_branch(&canon, &remote).unwrap_or_else(|_| "main".into()) };
     let name = trimmed_name.to_string();
     let p = Project {
+        default_role: None,
         // The one thing that genuinely cannot come from a record: a NEW
         // project joins the profile whose window asked for it.
         profile: window_profile(&window),
@@ -6681,9 +7261,10 @@ fn tasks_list() -> Vec<Task> { load_tasks_all() }
 
 /// GH #169: normalize an externally-started session id and seed it as the
 /// per-cli session, so the default tab's first spawn composes the agent's
-/// `resume_id_args` instead of minting a fresh session. The id is
-/// unvalidated by design; the agent owns "session not found" (the
+/// `resume_id_args` instead of minting a fresh session. Whether the session
+/// EXISTS is not checked; the agent owns "session not found" (the
 /// resume_override stance), and a rapid exit falls back to a fresh spawn.
+/// Its shape is, by `check_session_id`.
 fn seeded_session_ids(
     cli: &str,
     resume_session_id: Option<&str>,
@@ -6693,6 +7274,18 @@ fn seeded_session_ids(
         ids.insert(cli.to_string(), sid.to_string());
     }
     ids
+}
+
+/// Refuse a session id that would be something other than an id once it is
+/// substituted into `resume_id_args` (`--resume {UUID}`) and joined into the
+/// transcripts dir (`{id}.jsonl`): a leading `-` reads as a flag, and a path
+/// separator or `..` walks out of the dir. Whitespace is never in an id.
+fn check_session_id(sid: Option<&str>) -> Result<(), String> {
+    let Some(s) = sid.map(str::trim).filter(|s| !s.is_empty()) else { return Ok(()) };
+    if s.starts_with('-') || s.contains(['/', '\\']) || s.contains("..") || s.chars().any(char::is_whitespace) {
+        return Err(format!("Not a session id: {s}"));
+    }
+    Ok(())
 }
 
 /// Normalize a create-time resume-args override the same way
@@ -6792,6 +7385,10 @@ fn task_open_repo(
     // its parent's, so a run is never looser than the task it was
     // scheduled from. Unset → off.
     sandbox_block_keychain: Option<bool>,
+    // Secrets role (`Task::role`), copied from the parent by a scheduled
+    // run like the Keychain flag above. Dropped unless the block applies;
+    // unset takes the defaults (`seed_task_role`).
+    role: Option<String>,
     docker_sandbox_enabled: Option<bool>,
     docker_extra_mounts: Option<Vec<String>>,
     resume_session_id: Option<String>,
@@ -6807,6 +7404,7 @@ fn task_open_repo(
     // Unknown paths are ignored — the list is a filter, not a spec.
     members: Option<Vec<String>>,
 ) -> Result<Task, String> {
+    check_session_id(resume_session_id.as_deref())?;
     let proj = load_projects_all().into_iter().find(|p| p.id == project_id)
         .ok_or("project not found")?;
     if proj.is_bare() {
@@ -6958,7 +7556,9 @@ fn task_open_repo(
     // make the first tab of every OTHER agent cwd-resume an unrelated
     // session; the seeded resume rides agent_session_ids alone.
     let agent_session_ids = seeded_session_ids(&cli, resume_session_id.as_deref());
-    let task = Task {
+    let mut task = Task {
+        role,
+        secret_allows: Vec::new(),
         id: Uuid::new_v4().to_string(),
         project_id: proj.id.clone(),
         // No account override at create: a new task follows the agent's
@@ -7024,6 +7624,10 @@ fn task_open_repo(
         schedule: None,
         badges: Vec::new(),
     };
+    // a picked role only sticks where the Keychain block applies; no pick
+    // takes the defaults.
+    task.drop_role_unless_keychain_blocked();
+    seed_task_role(&mut task);
     save_task(&task).map_err(|e| e.to_string())?;
     if let Ok(pdir) = profile_dir(&proj.profile) {
         let _ = customizations::ensure_builtin_skills(&pdir);
@@ -7348,6 +7952,8 @@ fn task_import_worktree(
     sandbox_rw_paths: Option<Vec<String>>,
     sandbox_allowed_hosts: Option<Vec<String>>,
     sandbox_block_keychain: Option<bool>,
+    // Secrets role (`Task::role`). Dropped unless the Keychain block applies.
+    role: Option<String>,
     docker_sandbox_enabled: Option<bool>,
     docker_extra_mounts: Option<Vec<String>>,
     resume_session_id: Option<String>,
@@ -7355,6 +7961,7 @@ fn task_import_worktree(
     yolo: Option<bool>,
     agent_args: Option<Vec<String>>,
 ) -> Result<Task, String> {
+    check_session_id(resume_session_id.as_deref())?;
     let proj = load_projects_all().into_iter().find(|p| p.id == project_id)
         .ok_or("project not found")?;
     if proj.non_git { return Err("project is not a git repo".into()); }
@@ -7462,7 +8069,9 @@ fn task_import_worktree(
     // seeded_session_ids and the task_open_repo note (per-cli seed vs
     // task-wide flag).
     let agent_session_ids = seeded_session_ids(&cli, resume_session_id.as_deref());
-    let task = Task {
+    let mut task = Task {
+        role,
+        secret_allows: Vec::new(),
         id: Uuid::new_v4().to_string(),
         project_id: proj.id.clone(),
         // No account override at create: a new task follows the agent's
@@ -7523,6 +8132,10 @@ fn task_import_worktree(
         schedule: None,
         badges: Vec::new(),
     };
+    // a picked role only sticks where the Keychain block applies; no pick
+    // takes the defaults.
+    task.drop_role_unless_keychain_blocked();
+    seed_task_role(&mut task);
     save_task(&task).map_err(|e| e.to_string())?;
     if let Ok(pdir) = profile_dir(&proj.profile) {
         let _ = customizations::ensure_builtin_skills(&pdir);
@@ -7563,6 +8176,7 @@ fn task_create_sync(app: AppHandle, args: CreateTaskArgs) -> Result<Task, String
     // can subscribe before the race window); the fallback only matters for
     // non-UI callers (CLI `new_task`), which don't listen anyway.
     let task_id = args.id.clone().unwrap_or_else(|| Uuid::new_v4().to_string());
+    check_session_id(args.resume_session_id.as_deref())?;
     let projects = load_projects_all();
     let proj = projects.iter().find(|p| p.id == args.project_id)
         .ok_or("project not found")?.clone();
@@ -7924,7 +8538,9 @@ fn task_create_sync(app: AppHandle, args: CreateTaskArgs) -> Result<Task, String
     // seeded_session_ids and the task_open_repo note (per-cli seed vs
     // task-wide flag).
     let agent_session_ids = seeded_session_ids(&cli, args.resume_session_id.as_deref());
-    let task = Task {
+    let mut task = Task {
+        role: args.role.clone(),
+        secret_allows: Vec::new(),
         id: task_id.clone(),
         project_id: proj.id.clone(),
         // No account override at create: a new task follows the agent's
@@ -7990,6 +8606,10 @@ fn task_create_sync(app: AppHandle, args: CreateTaskArgs) -> Result<Task, String
         schedule: None,
         badges: Vec::new(),
     };
+    // a picked role only sticks where the Keychain block applies; no pick
+    // takes the defaults.
+    task.drop_role_unless_keychain_blocked();
+    seed_task_role(&mut task);
     save_task(&task).map_err(|e| e.to_string())?;
     drop(port_guard);
     emit_create_progress(&app, &task_id, format!("Worktree ready (port {port})."));
@@ -8037,6 +8657,9 @@ pub struct CreateMultiArgs {
     /// See `CreateTaskArgs::sandbox_block_keychain`.
     #[serde(default)]
     pub sandbox_block_keychain: Option<bool>,
+    /// See `CreateTaskArgs::role`.
+    #[serde(default)]
+    pub role: Option<String>,
     /// Run this task's agent in Docker instead of Seatbelt. See
     /// `CreateTaskArgs::docker_sandbox_enabled` - same mutual-exclusivity
     /// enforced in `task_create_multi_sync`.
@@ -8338,7 +8961,9 @@ fn task_create_multi_sync(app: AppHandle, args: CreateMultiArgs) -> Result<Task,
     // Block base allocated above, before the members were created.
     let port = ws_port;
     emit_create_progress(&app, &task_id, "Worktrees ready, finishing setup…");
-    let task = Task {
+    let mut task = Task {
+        role: args.role.clone(),
+        secret_allows: Vec::new(),
         id: task_id.clone(),
         project_id: host.id.clone(),
         // No account override at create: a new task follows the agent's
@@ -8396,6 +9021,10 @@ fn task_create_multi_sync(app: AppHandle, args: CreateMultiArgs) -> Result<Task,
         schedule: None,
         badges: Vec::new(),
     };
+    // a picked role only sticks where the Keychain block applies; no pick
+    // takes the defaults.
+    task.drop_role_unless_keychain_blocked();
+    seed_task_role(&mut task);
     save_task(&task).map_err(|e| e.to_string())?;
     drop(port_guard);
 
@@ -10073,39 +10702,6 @@ fn task_sandbox_add_allowed_path(
     Ok(0)
 }
 
-/// Undo of `task_sandbox_add_allowed_path`. Removes the path from
-/// BOTH the task's `sandbox_rw_paths` AND the project defaults —
-/// symmetric with the add, which lifts the entry into the project so
-/// future tasks inherit it. Without the project removal, Undo would
-/// leave the project-level copy behind and future tasks would still
-/// inherit the "reverted" allow. Used by the toast's Undo button.
-/// Idempotent — removing a path that isn't in either list is a no-op.
-#[tauri::command]
-fn task_sandbox_remove_allowed_path(
-    _state: State<'_, PtyManager>, id: String, path: String,
-) -> Result<(), String> {
-    let path = path.trim().to_string();
-    if path.is_empty() { return Ok(()); }
-    // Match both raw and $HOME-tokenized forms (the stored entry was
-    // tokenized at add-time, but the caller may pass either).
-    let tokenized = tokenize_home_prefix(&path);
-    let matches = |p: &String| p != &path && p != &tokenized;
-    let mut list = load_tasks_all();
-    let w = list.iter_mut().find(|w| w.id == id).ok_or("no such task")?;
-    w.sandbox_rw_paths.retain(matches);
-    let project_id = w.project_id.clone();
-    save_task(w).map_err(|e| e.to_string())?;
-    // Mirror the add's project-lift: drop the entry from the project
-    // defaults too so the Undo is a true revert.
-    let mut projects = load_projects_all();
-    if let Some(p) = projects.iter_mut().find(|p| p.id == project_id) {
-        let before = p.sandbox_rw_paths.len();
-        p.sandbox_rw_paths.retain(matches);
-        if p.sandbox_rw_paths.len() != before { let _ = save_projects(&projects); }
-    }
-    Ok(())
-}
-
 // ───────────────── repo-root `.termic.yaml` config ─────────────────
 //
 // The "Allow for this repo" destination. Where `task_sandbox_add_*`
@@ -10220,6 +10816,56 @@ fn repo_config_add_allowed_path(id: String, path: String) -> Result<(), String> 
         .map_err(|e| e.to_string())
 }
 
+/// Undo of an Allow from Activity: drops `value` from the allow-list its
+/// scope wrote. "project" is the task's own list and the project defaults
+/// the add lifted it into; "agent" the task's agent in the registry; "repo"
+/// the committed `.termic.yaml`. A path matches raw or `$HOME`-tokenized.
+/// Idempotent. Like the add, it kills nothing: the running agent keeps the
+/// profile it started with until it restarts.
+#[tauri::command]
+fn sandbox_remove_allowed(id: String, scope: String, kind: String, value: String) -> Result<(), String> {
+    let value = value.trim().to_string();
+    if value.is_empty() { return Ok(()); }
+    let host = match kind.as_str() {
+        "host" => true,
+        "path" => false,
+        k => return Err(format!("unknown kind: {k}")),
+    };
+    let stored = if host { value.clone() } else { tokenize_home_prefix(&value) };
+    let keep = |v: &String| v != &value && v != &stored;
+    let mut tasks = load_tasks_all();
+    let t = tasks.iter_mut().find(|t| t.id == id).ok_or("no such task")?;
+    match scope.as_str() {
+        "project" => {
+            if host { t.sandbox_allowed_hosts.retain(keep) } else { t.sandbox_rw_paths.retain(keep) }
+            save_task(t).map_err(|e| e.to_string())?;
+            let mut projects = load_projects_all();
+            if let Some(p) = projects.iter_mut().find(|p| p.id == t.project_id) {
+                let l = if host { &mut p.sandbox_allowed_hosts } else { &mut p.sandbox_rw_paths };
+                let before = l.len();
+                l.retain(keep);
+                if l.len() != before { save_projects(&projects).map_err(|e| e.to_string())?; }
+            }
+            Ok(())
+        }
+        "agent" => {
+            let mut s = load_settings_inner();
+            let a = s.agents.iter_mut().find(|a| a.id == t.cli).ok_or("no such agent")?;
+            let l = if host { &mut a.sandbox_allowed_hosts } else { &mut a.sandbox_allowed_paths };
+            let before = l.len();
+            l.retain(keep);
+            if l.len() == before { return Ok(()); }
+            save_settings_inner(&s)
+        }
+        "repo" => {
+            let proj = task_project(&id)?;
+            let k = if host { repo_config::AllowKind::Host } else { repo_config::AllowKind::Path };
+            repo_config::remove_allowed(Path::new(&proj.root_path), k, &stored).map_err(|e| e.to_string())
+        }
+        other => Err(format!("unknown scope: {other}")),
+    }
+}
+
 #[tauri::command]
 async fn task_recent_denials(id: String, minutes: Option<u32>) -> Vec<String> {
     tauri::async_runtime::spawn_blocking(move || -> Vec<String> {
@@ -10267,6 +10913,8 @@ fn task_set_sandbox(
     w.sandbox_enabled = mode != SandboxMode::Off;
     w.sandbox_rw_paths = rw_paths;
     w.sandbox_allowed_hosts = allowed_hosts;
+    // leaving Enforce / EnforceFs or unblocking the Keychain clears the role.
+    w.drop_role_unless_keychain_blocked();
     save_task(w).map_err(|e| e.to_string())?;
 
     // `kill_live=false` is an INFORMED escape hatch: the user explicitly
@@ -10301,6 +10949,8 @@ fn task_set_docker(
     w.docker_sandbox_enabled = enabled;
     w.docker_extra_args = extra_args;
     w.docker_extra_mounts = extra_mounts;
+    // Docker gets no broker in v1, so switching to it clears the role.
+    w.drop_role_unless_keychain_blocked();
     save_task(w).map_err(|e| e.to_string())?;
     let killed = kill_task_ptys(&state, &id);
     // Always reap the OLD container here, not just when Docker is being
@@ -10314,6 +10964,316 @@ fn task_set_docker(
     // stale. Harmless when there was nothing to remove.
     docker::cleanup_task(&id);
     Ok(killed)
+}
+
+// ───────────── secrets + broker (secrets.rs, broker/) ─────────────
+//
+// No command here returns a secret's value: probe reports a status, gh
+// accounts are names from gh's non-secret hosts.yml, exposure reports a
+// token's prefix. Secrets and roles themselves save through settings_save.
+
+/// Read one secret's Keychain item and say whether it worked. Off the main
+/// thread: the first read can sit on macOS's "Termic wants to access" prompt.
+#[tauri::command]
+async fn secret_probe(window: tauri::Window, id: String) -> Result<broker::SecretStatus, String> {
+    let profile = window_profile(&window);
+    tauri::async_runtime::spawn_blocking(move || {
+        let def = load_settings_in(&profile)
+            .secrets
+            .into_iter()
+            .find(|d| d.id == id)
+            .ok_or_else(|| "no such secret".to_string())?;
+        Ok(broker::probe(&def))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Save a pasted value (an API key or token) as the Termic-owned Keychain
+/// item for secret `id`, `termic:<id>`, and return the kind it landed as
+/// (`protected`, or `generic` on a build without the entitlement). `name`
+/// labels the item, so macOS's prompt says which secret it is.
+/// Write-only: nothing reads it back but the broker on its way upstream.
+/// Async: a Keychain write can sit on a prompt.
+#[tauri::command]
+async fn secret_store(id: String, name: String, value: String) -> Result<secrets::KeychainKind, String> {
+    tauri::async_runtime::spawn_blocking(move || broker::store_owned(&id, &name, &value))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Delete the Termic-owned item for `id` when no saved secret has that id:
+/// the add dialog's cleanup after a store that worked and a save that did
+/// not. A no-op otherwise. Never reads a value.
+#[tauri::command]
+async fn secret_forget(window: tauri::Window, id: String) -> Result<(), String> {
+    let profile = window_profile(&window);
+    tauri::async_runtime::spawn_blocking(move || {
+        broker::forget_unsaved(&load_settings_in(&profile).secrets, &id);
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// Whether this build can write to the data protection keychain. Cached;
+/// the first call is one Keychain query, so off the main thread.
+#[tauri::command]
+async fn secrets_protected_available() -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(broker::protected_available).await.map_err(|e| e.to_string())
+}
+
+/// gh's logins per host for the "Add GitHub secret" preset. A missing
+/// hosts.yml is no accounts, not an error.
+#[tauri::command]
+async fn secrets_gh_accounts() -> Result<Vec<secrets::GhAccount>, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        // a GUI launch has no rc exports, so GH_CONFIG_DIR may only be in the
+        // login-shell delta.
+        let (_, inject) = shell_env::spawn_env();
+        let env = |k: &str| {
+            std::env::var(k).ok().or_else(|| inject.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone()))
+        };
+        let Some(dir) = secrets::gh_config_dir(env, dirs::home_dir()) else { return Ok(Vec::new()) };
+        match fs::read_to_string(dir.join("hosts.yml")) {
+            Ok(text) => secrets::gh_accounts_from_hosts_yml(&text),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+            Err(e) => Err(e.to_string()),
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Real-looking tokens typed into an agent's configured `env` /
+/// `docker_env`, which every task of that agent reads. Names and prefixes
+/// only. Termic's own environment is the kept-out list's job instead
+/// (`env_guard_list`).
+#[tauri::command]
+async fn secrets_exposed(window: tauri::Window) -> Result<Vec<secrets::SecretExposure>, String> {
+    let profile = window_profile(&window);
+    tauri::async_runtime::spawn_blocking(move || {
+        let agents = load_settings_in(&profile).agents;
+        let configured = agents.iter().flat_map(|a| {
+            a.env.iter().chain(a.docker_env.iter()).map(move |(k, v)| (a.id.as_str(), k.as_str(), v.as_str()))
+        });
+        secrets::scan_exposed(configured)
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// The kept-out list for Settings > Secrets: what Termic's own environment
+/// holds that agent tabs will not inherit, plus every name the user added.
+/// Names only, never a value.
+fn env_guard_rows(s: &Settings) -> Vec<env_guard::KeptOut> {
+    let agents: Vec<(String, &[&str])> = s.agents.iter()
+        .map(|a| (a.id.clone(), env_guard::own_login(docker::base_agent_id(&s.agents, &a.id))))
+        .collect();
+    let env = std::env::vars_os().filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)));
+    env_guard::list(&s.env_guard, &agents, env)
+}
+
+#[tauri::command]
+async fn env_guard_list(window: tauri::Window) -> Result<Vec<env_guard::KeptOut>, String> {
+    let profile = window_profile(&window);
+    tauri::async_runtime::spawn_blocking(move || env_guard_rows(&load_settings_in(&profile)))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Replace the kept-out rules (read-modify-write, so no other field moves)
+/// and return the fresh list.
+#[tauri::command]
+async fn env_guard_save(window: tauri::Window, rules: Vec<env_guard::Rule>) -> Result<Vec<env_guard::KeptOut>, String> {
+    env_guard::validate(&rules)?;
+    let profile = window_profile(&window);
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut s = load_settings_in(&profile);
+        s.env_guard = rules;
+        save_settings_in(&profile, &s)?;
+        Ok(env_guard_rows(&s))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Set one agent's pass-through names, for the Secrets page (the agent card
+/// saves through `agents_save` with the rest of the agent).
+#[tauri::command]
+async fn agent_set_pass_env(window: tauri::Window, agent_id: String, names: Vec<String>) -> Result<(), String> {
+    if let Some(bad) = names.iter().find(|n| !secrets::env_name_ok(n)) {
+        return Err(format!("{bad:?} is not an environment variable name"));
+    }
+    let profile = window_profile(&window);
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut s = load_settings_in(&profile);
+        let a = s.agents.iter_mut().find(|a| a.id == agent_id).ok_or_else(|| format!("no agent {agent_id}"))?;
+        a.pass_env = names;
+        save_settings_in(&profile, &s)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Why `checked_role` refused, from what is SAVED: the dialog draft can
+/// differ, and "needs Enforcing" alone does not say which part is missing.
+fn role_refusal(task: &Task) -> String {
+    let what = if task.docker_sandbox_enabled {
+        "it runs in Docker, which cannot carry a role yet".to_string()
+    } else {
+        let mode = match task.effective_sandbox_mode() {
+            SandboxMode::Off => "Off",
+            SandboxMode::Monitor => "Monitoring",
+            SandboxMode::Enforce => "Enforcing",
+            SandboxMode::EnforceFs => "Enforcing (FS)",
+        };
+        let block = if task.sandbox_block_keychain { "on" } else { "off" };
+        format!("its saved sandbox is {mode} with the Keychain block {block}")
+    };
+    format!("Can't give this task a role: {what}. A role needs Enforcing or Enforcing (FS) with Keychain access blocked, saved before the role.")
+}
+
+/// What `task_set_role` may store. No secrets (`None` or `""`, stored as
+/// `""`, see `Task::role`) always; a role id only while the Keychain block
+/// applies and only when the role exists, so the picker cannot persist
+/// something the spawn ignores.
+fn checked_role(task: &Task, role: Option<String>, roles: &[secrets::Role]) -> Result<Option<String>, String> {
+    match role.as_deref() {
+        None | Some("") => Ok(Some(String::new())),
+        Some(_) if !task.keychain_blocked() => Err(role_refusal(task)),
+        Some(id) if !roles.iter().any(|r| r.id == id) => Err(format!("no such role: {id}")),
+        Some(_) => Ok(role),
+    }
+}
+
+/// Persist a task's role. Like the account switch, it applies to the next
+/// spawn; a running agent keeps the broker it started with. Async: it scans
+/// every profile's tasks.
+#[tauri::command]
+async fn task_set_role(id: String, role: Option<String>) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut t = load_tasks_all().into_iter().find(|t| t.id == id).ok_or("no such task")?;
+        let roles = load_settings_in(&t.profile).roles;
+        t.role = checked_role(&t, role, &roles)?;
+        save_task(&t).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+fn broker_counts(id: String) -> broker::BrokerCounts {
+    broker::counts(&id)
+}
+
+#[tauri::command]
+fn broker_events(id: String) -> broker::BrokerEvents {
+    broker::events(&id)
+}
+
+#[tauri::command]
+fn broker_all_events() -> Vec<(String, broker::BrokerEvents)> {
+    broker::all_events()
+}
+
+/// Refuse every brokered request of the task until resumed. Live, no restart.
+#[tauri::command]
+fn broker_set_paused(id: String, paused: bool) {
+    broker::set_paused(&id, paused);
+}
+
+/// Settings > Secrets request tester: judge a typed request on `role` as
+/// passed (the editor's copy, saved or not) with the broker's own rule walk,
+/// so the tester and the broker cannot disagree. Reads settings only for
+/// the secret's recipe (which decides GraphQL / git classification).
+#[tauri::command]
+async fn secrets_test_request(window: tauri::Window, role: secrets::Role, secret: String, host: String, method: String, target: String) -> Result<broker::TestResult, String> {
+    let profile = window_profile(&window);
+    tauri::async_runtime::spawn_blocking(move || {
+        let recipe = load_settings_in(&profile).secrets.iter().find(|s| s.id == secret).map(|s| s.recipe).ok_or("no such secret")?;
+        broker::test_request(&role, recipe, &secret, &host, &method, &target)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// The task a broker key belongs to, for an allow or its undo in `scope`. A
+/// shell running a role (`broker::shell_key`) has no task allows, so it only
+/// takes the `role` scope.
+fn broker_key_task<'a>(key: &'a str, scope: &str) -> Result<&'a str, String> {
+    match broker::parse_shell_key(key) {
+        Some(_) if scope != "role" => Err("a shell's allows live on its role".into()),
+        Some((task, _)) => Ok(task),
+        None => Ok(key),
+    }
+}
+
+/// Save an allow from the task's Secrets popover. `task` scope lands on
+/// `Task::secret_allows`; `role` scope goes first in `role`'s rule set for
+/// (secret, host), shared by every task on that role. `role` is the one the
+/// blocked entry names, i.e. what the spawn that was blocked runs, not the
+/// task's saved role (which a switch or a second agent can make differ).
+/// Rules are read per request, so the next one sees it, and the blocked rows
+/// it covers are cleared. Async: it scans every profile's tasks.
+///
+/// `id` is the broker key the blocked row came from, like every `broker_*`
+/// command's (`broker_key_task`).
+#[tauri::command]
+async fn broker_allow(id: String, scope: String, secret: String, host: String, rule: secrets::Rule, role: Option<String>) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let task_id = broker_key_task(&id, &scope)?;
+        let mut t = load_tasks_all().into_iter().find(|t| t.id == task_id).ok_or("no such task")?;
+        let mut s = load_settings_in(&t.profile);
+        secrets::check_allow(&s.secrets, &secret, &host, &rule)?;
+        let (method, path) = (rule.methods[0].clone(), rule.pattern.clone());
+        match scope.as_str() {
+            "task" => {
+                secrets::allow_on_task(&mut t.secret_allows, &secret, &host, rule);
+                save_task(&t).map_err(|e| e.to_string())?;
+            }
+            "role" => {
+                let role_id = role.filter(|r| !r.is_empty()).ok_or("a role-scoped allow needs the role that blocked it")?;
+                let r = s.roles.iter_mut().find(|r| r.id == role_id).ok_or("that role no longer exists")?;
+                if !r.secrets.contains(&secret) {
+                    return Err(format!("role {} does not hold that secret", r.name));
+                }
+                secrets::allow_on_role(r, &secret, &host, rule);
+                save_settings_in(&t.profile, &s)?;
+            }
+            other => return Err(format!("unknown scope: {other}")),
+        }
+        broker::clear_blocked(&id, &secret, &host, &method, &path);
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Undo of [`broker_allow`]: drops that exact rule from the task's allows
+/// or the role. Rules are read live, so the next request is judged without
+/// it. Same key checks as the allow.
+#[tauri::command]
+async fn broker_unallow(id: String, scope: String, secret: String, host: String, rule: secrets::Rule, role: Option<String>) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let task_id = broker_key_task(&id, &scope)?;
+        let mut t = load_tasks_all().into_iter().find(|t| t.id == task_id).ok_or("no such task")?;
+        match scope.as_str() {
+            "task" => {
+                secrets::unallow_on_task(&mut t.secret_allows, &secret, &host, &rule);
+                save_task(&t).map_err(|e| e.to_string())
+            }
+            "role" => {
+                let mut s = load_settings_in(&t.profile);
+                let role_id = role.filter(|r| !r.is_empty()).ok_or("a role-scoped undo needs the role")?;
+                let r = s.roles.iter_mut().find(|r| r.id == role_id).ok_or("that role no longer exists")?;
+                secrets::unallow_on_role(r, &secret, &host, &rule);
+                save_settings_in(&t.profile, &s)
+            }
+            other => Err(format!("unknown scope: {other}")),
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// (tasks with a live agent, live AGENT PTYs). Ground truth for what
@@ -11920,7 +12880,10 @@ async fn task_archive(
 /// (see `stop_task_ptys`), so an agent gets to flush its transcript. Blocks
 /// for the grace period: call it off the async runtime.
 pub(crate) fn stop_every_task_pty(manager: &PtyManager, task_id: &str) -> usize {
-    stop_task_ptys(manager, task_id) + stop_task_role_ptys(manager, task_id)
+    let n = stop_task_ptys(manager, task_id) + stop_task_role_ptys(manager, task_id);
+    // its role shells are gone, so is what they recorded.
+    broker::forget_task_shells(task_id);
+    n
 }
 
 /// Whether `branch` is a local branch of `repo`. Archive deletes the task's
@@ -15433,55 +16396,71 @@ async fn project_fetch_pr_branch(
             .ok_or("no project")?;
         let repo = PathBuf::from(&p.root_path);
         let remote = detect_default_remote(&repo);
-        // A fork's branch name is not ours to claim: two contributors both
-        // opening `fix-login` would collide, and so would a fork branch named
-        // after one of our own. Prefix those; keep the plain name for a PR
-        // whose head is in this repo, which is what a person expects to see.
-        let base = if head_ref.trim().is_empty() {
-            format!("pr-{number}")
-        } else if cross_repository {
-            format!("pr-{number}-{}", head_ref.trim())
-        } else {
-            head_ref.trim().to_string()
-        };
-        // An existing branch of that name is not overwritten: a fetch with `+`
-        // would rewrite whatever the user had there, which for a same-repo PR
-        // is plausibly their own in-progress work.
-        let taken = git(&["rev-parse", "--verify", "--quiet", &format!("refs/heads/{base}")], &repo).is_ok();
-        let branch = if taken { format!("pr-{number}") } else { base };
-        let taken2 = git(&["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")], &repo).is_ok();
-        if taken2 {
-            // Already fetched once: leave it alone and let the caller check it
-            // out. Re-fetching would either fail or move a branch the user may
-            // have committed onto.
-            return Ok(branch);
-        }
-        // refs/pull/<n>/head is GitHub-only magic; GitLab publishes the same
-        // thing at refs/merge-requests/<n>/head. Azure has no PR ref at all:
-        // a same-repo PR's source is an ordinary branch, fetched by name. A
-        // FORK PR's head lives on the fork's remote - fetching the name from
-        // origin would either fail or, worse, silently succeed with OUR
-        // same-named branch's commits, so that case is refused outright.
         let provider = forge::provider_for_repo(&repo, &remote).0;
-        if provider == Some(forge::AZURE) && cross_repository {
-            return Err(format!(
-                "pull request #{number} comes from a fork, which this repo's remote cannot reach"
-            ));
-        }
-        let refspec = match provider {
-            Some(forge::AZURE) => format!("refs/heads/{}:refs/heads/{branch}", head_ref.trim()),
-            Some(forge::GITLAB) => format!("refs/merge-requests/{number}/head:refs/heads/{branch}"),
-            _ => format!("refs/pull/{number}/head:refs/heads/{branch}"),
-        };
-        // guarded_fetch, not git(): a network fetch without the
-        // prompt-disabled/deadline guards can wedge this thread forever on
-        // an SSH passphrase prompt or a hung transfer.
-        guarded_fetch(&repo, &remote, &refspec, &format!("fetch {remote} pull-request-{number}"))
-            .map_err(|e| format!("could not fetch pull request #{number}: {e}"))?;
-        Ok(branch)
+        fetch_pr_branch_in(&repo, &remote, provider, number, &head_ref, cross_repository)
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// The body of `project_fetch_pr_branch`, on a repo and remote, so it can be
+/// tested against a local "forge".
+///
+/// The branch is the PR's OWN name: a task on a PR works on that branch, so a
+/// push goes back to the PR and a review sees exactly what was pushed. A fork's
+/// name is not ours to claim (two forks' `fix-login` would collide, or shadow
+/// one of ours), so a fork PR gets `pr-<n>-<head>`.
+///
+/// A branch of that name that already exists is REUSED, not swapped for a
+/// fresh `pr-<n>` (which is what this did, and why picking a PR you had
+/// already worked on handed you a second branch). It is moved to the PR head
+/// only by a fast-forward: the fetch has no `+`, so git refuses anything that
+/// would drop local commits, and refuses outright when the branch is checked
+/// out somewhere. Either refusal leaves the branch exactly as it was.
+fn fetch_pr_branch_in(
+    repo: &Path,
+    remote: &str,
+    provider: Option<&str>,
+    number: u64,
+    head_ref: &str,
+    cross_repository: bool,
+) -> Result<String, String> {
+    let head = head_ref.trim();
+    let branch = if head.is_empty() {
+        format!("pr-{number}")
+    } else if cross_repository {
+        format!("pr-{number}-{head}")
+    } else {
+        head.to_string()
+    };
+    // refs/pull/<n>/head is GitHub-only magic; GitLab publishes the same
+    // thing at refs/merge-requests/<n>/head. Azure has no PR ref at all:
+    // a same-repo PR's source is an ordinary branch, fetched by name. A
+    // FORK PR's head lives on the fork's remote - fetching the name from
+    // origin would either fail or, worse, silently succeed with OUR
+    // same-named branch's commits, so that case is refused outright.
+    if provider == Some(forge::AZURE) && cross_repository {
+        return Err(format!(
+            "pull request #{number} comes from a fork, which this repo's remote cannot reach"
+        ));
+    }
+    let refspec = match provider {
+        Some(forge::AZURE) => format!("refs/heads/{head}:refs/heads/{branch}"),
+        Some(forge::GITLAB) => format!("refs/merge-requests/{number}/head:refs/heads/{branch}"),
+        _ => format!("refs/pull/{number}/head:refs/heads/{branch}"),
+    };
+    let exists = git(&["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")], repo).is_ok();
+    // guarded_fetch, not git(): a network fetch without the
+    // prompt-disabled/deadline guards can wedge this thread forever on
+    // an SSH passphrase prompt or a hung transfer.
+    let fetched = guarded_fetch(repo, remote, &refspec, &format!("fetch {remote} pull-request-{number}"));
+    match fetched {
+        Ok(()) => Ok(branch),
+        // an existing branch the fetch could not fast-forward (it has local
+        // commits, or it is checked out) is still the PR's branch: use it.
+        Err(_) if exists => Ok(branch),
+        Err(e) => Err(format!("could not fetch pull request #{number}: {e}")),
+    }
 }
 
 /// Which forge (if any) a project's repo is hosted on. Cached and NETWORK
@@ -23125,6 +24104,13 @@ pub struct Settings {
     pub customizations_enabled: Option<bool>,
     /// Directory to scan for git repos when discovering. Empty = unset.
     pub repos_dir: String,
+    /// Secrets (Keychain item pointers, never values) and the roles that
+    /// bundle them. See secrets.rs and docs/sandbox.md "Credential broker".
+    pub secrets: Vec<secrets::SecretDef>,
+    pub roles: Vec<secrets::Role>,
+    /// Env var names the user added to, or rescoped on, the kept-out list.
+    /// See env_guard.rs.
+    pub env_guard: Vec<env_guard::Rule>,
     /// True once the user has finished the welcome wizard.
     pub welcomed: bool,
     /// Registered agent CLIs (claude/gemini/codex defaults + user customs).
@@ -23310,6 +24296,10 @@ pub struct Settings {
     /// config is unreadable or carries `disableAllHooks` either way.
     #[serde(default)]
     pub hooks_auto_default_migrated: bool,
+    /// Whether `migrate_task_roles_seeded` has written every task's role
+    /// down. Root profile only; it covers every profile's tasks.
+    #[serde(default)]
+    pub task_roles_seeded_migrated: bool,
     /// One-time marker for the launch-time auto-install of the `termic`
     /// command into `~/.local/bin`.
     ///
@@ -23456,6 +24446,11 @@ pub struct Agent {
     pub id: String,                  // stable key referenced by Task.cli
     pub display_name: String,
     pub command: String,             // binary or shell command to spawn
+    /// Secrets role a new task with this as its primary agent starts with
+    /// when neither its creator nor its project picks one. Read only at
+    /// creation (`seed_task_role`).
+    #[serde(default)]
+    pub default_role: Option<String>,
     #[serde(default)]
     pub args: Vec<String>,
     /// Icon identifier consumed by the frontend. Either a brand id ("claude",
@@ -23502,6 +24497,10 @@ pub struct Agent {
     /// says it rather than termic guessing.
     #[serde(default)]
     pub docker_env: std::collections::HashMap<String, String>,
+    /// Kept-out env var names this agent inherits anyway (see env_guard.rs).
+    /// Names only: the value comes from Termic's own environment.
+    #[serde(default)]
+    pub pass_env: Vec<String>,
     /// Paths joined into the task sandbox allow-list whenever this
     /// agent's CLI is launched. The sandbox is allowlist-only (default-deny
     /// reads + writes outside this set); per-agent paths cover the dirs the
@@ -23540,6 +24539,12 @@ pub struct Agent {
     /// login, the one it had before any account existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_account: Option<String>,
+    /// What the UI CALLS an account, by its name (GH #278). The name is
+    /// frozen because it is the store's path and claude hashes that path into
+    /// its Keychain item, so renaming means a label on top rather than a move.
+    /// Absent means the name is the label.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub account_labels: HashMap<String, String>,
     /// Move a task to another account on its own when this one is spent
     /// (GH #278). Opt-in, per agent, and therefore profile-scoped like every
     /// other field here: a work profile can rotate work accounts while a
@@ -23674,9 +24679,24 @@ pub struct AgentCapabilities {
     pub match_output: bool,
 }
 
+/// opencode's session-id capture (`post_launch_capture`), which must read
+/// both versions' `session list`. opencode 1 pads its table with spaces;
+/// opencode 2 separates the columns with TABS (`id\ttitle\tupdated`,
+/// `cli/src/commands/handlers/session/list.ts`). The old `cut -d' ' -f1` took
+/// a v2 line up to the first space in its title, and opencode 2's `--session`
+/// CREATES a session it does not know, so the relaunch opened an empty one
+/// instead of resuming. awk's default field split is any run of blanks.
+/// KEEP IN SYNC with the fallback in `lib/agents.ts`.
+const OPENCODE_CAPTURE: &str = "opencode session list | awk '/^ses_/ { print $1; exit }'";
+
+/// What `OPENCODE_CAPTURE` shipped as before opencode 2. A built-in opencode
+/// whose capture still equals it was never edited, so it is upgraded on load.
+const OPENCODE_CAPTURE_V1: &str = "opencode session list | grep -m1 '^ses_' | cut -d' ' -f1";
+
 fn default_agents() -> Vec<Agent> {
     vec![
         Agent {
+            default_role: None,
             id: "claude".into(),
             display_name: "claude".into(),
             command: "claude".into(),
@@ -23723,6 +24743,7 @@ fn default_agents() -> Vec<Agent> {
             env: std::collections::HashMap::new(),
             // Empty = a Docker spawn uses `env` above, unchanged.
             docker_env: std::collections::HashMap::new(),
+            pass_env: Vec::new(),
             sandbox_allowed_paths: vec![
                 // Covers $HOME/.claude/, $HOME/.claude.json,
                 // $HOME/.claude.lock, $HOME/.claude.json.lock, and
@@ -23744,11 +24765,13 @@ fn default_agents() -> Vec<Agent> {
             default_account: None,
             adopted_account: None,
             auto_switch_account: false,
+            account_labels: Default::default(),
             extends: None,
             kind: "agent".into(),
             post_launch_capture: None,
         },
         Agent {
+            default_role: None,
             id: "codex".into(),
             display_name: "codex".into(),
             command: "codex".into(),
@@ -23794,6 +24817,7 @@ fn default_agents() -> Vec<Agent> {
             env: std::collections::HashMap::new(),
             // Empty = a Docker spawn uses `env` above, unchanged.
             docker_env: std::collections::HashMap::new(),
+            pass_env: Vec::new(),
             sandbox_allowed_paths: vec![
                 "$HOME/.codex".into(),
                 "$HOME/.config/codex".into(),
@@ -23807,11 +24831,13 @@ fn default_agents() -> Vec<Agent> {
             default_account: None,
             adopted_account: None,
             auto_switch_account: false,
+            account_labels: Default::default(),
             extends: None,
             kind: "agent".into(),
             post_launch_capture: None,
         },
         Agent {
+            default_role: None,
             // Google Antigravity CLI (`agy`), launched 2025-11-18 — a
             // Gemini-3-family agentic CLI. `id` is the binary name to
             // keep the id == command == detect-name invariant the rest
@@ -23851,6 +24877,7 @@ fn default_agents() -> Vec<Agent> {
             env: std::collections::HashMap::new(),
             // Empty = a Docker spawn uses `env` above, unchanged.
             docker_env: std::collections::HashMap::new(),
+            pass_env: Vec::new(),
             // Antigravity is a Gemini-family CLI and actually keeps its
             // per-project state under ~/.gemini (the `.antigravitycli/`
             // dir it drops in a repo just symlinks into
@@ -23874,11 +24901,13 @@ fn default_agents() -> Vec<Agent> {
             default_account: None,
             adopted_account: None,
             auto_switch_account: false,
+            account_labels: Default::default(),
             extends: None,
             kind: "agent".into(),
             post_launch_capture: None,
         },
         Agent {
+            default_role: None,
             // GitHub Copilot CLI (`copilot`). Launched 2025; supports
             // --session-id for both minting and resuming sessions,
             // --name for labelling, --allow-all / --yolo for permissions,
@@ -23910,6 +24939,7 @@ fn default_agents() -> Vec<Agent> {
             env: std::collections::HashMap::new(),
             // Empty = a Docker spawn uses `env` above, unchanged.
             docker_env: std::collections::HashMap::new(),
+            pass_env: Vec::new(),
             sandbox_allowed_paths: vec![
                 "$HOME/.copilot".into(),
                 "$HOME/.config/copilot".into(),
@@ -23923,11 +24953,13 @@ fn default_agents() -> Vec<Agent> {
             default_account: None,
             adopted_account: None,
             auto_switch_account: false,
+            account_labels: Default::default(),
             extends: None,
             kind: "agent".into(),
             post_launch_capture: None,
         },
         Agent {
+            default_role: None,
             // xAI's Grok Build TUI. Help text confirmed:
             //   --always-approve     auto-approves every tool call (yolo)
             //   -c, --continue       continue the most recent CWD session
@@ -23965,6 +24997,7 @@ fn default_agents() -> Vec<Agent> {
             env: std::collections::HashMap::new(),
             // Empty = a Docker spawn uses `env` above, unchanged.
             docker_env: std::collections::HashMap::new(),
+            pass_env: Vec::new(),
             sandbox_allowed_paths: vec![
                 "$HOME/.grok".into(),
                 "$HOME/.config/grok".into(),
@@ -23978,11 +25011,13 @@ fn default_agents() -> Vec<Agent> {
             default_account: None,
             adopted_account: None,
             auto_switch_account: false,
+            account_labels: Default::default(),
             extends: None,
             kind: "agent".into(),
             post_launch_capture: None,
         },
         Agent {
+            default_role: None,
             // pi (pi.dev). Verified against 0.84.3 on a live binary, not the
             // help text:
             //   --session-id <id>  creates the session if missing and resumes
@@ -24020,6 +25055,7 @@ fn default_agents() -> Vec<Agent> {
             },
             env: std::collections::HashMap::new(),
             docker_env: std::collections::HashMap::new(),
+            pass_env: Vec::new(),
             sandbox_allowed_paths: vec!["$HOME/.pi".into()],
             sandbox_allowed_hosts: vec![],
             work_done: true,
@@ -24027,18 +25063,20 @@ fn default_agents() -> Vec<Agent> {
             default_account: None,
             adopted_account: None,
             auto_switch_account: false,
+            account_labels: Default::default(),
             extends: None,
             kind: "agent".into(),
             post_launch_capture: None,
         },
         Agent {
+            default_role: None,
             // opencode — SST's open-source agentic coding CLI. Sessions are
             // created lazily (only after the first user message), so termic
             // can't mint a UUID at spawn time. Resume strategy:
             //   - worktrees: `--continue` resumes the last CWD session
             //     (safe because each worktree has its own unique directory).
             //   - on first PTY exit: post_launch_capture runs
-            //     `opencode session list | grep … | cut …`, stores the ID.
+            //     `opencode session list | awk …`, stores the ID.
             //   - subsequent spawns: `--session <captured-id>` via resume_id_args.
             id: "opencode".into(),
             display_name: "opencode".into(),
@@ -24063,6 +25101,7 @@ fn default_agents() -> Vec<Agent> {
             env: std::collections::HashMap::new(),
             // Empty = a Docker spawn uses `env` above, unchanged.
             docker_env: std::collections::HashMap::new(),
+            pass_env: Vec::new(),
             sandbox_allowed_paths: vec![
                 "$HOME/.config/opencode".into(),
                 "$HOME/.local/share/opencode".into(),
@@ -24075,13 +25114,15 @@ fn default_agents() -> Vec<Agent> {
             default_account: None,
             adopted_account: None,
             auto_switch_account: false,
+            account_labels: Default::default(),
             extends: None,
             kind: "agent".into(),
             post_launch_capture: Some(PostLaunchCapture {
-                command: "opencode session list | grep -m1 '^ses_' | cut -d' ' -f1".into(),
+                command: OPENCODE_CAPTURE.into(),
             }),
         },
         Agent {
+            default_role: None,
             // Muse Code — Meta's terminal coding agent, running the Muse Spark
             // model family (GH #275). Measured against a live Muse Code 1.0.2
             // (1.0.2-R2040.1), not the help text, using its offline `--provider
@@ -24143,6 +25184,7 @@ fn default_agents() -> Vec<Agent> {
             env: std::collections::HashMap::new(),
             // Empty = a Docker spawn uses `env` above, unchanged.
             docker_env: std::collections::HashMap::new(),
+            pass_env: Vec::new(),
             sandbox_allowed_paths: vec![
                 // Auth + enterprise config.
                 "$HOME/.config/muse".into(),
@@ -24187,6 +25229,7 @@ fn default_agents() -> Vec<Agent> {
             default_account: None,
             adopted_account: None,
             auto_switch_account: false,
+            account_labels: Default::default(),
             extends: None,
             kind: "agent".into(),
             // It IS opencode's shape after all: muse cannot be TOLD an id, but
@@ -24208,6 +25251,7 @@ fn default_agents() -> Vec<Agent> {
             }),
         },
         Agent {
+            default_role: None,
             // Cursor CLI (cursor-agent). Installed by cursor.com/install into
             // ~/.local/share/cursor-agent/versions/<ver>/, symlinked as both
             // `cursor-agent` and the far too generic `agent` in ~/.local/bin.
@@ -24263,6 +25307,7 @@ fn default_agents() -> Vec<Agent> {
             },
             env: std::collections::HashMap::new(),
             docker_env: std::collections::HashMap::new(),
+            pass_env: Vec::new(),
             sandbox_allowed_paths: vec![
                 // Config, auth.json and cli-config.json. The resolver is
                 // CURSOR_CONFIG_DIR, then XDG_CONFIG_HOME/cursor, then this.
@@ -24283,11 +25328,13 @@ fn default_agents() -> Vec<Agent> {
             default_account: None,
             adopted_account: None,
             auto_switch_account: false,
+            account_labels: Default::default(),
             extends: None,
             kind: "agent".into(),
             post_launch_capture: None,
         },
         Agent {
+            default_role: None,
             // Devin (Cognition). Measured against a live 3000.10.21, not the
             // help text:
             //   --permission-mode dangerous  auto-approves every tool; the
@@ -24347,6 +25394,7 @@ fn default_agents() -> Vec<Agent> {
             env: std::collections::HashMap::new(),
             // Empty = a Docker spawn uses `env` above, unchanged.
             docker_env: std::collections::HashMap::new(),
+            pass_env: Vec::new(),
             sandbox_allowed_paths: vec![
                 // User-level plans, extensions and argv state.
                 "$HOME/.devin".into(),
@@ -24373,6 +25421,7 @@ fn default_agents() -> Vec<Agent> {
             default_account: None,
             adopted_account: None,
             auto_switch_account: false,
+            account_labels: Default::default(),
             extends: None,
             kind: "agent".into(),
             // Backstop for the hook path: `devin list --format csv` prints a
@@ -24388,6 +25437,7 @@ fn default_agents() -> Vec<Agent> {
             }),
         },
         Agent {
+            default_role: None,
             // oh-my-pi (omp, github.com/can1357/oh-my-pi). pi fork, rewritten;
             // measured against a live 18.6.0, not the help text:
             //   tools.approvalMode    defaults to "yolo" (tools/settings.ts:
@@ -24459,6 +25509,7 @@ fn default_agents() -> Vec<Agent> {
             },
             env: std::collections::HashMap::new(),
             docker_env: std::collections::HashMap::new(),
+            pass_env: Vec::new(),
             sandbox_allowed_paths: vec![
                 // Everything omp keeps: the agent dir (agent.db credentials,
                 // sessions, extensions, cache) lives under ~/.omp. The binary
@@ -24475,6 +25526,7 @@ fn default_agents() -> Vec<Agent> {
             default_account: None,
             adopted_account: None,
             auto_switch_account: false,
+            account_labels: Default::default(),
             extends: None,
             kind: "agent".into(),
             // No backstop capture: the plugin reports the id on session_start
@@ -24570,6 +25622,17 @@ pub(crate) fn load_settings_in(id: &ProfileId) -> Settings {
     if s.docker_shared_config_dirs == legacy_shared_config_dirs_pre_azure() {
         s.docker_shared_config_dirs = docker::default_shared_config_dirs();
         migrated = true;
+    }
+    // Migration (opencode 2): the capture command could not read opencode 2's
+    // tab-separated `session list`. Only a command that still EXACTLY equals
+    // the shipped one is replaced; one the user wrote is theirs.
+    for a in s.agents.iter_mut().filter(|a| a.builtin && a.id == "opencode") {
+        if let Some(cap) = a.post_launch_capture.as_mut() {
+            if cap.command == OPENCODE_CAPTURE_V1 {
+                cap.command = OPENCODE_CAPTURE.into();
+                migrated = true;
+            }
+        }
     }
     for def in default_agents() {
         if let Some(a) = s.agents.iter_mut().find(|a| a.id == def.id && a.builtin) {
@@ -24978,6 +26041,15 @@ fn docker_env_for(
 /// A new marker from a future agent version lands here, not in a wildcard. The
 /// failure it prevents is quiet (a wrong session id looks like nothing until an
 /// agent reads someone else's project), so the list is worth keeping honest.
+/// Termic's own env into `cmd`, minus what `drop` names. `CommandBuilder::new`
+/// already starts from the whole process env, so a dropped var has to be
+/// REMOVED: skipping it here would leave the inherited copy in place.
+fn inherit_env(cmd: &mut CommandBuilder, drop: impl Fn(&str, &str) -> bool) {
+    for (k, v) in std::env::vars() {
+        if drop(&k, &v) { cmd.env_remove(&k) } else { cmd.env(k, v) }
+    }
+}
+
 fn agent_session_marker(key: &str) -> bool {
     matches!(
         key,
@@ -24989,6 +26061,11 @@ fn agent_session_marker(key: &str) -> bool {
             | "CLAUDE_CODE_EXECPATH"
             | "CLAUDE_CODE_MESSAGING_SOCKET"
             | "CLAUDE_CODE_MESSAGING_TOKEN"
+            | "CLAUDE_CODE_SESSION_ATTENDED"
+            | "CLAUDE_CODE_SSE_PORT"
+            // Set by Claude Code for the commands it runs, so a tool can tell
+            // it is driven by an agent. Inherited, it says that of every tab.
+            | "AI_AGENT"
             | "CLAUDE_PID"
             | "CLAUDE_JOB_DIR"
             | "CLAUDE_EFFORT"
@@ -25162,6 +26239,14 @@ fn settings_save(app: AppHandle, window: tauri::Window, s: Settings) -> Result<(
     let tray_on = tray_enabled_pref(&s);
     let profile = window_profile(&window);
     let disk = load_settings_in(&profile);
+    // only when they changed: one invalid secret on disk (a hand edit, or a
+    // check a newer build added) must not block every unrelated toggle.
+    if s.secrets != disk.secrets || s.roles != disk.roles {
+        let errs = secrets::validate(&s.secrets, &s.roles);
+        if !errs.is_empty() {
+            return Err(errs.join("; "));
+        }
+    }
     if s.docker_default_extra_mounts != disk.docker_default_extra_mounts {
         docker::refuse_data_dir_mounts(&s.docker_default_extra_mounts)?;
     }
@@ -25174,6 +26259,15 @@ fn settings_save(app: AppHandle, window: tauri::Window, s: Settings) -> Result<(
         if before != (root.cli_enabled, root.mcp_enabled, root.mcp_bind_address.clone(), root.mcp_port, root.lan_sharing_enabled) {
             save_settings_in(&ProfileId::Root, &root)?;
         }
+    }
+    // a removed secret's pasted value goes with it. Off the IPC thread: the
+    // Keychain can take its time.
+    let gone: Vec<String> = disk.secrets.iter()
+        .filter(|d| d.is_owned() && !s.secrets.iter().any(|n| n.id == d.id))
+        .map(|d| d.id.clone())
+        .collect();
+    if !gone.is_empty() {
+        std::thread::spawn(move || gone.iter().for_each(|id| broker::forget_owned(id)));
     }
     // Applies live: flipping the toggle in Settings shouldn't need a restart
     // to show/hide the menu-bar item, matching close_action/cli_enabled's
@@ -25285,6 +26379,7 @@ fn carry_account_fields(existing: &[Agent], incoming: &mut [Agent]) {
         a.default_account = prev.default_account.clone();
         a.adopted_account = prev.adopted_account.clone();
         a.auto_switch_account = prev.auto_switch_account;
+        a.account_labels = prev.account_labels.clone();
     }
 }
 
@@ -27121,6 +28216,12 @@ pub fn run() {
     if let Ok(dir) = global_dir() {
         panic_log::install(dir.join("logs").join("panic.log"));
     }
+    // Before any PTY is opened: a Dock-launched macOS app starts with a soft
+    // limit of 256 fds, which ~50 live terminals exhaust. Children inherit
+    // the raised limit (see fd_limit.rs).
+    if let Some((before, after)) = fd_limit::raise() {
+        dlog(&format!("[boot] RLIMIT_NOFILE soft {before} -> {after}"));
+    }
     // WebKitGTK 2.42+ defaults to its DMA-BUF renderer. It's the FAST path on
     // AMD/Intel (X11 and Wayland) and MUST stay on there: disabling it drops
     // the whole webview onto a slow copy/software compositing path and makes
@@ -27385,6 +28486,9 @@ pub fn run() {
             // an in-flight one picks it up.
             migrate_cli_enabled_default();
             migrate_hooks_auto_default();
+            // after the task migration, which it reads; before any spawn,
+            // which now reads only `task.role`.
+            migrate_task_roles_seeded();
             // The main window is created HERE (not in tauri.conf.json) so the
             // macOS traffic-light inset can be chosen per-OS. macOS Tahoe (26+)
             // stopped vertically centering the window controls in an overlay
@@ -27539,13 +28643,15 @@ pub fn run() {
             agent_usage::agent_context_devin,
             perf_boot_elapsed_ms,
             deep_link_take_pending,
-            agent_accounts, account_add, account_remove, account_set_default, account_set_auto_switch,
+            agent_accounts, account_add, account_remove, account_set_label, account_set_default, account_set_auto_switch,
             task_set_account, task_account,
             window_close_if_not_last,
             profiles_list, profiles_disable, profile_create, profile_close, profile_seeded_tasks_path, profile_update, profile_open, profile_delete_preview, profile_delete,
             projects_list, project_add, project_add_multi, project_set_members, project_update, project_remove, project_reorder, project_set_group,
             tasks_list, task_create, task_create_multi, task_update_members, task_open_repo, task_importable_worktrees, task_import_worktree, task_archive, task_set_cli, task_set_custom_command, task_set_resume_override, task_set_sandbox, task_set_docker, task_set_yolo,
-            sandbox_available, sandbox_deny_counts, sandbox_recent_denied_hosts, sandbox_recent_denied_paths, sandbox_access_counts, sandbox_recent_access_hosts, sandbox_recent_access_paths, sandbox_set_monitor_filters, task_sandbox_add_allowed_host, task_sandbox_add_allowed_path, task_sandbox_remove_allowed_path, agent_sandbox_add_allowed_path, agent_sandbox_add_allowed_host, task_recent_denials,
+            task_set_role, secret_probe, secret_store, secret_forget, secrets_protected_available, secrets_gh_accounts, secrets_exposed, secrets_test_request, env_guard_list, env_guard_save, agent_set_pass_env,
+            broker_counts, broker_events, broker_all_events, broker_set_paused, broker_allow, broker_unallow,
+            sandbox_available, sandbox_deny_counts, sandbox_recent_denied_hosts, sandbox_recent_denied_paths, sandbox_access_counts, sandbox_recent_access_hosts, sandbox_recent_access_paths, sandbox_set_monitor_filters, task_sandbox_add_allowed_host, task_sandbox_add_allowed_path, sandbox_remove_allowed, agent_sandbox_add_allowed_path, agent_sandbox_add_allowed_host, task_recent_denials,
             repo_config_load, repo_config_load_at, repo_config_save, repo_config_scaffold, repo_config_add_allowed_host, repo_config_add_allowed_path,
 
             task_reorder,
@@ -27588,6 +28694,7 @@ pub fn run() {
             automation::automation_result,
             automation::automation_armed,
             pty_alive,
+            pty_children,
             pty_attached,
             cli_server::cli_rpc_result,
             cli_server::cli_rpc_ready,
@@ -28178,6 +29285,68 @@ mod tests {
 
     #[cfg(unix)] // builds its home with a unix symlink
     #[test]
+    fn role_dropped_when_the_keychain_block_stops_applying() {
+        if !sandbox::available() { return; }
+        // the create paths and task_set_sandbox / task_set_docker all run
+        // this after applying the new sandbox shape.
+        let with = |mode, block, docker| {
+            let mut t = Task {
+                sandbox_mode: Some(mode), sandbox_block_keychain: block, docker_sandbox_enabled: docker,
+                role: Some("r".into()), ..Default::default()
+            };
+            t.drop_role_unless_keychain_blocked();
+            t.role
+        };
+        assert_eq!(with(SandboxMode::Enforce, true, false), Some("r".into()));
+        assert_eq!(with(SandboxMode::EnforceFs, true, false), Some("r".into()));
+        // dropped to No secrets, never to unset: unset would be re-seeded.
+        let none = Some(String::new());
+        assert_eq!(with(SandboxMode::Enforce, false, false), none, "block cleared");
+        assert_eq!(with(SandboxMode::Monitor, true, false), none);
+        assert_eq!(with(SandboxMode::Off, true, false), none);
+        assert_eq!(with(SandboxMode::Enforce, true, true), none, "switched to Docker");
+        // a role never set stays unset, so create still seeds it.
+        let mut fresh = Task { sandbox_mode: Some(SandboxMode::Off), ..Default::default() };
+        fresh.drop_role_unless_keychain_blocked();
+        assert_eq!(fresh.role, None);
+    }
+
+    #[test]
+    fn create_args_carry_role() {
+        let a: CreateTaskArgs = serde_json::from_str(r#"{"project_id":"p","name":"n","cli":null,"base_branch":null,"branch":null,"role":"r"}"#).unwrap();
+        assert_eq!(a.role.as_deref(), Some("r"));
+        let m: CreateMultiArgs = serde_json::from_str(r#"{"project_id":"p","name":"n","cli":null,"branch":null,"base_branch":null,"members":[],"role":""}"#).unwrap();
+        assert_eq!(m.role.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn a_broker_key_names_its_task_and_a_shell_only_takes_role_scope() {
+        assert_eq!(broker_key_task("t1", "task"), Ok("t1"));
+        assert_eq!(broker_key_task("t1", "role"), Ok("t1"));
+        let k = broker::shell_key("t1", "tab");
+        assert_eq!(broker_key_task(&k, "role"), Ok("t1"));
+        assert!(broker_key_task(&k, "task").is_err(), "a shell has no task allows");
+    }
+
+    #[test]
+    fn task_set_role_gate() {
+        if !sandbox::available() { return; }
+        let roles = vec![secrets::Role { id: "r".into(), ..Default::default() }];
+        let blocked = Task { sandbox_mode: Some(SandboxMode::Enforce), sandbox_block_keychain: true, ..Default::default() };
+        let open = Task { sandbox_mode: Some(SandboxMode::Enforce), ..Default::default() };
+        assert_eq!(checked_role(&blocked, Some("r".into()), &roles), Ok(Some("r".into())));
+        assert!(checked_role(&blocked, Some("gone".into()), &roles).is_err());
+        assert!(checked_role(&open, Some("r".into()), &roles).is_err(), "no block, no role");
+        // the refusal names what is saved, not just what is needed
+        let e = checked_role(&open, Some("r".into()), &roles).unwrap_err();
+        assert!(e.contains("its saved sandbox is Enforcing with the Keychain block off"), "{e}");
+        // inherit and explicit No secrets are always fine.
+        assert_eq!(checked_role(&open, None, &roles), Ok(Some(String::new())), "stored as No secrets, never unset");
+        assert_eq!(checked_role(&open, Some(String::new()), &roles), Ok(Some(String::new())));
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn under_keychains_matches_both_forms_and_nothing_else() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join("real/Library/Keychains/sub")).unwrap();
@@ -30002,6 +31171,120 @@ mod tests {
     }
 
     #[test]
+    fn an_account_gets_the_primarys_claude_mcp_servers() {
+        use serde_json::json;
+        let from = json!({
+            "oauthAccount": {"emailAddress": "alice@example.com"},
+            "mcpServers": {"linear": {"type": "http", "url": "https://mcp.example.com"}},
+            "projects": {
+                "/Users/u/repo": {"mcpServers": {"db": {"command": "db-mcp"}}, "enabledMcpjsonServers": ["x"]},
+                "/Users/u/plain": {"hasTrustDialogAccepted": true},
+            },
+        });
+        let mut to = json!({
+            "oauthAccount": {"emailAddress": "bob@example.com"},
+            "mcpServers": {"mine": {"command": "own"}},
+        });
+        let mut synced = json!({});
+        assert!(crate::merge_claude_mcp(&from, &mut to, &mut synced));
+        assert_eq!(to["oauthAccount"]["emailAddress"], "bob@example.com", "identity never crosses");
+        assert_eq!(to["mcpServers"]["linear"]["url"], "https://mcp.example.com");
+        assert_eq!(to["mcpServers"]["mine"]["command"], "own", "the account's own server stays");
+        assert_eq!(to["projects"]["/Users/u/repo"]["mcpServers"]["db"]["command"], "db-mcp");
+        assert_eq!(to["projects"]["/Users/u/repo"]["enabledMcpjsonServers"][0], "x");
+        assert!(to["projects"].get("/Users/u/plain").is_none(), "no entry for a project with no MCP state");
+
+        // Unchanged primary: nothing to write.
+        assert!(!crate::merge_claude_mcp(&from, &mut to, &mut synced));
+
+        // Removed from the primary: removed here, and only what we copied.
+        let from = json!({"mcpServers": {}, "projects": {}});
+        assert!(crate::merge_claude_mcp(&from, &mut to, &mut synced));
+        assert!(to["mcpServers"].get("linear").is_none());
+        assert_eq!(to["mcpServers"]["mine"]["command"], "own");
+        assert!(to["projects"]["/Users/u/repo"]["mcpServers"].get("db").is_none());
+    }
+
+    #[test]
+    fn an_account_label_renames_what_is_shown_and_never_the_store() {
+        let mut a = crate::default_agents().into_iter().find(|a| a.id == "claude").unwrap();
+        a.accounts = vec!["work".into(), "personal".into()];
+        crate::set_account_label(&mut a, "work", "Acme seat").unwrap();
+        assert_eq!(a.accounts, vec!["work", "personal"], "the name is the store; it never moves");
+        assert_eq!(a.account_labels["work"], "Acme seat");
+        // Clashes with another account's shown text, label or bare name.
+        assert!(crate::set_account_label(&mut a, "personal", "acme SEAT").is_err());
+        assert!(crate::set_account_label(&mut a, "personal", "Work").is_ok());
+        assert!(crate::set_account_label(&mut a, "nope", "x").is_err());
+        // Empty, or the name itself, clears it.
+        crate::set_account_label(&mut a, "work", "").unwrap();
+        assert!(!a.account_labels.contains_key("work"));
+        // A form save carries labels across, like the other account fields.
+        crate::set_account_label(&mut a, "work", "Acme seat").unwrap();
+        let mut incoming = vec![crate::Agent { account_labels: Default::default(), ..a.clone() }];
+        crate::carry_account_fields(std::slice::from_ref(&a), &mut incoming);
+        assert_eq!(incoming[0].account_labels["work"], "Acme seat");
+    }
+
+    #[test]
+    fn an_account_gets_only_the_mcp_sign_ins_it_lacks() {
+        use serde_json::json;
+        let from = json!({
+            "claudeAiOauth": {"accessToken": "PRIMARY_LOGIN"},
+            "mcpOAuth": {"linear|aa": {"accessToken": "P1"}, "notion|bb": {"accessToken": "P2"}},
+        });
+        let mut to = json!({
+            "claudeAiOauth": {"accessToken": "ACCOUNT_LOGIN"},
+            "mcpOAuth": {"notion|bb": {"accessToken": "OWN"}},
+        });
+        assert_eq!(crate::merge_mcp_oauth(&from, &mut to), 1);
+        assert_eq!(to["claudeAiOauth"]["accessToken"], "ACCOUNT_LOGIN", "the login never crosses");
+        assert_eq!(to["mcpOAuth"]["linear|aa"]["accessToken"], "P1");
+        assert_eq!(to["mcpOAuth"]["notion|bb"]["accessToken"], "OWN", "a working sign-in is never replaced");
+        assert_eq!(crate::merge_mcp_oauth(&from, &mut to), 0, "nothing new, nothing to write");
+        // An account with no MCP map yet gets one.
+        let mut bare = json!({"claudeAiOauth": {}});
+        assert_eq!(crate::merge_mcp_oauth(&from, &mut bare), 2);
+    }
+
+    /// Real Keychain round trip on a throwaway item. Local only (CI has no
+    /// login keychain): `cargo test -- --ignored keychain_round_trip`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore]
+    fn keychain_round_trip() {
+        use serde_json::json;
+        let env = std::env::temp_dir().join(format!("termic-kc-{}", Uuid::new_v4()));
+        let svc = crate::claude_cred::service(Some(&env));
+        let sec = |args: &[&str]| std::process::Command::new("/usr/bin/security").args(args).output().unwrap();
+        assert!(sec(&["add-generic-password", "-a", "termic-test", "-s", &svc, "-w", r#"{"claudeAiOauth":{}}"#]).status.success());
+        let mut v = crate::claude_cred::read(&env, Some(&env)).expect("reads the item");
+        let big = "x".repeat(6000); // past security -i's line limit
+        v["mcpOAuth"] = json!({"s|h": {"accessToken": big}});
+        let res = crate::claude_cred::write(&env, Some(&env), &v);
+        let back = crate::claude_cred::read(&env, Some(&env));
+        let items = String::from_utf8_lossy(&sec(&["find-generic-password", "-s", &svc]).stdout).matches("\"svce\"").count();
+        let _ = sec(&["delete-generic-password", "-s", &svc]);
+        res.unwrap();
+        assert_eq!(back.unwrap()["mcpOAuth"]["s|h"]["accessToken"].as_str().unwrap().len(), 6000);
+        assert_eq!(items, 1, "updated in place, not a second item");
+    }
+
+    #[test]
+    fn the_keychain_service_name_matches_claudes() {
+        // claude hashes the CLAUDE_CONFIG_DIR string it was given; a wrong
+        // name would read nothing (safe) or write a stray item (not).
+        assert_eq!(crate::claude_cred::service(None), "Claude Code-credentials");
+        // sha256("/Users/u/.claude-work") computed independently.
+        let expect = {
+            use sha2::{Digest, Sha256};
+            let h = Sha256::digest(b"/Users/u/.claude-work");
+            format!("Claude Code-credentials-{:02x}{:02x}{:02x}{:02x}", h[0], h[1], h[2], h[3])
+        };
+        assert_eq!(crate::claude_cred::service(Some(std::path::Path::new("/Users/u/.claude-work"))), expect);
+    }
+
+    #[test]
     fn wiring_a_store_twice_is_a_no_op() {
         let tmp = std::env::temp_dir().join(format!("termic-farm-{}", Uuid::new_v4()));
         let primary = tmp.join("primary");
@@ -31441,6 +32724,57 @@ mod tests {
         assert_eq!(seen, shell_env::spawn_env().0);
     }
 
+    /// opencode 1 pads `session list` with spaces, opencode 2 separates it
+    /// with tabs (`id\ttitle\tupdated`). Synthetic fixtures in each shape; the
+    /// tab one is the hard case, because the title has spaces in it.
+    #[cfg(unix)]
+    #[test]
+    fn the_opencode_capture_reads_both_session_list_formats() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("v1"),
+            "ses_1a2b3c4d  Fix the login form           10/29/2026, 9:00 AM\n\
+             ses_0f0e0d0c  Older session                10/28/2026, 8:00 AM\n").unwrap();
+        fs::write(dir.path().join("v2"),
+            "ses_9z8y7x6w\tFix the login form\t11/4/2026, 1:20:08 AM\n\
+             ses_5v4u3t2s\tUntitled session\t11/3/2026, 7:00:00 PM\n").unwrap();
+        let cwd = dir.path().to_string_lossy().into_owned();
+        let run = |cmd: &str, file: &str| {
+            run_capture_command_blocking(&cmd.replace("opencode session list", &format!("cat {file}")), &cwd, None, false)
+                .unwrap()
+        };
+        assert_eq!(run(OPENCODE_CAPTURE, "v1"), "ses_1a2b3c4d");
+        assert_eq!(run(OPENCODE_CAPTURE, "v2"), "ses_9z8y7x6w");
+        // The control: the command this replaced, on opencode 2's output,
+        // captured the id glued to the title's first word.
+        assert_eq!(run(OPENCODE_CAPTURE_V1, "v1"), "ses_1a2b3c4d");
+        assert_eq!(run(OPENCODE_CAPTURE_V1, "v2"), "ses_9z8y7x6w\tFix");
+        // No session yet: nothing, not a header word.
+        fs::write(dir.path().join("none"), "").unwrap();
+        assert_eq!(run(OPENCODE_CAPTURE, "none"), "");
+    }
+
+    #[test]
+    fn the_opencode_capture_upgrades_only_when_it_is_still_the_shipped_one() {
+        crate::test_support::with_scratch_data_dir(|_| {
+            let set = |cmd: &str| {
+                let mut s = crate::load_settings_in(&ProfileId::Root);
+                let oc = s.agents.iter_mut().find(|a| a.id == "opencode").unwrap();
+                oc.post_launch_capture = Some(PostLaunchCapture { command: cmd.into() });
+                crate::save_settings_in(&ProfileId::Root, &s).unwrap();
+            };
+            let get = || {
+                crate::load_settings_in(&ProfileId::Root).agents.into_iter()
+                    .find(|a| a.id == "opencode").unwrap()
+                    .post_launch_capture.unwrap().command
+            };
+            set(OPENCODE_CAPTURE_V1);
+            assert_eq!(get(), OPENCODE_CAPTURE);
+            // A command the user wrote is theirs.
+            set("opencode session list --format json | jq -r '.[0].id'");
+            assert_eq!(get(), "opencode session list --format json | jq -r '.[0].id'");
+        });
+    }
+
     #[test]
     fn capture_reports_stdout_only() {
         // A "command not found" (the GH #243 failure) writes to stderr and
@@ -31477,6 +32811,19 @@ mod tests {
             normalized_resume_override(Some("resume --last".into())),
             Some("resume --last".to_string()),
         );
+    }
+
+    #[test]
+    fn session_id_must_stay_an_id() {
+        // blank is no seed, and real ids of every agent that takes one pass
+        for ok in [None, Some(""), Some("  "), Some("0b6e5a1c-7f2d-4c1e-9a8b-3d2f1e0c9b7a"), Some("ses_01JABCDEF")] {
+            assert!(check_session_id(ok).is_ok(), "{ok:?}");
+        }
+        // a flag once substituted into resume_id_args, or a path out of the
+        // transcripts dir once joined as `{id}.jsonl`
+        for bad in ["--dangerously-skip-permissions", "-x", "../../etc/passwd", "a/b", "a\\b", "..", "a b"] {
+            assert!(check_session_id(Some(bad)).is_err(), "{bad}");
+        }
     }
 
     // ── the editor's binary-file contract ──
@@ -31718,6 +33065,52 @@ mod tests {
         let mut s = Settings { cli_enabled: false, cli_default_migrated: true, ..Default::default() };
         assert!(!apply_cli_default_migration(&mut s), "must not rewrite settings");
         assert!(!s.cli_enabled, "an explicit opt-out has to survive relaunch");
+    }
+
+    // "defaults seed, tasks own": the migration writes down what a roleless
+    // task resolves to today, so its next spawn is unchanged, and a task that
+    // already holds a role (including No secrets) is left alone.
+    #[test]
+    fn role_seed_migration_writes_todays_resolution() {
+        let proj = |id: &str, def: Option<&str>| Project { id: id.into(), default_role: def.map(Into::into), ..Default::default() };
+        let agent = |id: &str, def: Option<&str>| Agent { id: id.into(), default_role: def.map(Into::into), ..default_agents()[0].clone() };
+        let task = |id: &str, project: &str, role: Option<&str>| Task {
+            id: id.into(), project_id: project.into(), cli: "claude".into(), role: role.map(Into::into), ..Default::default()
+        };
+        let projects = [proj("with-default", Some("deploy")), proj("no-secrets", Some("")), proj("each-agent", None)];
+        let agents = vec![agent("claude", Some("reviewer"))];
+        let mut tasks = vec![
+            task("a", "with-default", None),
+            task("b", "no-secrets", None),
+            task("c", "each-agent", None),
+            task("d", "each-agent", Some("")),
+            task("e", "with-default", Some("other")),
+        ];
+        let changed = seed_unset_roles(&mut tasks, &projects, |_| agents.clone());
+        assert_eq!(changed, ["a", "b", "c"]);
+        let roles: Vec<_> = tasks.iter().map(|t| t.role.as_deref()).collect();
+        assert_eq!(roles, [Some("deploy"), Some(""), Some("reviewer"), Some(""), Some("other")]);
+        // no agent default either: No secrets.
+        let mut bare = vec![task("f", "each-agent", None)];
+        seed_unset_roles(&mut bare, &projects, |_| Vec::new());
+        assert_eq!(bare[0].role.as_deref(), Some(""));
+        // idempotent.
+        assert!(seed_unset_roles(&mut tasks, &projects, |_| agents.clone()).is_empty());
+    }
+
+    // every create path seeds a roleless task. A source guard, because these
+    // commands need an AppHandle and a real project on disk.
+    #[test]
+    fn every_task_create_path_seeds_the_role() {
+        let src = include_str!("lib.rs");
+        for func in ["fn task_open_repo(", "fn task_import_worktree(", "fn task_create_sync(", "fn task_create_multi_sync("] {
+            let body = src.split_once(func).unwrap_or_else(|| panic!("{func} exists")).1;
+            let body = &body[..body.find("\n}\n").expect("function ends")];
+            let drop = body.find("task.drop_role_unless_keychain_blocked();").unwrap_or_else(|| panic!("{func} drops a gated role"));
+            let seed = body.find("seed_task_role(&mut task);").unwrap_or_else(|| panic!("{func} does not seed the role"));
+            let save = body.find("save_task(&task)").unwrap_or_else(|| panic!("{func} saves"));
+            assert!(drop < seed && seed < save, "{func}: seed after the drop and before the save");
+        }
     }
 
     #[test]
@@ -32195,6 +33588,21 @@ mod tests {
         for k in ["CLAUDE_CONFIG_DIR", "ANTHROPIC_API_KEY", "CLAUDE_CODE_NO_FLICKER", "PATH"] {
             assert!(!agent_session_marker(k), "{k} must still be inherited");
         }
+    }
+
+    /// A dropped var must be gone from the builder, not just left uncopied:
+    /// `CommandBuilder::new` already holds the whole process env, which is
+    /// how the session markers above reached spawned agents anyway.
+    #[test]
+    fn inherit_env_removes_what_it_drops() {
+        let name = "TERMIC_TEST_INHERIT_ENV_DROPPED";
+        std::env::set_var(name, "x");
+        let mut cmd = CommandBuilder::new("true");
+        assert!(cmd.get_env(name).is_some(), "control: the builder starts from the process env");
+        inherit_env(&mut cmd, |k, _| k == name);
+        assert!(cmd.get_env(name).is_none());
+        assert!(cmd.get_env("PATH").is_some(), "everything else is kept");
+        std::env::remove_var(name);
     }
 
     #[test]
@@ -34791,6 +36199,58 @@ mod tests {
         (dir, work, colleague)
     }
 
+    /// The checkout fixture, with the colleague's branch also published as
+    /// GitHub's `refs/pull/7/head`, so `work` can fetch PR #7 from a local
+    /// "forge". Returns the PR head's sha.
+    fn pr_fixture() -> (tempfile::TempDir, PathBuf, PathBuf, String) {
+        let (dir, work, colleague) = checkout_fixture();
+        git_run(&colleague, &["push", "origin", "alice/fix:refs/pull/7/head"]);
+        let head = git(&["rev-parse", "alice/fix"], &colleague).unwrap().trim().to_string();
+        (dir, work, colleague, head)
+    }
+
+    fn sha(repo: &Path, r: &str) -> String {
+        git(&["rev-parse", r], repo).unwrap().trim().to_string()
+    }
+
+    #[test]
+    fn a_pr_is_fetched_into_its_own_branch_name() {
+        let (_dir, work, _c, head) = pr_fixture();
+        let got = fetch_pr_branch_in(&work, "origin", None, 7, "alice/fix", false).unwrap();
+        assert_eq!(got, "alice/fix", "the PR's own name, not pr-7");
+        assert_eq!(sha(&work, "refs/heads/alice/fix"), head);
+        // a fork's name is not ours to claim.
+        let fork = fetch_pr_branch_in(&work, "origin", None, 7, "alice/fix", true).unwrap();
+        assert_eq!(fork, "pr-7-alice/fix");
+    }
+
+    #[test]
+    fn an_existing_pr_branch_is_reused_and_only_fast_forwarded() {
+        // behind the PR: moved up to it, same name (this used to hand out pr-7).
+        let (_dir, work, colleague, _) = pr_fixture();
+        git_run(&work, &["branch", "alice/fix", "origin/main"]);
+        git_commit_file(&colleague, "more.txt", "more\n", "more");
+        git_run(&colleague, &["push", "-f", "origin", "alice/fix:refs/pull/7/head"]);
+        let head = sha(&colleague, "alice/fix");
+        assert_eq!(fetch_pr_branch_in(&work, "origin", None, 7, "alice/fix", false).unwrap(), "alice/fix");
+        assert_eq!(sha(&work, "refs/heads/alice/fix"), head, "a branch behind the PR is fast-forwarded");
+        assert!(git(&["rev-parse", "--verify", "--quiet", "refs/heads/pr-7"], &work).is_err(), "no second branch");
+
+        // with local commits: left exactly as it was, still the one used.
+        git_run(&work, &["checkout", "-q", "alice/fix"]);
+        git_commit_file(&work, "mine.txt", "mine\n", "mine");
+        git_run(&work, &["checkout", "-q", "main"]);
+        let mine = sha(&work, "refs/heads/alice/fix");
+        assert_eq!(fetch_pr_branch_in(&work, "origin", None, 7, "alice/fix", false).unwrap(), "alice/fix");
+        assert_eq!(sha(&work, "refs/heads/alice/fix"), mine, "local commits are never dropped");
+    }
+
+    #[test]
+    fn a_pr_that_cannot_be_fetched_and_has_no_branch_is_an_error() {
+        let (_dir, work, _c, _) = pr_fixture();
+        assert!(fetch_pr_branch_in(&work, "origin", None, 99, "nobody/branch", false).is_err());
+    }
+
     fn local_branches(repo: &Path) -> String {
         git(&["for-each-ref", "--format=%(refname) %(objectname)", "refs/heads"], repo).unwrap()
     }
@@ -37303,6 +38763,44 @@ filename f.rs
     }
 
     #[test]
+    fn a_plain_shell_plan_changes_nothing() {
+        // the invariant: no shell_secrets = no lookup, no broker, no proxy,
+        // no env, no root registration. Everything that does any of those
+        // in pty_spawn hangs off the plan this returns.
+        let shell: SpawnArgs = serde_json::from_value(serde_json::json!({
+            "cwd": "/w", "cmd": "/bin/zsh", "args": ["-l"],
+            "role": { "task_id": "t1", "tab_id": "tab-1", "kind": "aux" },
+            "owner": { "task_id": "t1", "tab_id": "tab-1", "kind": "aux" },
+        })).unwrap();
+        let mut looked = false;
+        let plan = plan_shell_secrets(&shell, true, |_| { looked = true; None });
+        assert!(matches!(plan, Ok(None)));
+        assert!(!looked, "a plain shell reads no settings");
+    }
+
+    #[test]
+    fn a_shell_role_resolves_or_refuses() {
+        let args = |extra: serde_json::Value| -> SpawnArgs {
+            let mut v = serde_json::json!({
+                "cwd": "/w", "cmd": "/bin/zsh", "args": [],
+                "shell_secrets": { "task_id": "t1", "tab_id": "tab-1", "role": "dep" },
+            });
+            v.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            serde_json::from_value(v).unwrap()
+        };
+        let role = secrets::Role { id: "dep".into(), name: "Deploy".into(), ..Default::default() };
+        let found = |_: &str| Some((Task { id: "t1".into(), ..Default::default() }, vec![role.clone()], vec![]));
+        let plan = plan_shell_secrets(&args(serde_json::json!({})), true, found).unwrap().unwrap();
+        assert_eq!(plan.key, broker::shell_key("t1", "tab-1"));
+        assert_eq!(plan.setup.role.name, "Deploy");
+        // with task_id (an agent spawn), off macOS, a gone role or task: errors.
+        assert!(plan_shell_secrets(&args(serde_json::json!({ "task_id": "t1" })), true, found).is_err());
+        assert!(plan_shell_secrets(&args(serde_json::json!({})), false, found).is_err());
+        assert!(plan_shell_secrets(&args(serde_json::json!({})), true, |_| Some((Task::default(), vec![], vec![]))).is_err());
+        assert!(plan_shell_secrets(&args(serde_json::json!({})), true, |_| None).is_err());
+    }
+
+    #[test]
     fn reserved_names_rejected() {
         for n in ["TERMIC_PORT", "PATH", "HOME", "CONDUCTOR_PORT", "TERM",
                   "PORT", "COLORTERM", "TERM_PROGRAM", "TERM_PROGRAM_VERSION",
@@ -37794,6 +39292,27 @@ filename f.rs
         assert!(fs::symlink_metadata(&link).unwrap().file_type().is_symlink(),
             "the link itself must survive");
         assert_eq!(fs::read_to_string(&target).unwrap(), "new", "target must be created");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_atomic_private_is_owner_only_new_or_replacing_a_looser_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir().unwrap();
+        let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        let fresh = dir.path().join(".credentials.json");
+        write_atomic_private(&fresh, b"SECRET").unwrap();
+        assert_eq!(mode(&fresh), 0o600, "a new secret file must not take the umask default");
+        let loose = dir.path().join("loose.json");
+        fs::write(&loose, b"old").unwrap();
+        fs::set_permissions(&loose, fs::Permissions::from_mode(0o644)).unwrap();
+        write_atomic_private(&loose, b"SECRET").unwrap();
+        assert_eq!(mode(&loose), 0o600, "a looser old mode must not carry over");
+        assert_eq!(fs::read(&loose).unwrap(), b"SECRET");
+        // control: the plain write keeps the looser mode it found.
+        fs::set_permissions(&loose, fs::Permissions::from_mode(0o644)).unwrap();
+        write_atomic(&loose, b"plain").unwrap();
+        assert_eq!(mode(&loose), 0o644);
     }
 
     #[test]

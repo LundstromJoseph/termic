@@ -112,7 +112,7 @@ makes that page disagree with the twelve beside it.
 
 A feature is Experimental when it is off by default **because we are not yet confident in it**, with a stated way out. Off for safety (remote images), off for taste (copy on select), and off as policy (sandbox permission bypass) are none of them experimental: those defaults are permanent, and labelling them experimental makes the label meaningless.
 
-It shows as a badge, on the rail item and next to the page title, not as a separate Labs page. The badge is dropped when the feature graduates: it survived a release with no bug reports against it and has e2e coverage. Graduating drops the badge and gets a changelog line; it does not move the page, because a settings page that moves twice is worse than one labelled honestly. A dedicated Experimental page only earns its place when several features qualify at once, which today they do not (the residents are Sync and the Docker sandbox). Graduated so far: the CLI in 0.26.0, dropping the badge and flipping `cli_enabled` to default ON in the same change, since a badge that says "still settling" alongside a setting we ship enabled reads as a contradiction; and Profiles, whose badge came off the rail item and the page title together while the feature stays dormant until a profile is created.
+It shows as a badge, on the rail item and next to the page title, not as a separate Labs page. The badge is dropped when the feature graduates: it survived a release with no bug reports against it and has e2e coverage. Graduating drops the badge and gets a changelog line; it does not move the page, because a settings page that moves twice is worse than one labelled honestly. A dedicated Experimental page only earns its place when several features qualify at once, which today they do not (the residents are Sync, Secrets and the Docker sandbox). Graduated so far: the CLI in 0.26.0, dropping the badge and flipping `cli_enabled` to default ON in the same change, since a badge that says "still settling" alongside a setting we ship enabled reads as a contradiction; and Profiles, whose badge came off the rail item and the page title together while the feature stays dormant until a profile is created.
 
 ## Settings > Sync (config sync, phase 1)
 
@@ -1379,7 +1379,8 @@ task unchecked — check = add, with the same Main-checkout/Worktree toggle and
 branch/base fields the New Task dialog shows; on a live main-checkout task
 additions always link). Sandbox and Resume-args-override are the SAME fields
 as New Task — the real `SandboxPicker` (with the per-mode config pane to the
-right, same two-column layout New Task uses) and the inline override field —
+right, holding the same `SandboxPresetRow` and lists as New Task's Isolation
+pane) and the inline override field —
 saved through the same commands their dedicated dialogs use (`task_set_sandbox`
 with `kill_live = false`, `task_set_docker` behind its mounted-agents confirm,
 `task_set_resume_override`). The restart affordance those dialogs have becomes
@@ -1415,8 +1416,8 @@ open issues" and mean something else entirely.
 
 ### The issue picker is a COLUMN, not a field
 
-It sits beside the form as a second pane, the same treatment the PR picker and
-the sandbox config get.
+It sits beside the fields in the Task pane, like every source with a
+picker (see "The new-task dialog is a rail of sections at ONE size").
 
 It was inline above the form first. That put a 220px scrolling list inside a
 dialog you were already scrolling, and hid the effect of a pick below the fold.
@@ -1479,26 +1480,84 @@ sequence number so a slow answer for a scope you already left cannot
 overwrite the one you picked. The column starts back on All every time it
 is entered.
 
-### The new-task dialog has TWO columns and TWO widths
+### The new-task dialog is a rail of sections at ONE size
 
-Left is the form. Right is whatever context the chosen source needs (the issue
-list, or the PR picker) with the sandbox config stacked **under** it. Nothing
-gets a third column.
+A rail on the left, one pane per section on the right:
 
-The dialog's width depends on exactly one thing: whether that right column
-exists. `max-w-xl` without it, `max-w-[72rem]` with it.
+- **Task**: task type, source, name, branch (or the branch to check out),
+  base, initial prompt. A source with a picker (existing branch, import,
+  issue, PR) puts its list in a column beside these fields inside the Task
+  pane, because a pick fills them, and the list belongs next to what it
+  fills. Entering a source moves focus to the step it needs: Branch to its
+  input, import to the first worktree.
+- **Repos** (multi-repo only): members, set all, member sets, live warnings.
+- **Agent**: default CLI, YOLO, then the launch options (agents only, never
+  a terminal): extra args (`Task.agent_args`, split like the resume
+  override, quotes keep a value whole), a session to resume (GH #169, the
+  dialog's `termic new --resume`; only for an agent with `resume_id_args`,
+  and not for multi-repo, whose create takes no session id) and the resume
+  args override. All shown open, not behind a toggle: the pane has room.
+- **Isolation**: the sandbox (`SandboxPicker` `layout="row"`, one segmented
+  strip, off / monitor / enforce FS / enforce / Docker, with the picked
+  mode's description under it), its config, Docker mounts, Keychain.
+- **Secrets** (only once a role exists): role picker and secrets summary.
+  The rail marks it "Exp", the same experimental status the role picker
+  carries.
 
-Both rules are there because the obvious composition is wrong. Each pane used
-to own a column and carry its own `ml-8 border-l pl-6`, and the width was a
-six-way ternary over (issue AND sandbox), (issue OR sandbox) x (multi, import,
-checkout). So the dialog jumped between four visible widths as you clicked
-through the sources, and when the PR picker arrived it was not in the matrix at
-all, which is how a FOURTH column appeared. A per-pane column does not scale:
-every new source is another multiplication. A single stacked right column is
-the same layout whatever is in it.
+It opens on Task every time, and a section that goes away falls back to
+Task. Each rail entry shows its section's current
+value (`rail-<id>-sub`: "Worktree, new branch", "FakeAgent, YOLO on",
+"Enforcing, Keychain blocked", the role name) so every answer is on screen
+without opening its pane, and a dot (`rail-warn`) when the section holds a
+warning: red on Agent when YOLO is on with nothing caging the agent, amber
+for the rest (an unknown agent, YOLO under a files-only cage with the
+network open, a branch the name cannot make, an unknown base, members that
+run live). A warning never sits unannounced in a pane you did not open, and
+the dot never points at one the pane is not showing: each warning is one
+value (`warnSlug`, `warnBase`, ...) that the pane renders and the dot reads.
+The agent's own YOLO flags typed into Extra args count as YOLO on. A resume
+override wins outright at spawn (`spawnArgsForCli`), so while one is set,
+"Resume a session" is disabled, says why, and is not sent. Every open starts
+on Task, reset in the member rows' layout effect so a reopen never paints a
+frame of the section it was closed on.
+Up / down walk the rail. `#new-task-form[data-section]` says which pane
+shows.
 
-One fixed width for both cases is not the answer either. The plain form is one
-narrow column, and at 72rem it sprawls across an empty dialog.
+The panes stay MOUNTED and toggle `hidden` (display: none, never
+`visibility`), so a typed PR number, a filter or a fetched list survives a
+section switch. A field in a hidden pane cannot take focus, so jumping to a
+missing field shows its pane first, synchronously (`flushSync`).
+
+The size is fixed (`h-[min(calc(100vh-4rem),54rem)] max-w-[82rem]`) and
+depends on nothing. It used to be a ternary over the sources and the
+sandbox, so the dialog jumped under the pointer as you clicked through them. Each pane scrolls on its own; in
+the Task pane the fields and the picker each scroll on their own from a
+1100px viewport and stack below it. Flex, not grid: WebKit mis-sizes grid
+tracks inside an overflow container on fractionally scaled displays (see
+`Dialog.tsx`).
+
+**Explanations go behind an (i)** (`ui/InfoTip.tsx`, on `Tip`, the one (i)
+in the app; its `aria-label` is the text, so a screen reader and a spec get
+it without a hover). It is a focusable span, not a button, so it can sit in
+a `<label>` without becoming the labelled control. `Field` is a
+`role="group"` named by its label. `Field` takes `info` for that and `hint` for text that must stay on
+screen: warnings, and why something is off (YOLO held for a link or an
+issue, YOLO on and uncaged). The main checkout's description goes behind
+the (i) but its warning, "Edits land on your real files.", stays as a line.
+
+**A disabled Create says why.** The button sits in a wrapper that takes the
+hover and the click a disabled button cannot (`Button` is
+`pointer-events: none` when disabled): the tooltip names the missing thing
+(a worktree to import, a branch to check out, a name, a branch name) and the
+click focuses that field. `data-blocked` on the button names it for specs.
+**It opens with Name focused** through `onOpenAutoFocus`, never Radix's
+first tabbable: that is the Task type (i), whose tooltip opens on focus and
+eats the first Escape (docs/gotchas.md). Cmd+Enter while blocked does what
+the click does: it focuses the missing field, from whichever section.
+**Cmd/Ctrl+Enter creates** from any field in any section, the prompt
+included, where plain
+Enter stays a newline. It is a key handler on the form, not a registered
+shortcut: like the command dialogs, it only means anything inside this one.
 
 ### A pick fills the form; it does not send anything
 
@@ -1542,8 +1601,32 @@ the default, not to empty. The default never holds YOLO back: the user wrote
 it, so only a link's or issue's text does.
 
 A plain shell or registry terminal has no prompt box, so the composed prompt has
-nowhere to go: the column says so at the point the issue was chosen rather than
+nowhere to go: the picker says so at the point the issue was chosen rather than
 letting Create drop it silently.
+
+## One Secrets role picker
+
+Every place a role is chosen draws the same `RoleOptions` radio list
+(`components/secretsUi/RolePicker.tsx`): a row per option with a radio, the
+role's dot (dashed for No secrets), its name in normal case and its secrets
+as the summary. The task dialogs (New Task, Edit, Schedule) head it
+"This task runs as", and the cage chip's settings popover changes it on a
+live task. The Sandbox dialog has no role picker: it only warns, above Save, when
+its own change (leaving Enforce, unblocking the Keychain, Docker) would drop
+the task's role, which `task_set_sandbox` does; Settings > Agents "New <agent> tasks start as"; a
+project's Secrets tab "New tasks here start as", with a first row "Each
+agent's choice" (`null`) that names what each agent would give a new task.
+Rows carry `data-role-option` (`none`, `inherit`, or the role id).
+
+On a live task the role is changed from the status bar's cage chip, in its
+settings popover (see "The cage chip (status bar)").
+
+Defaults seed, tasks own (docs/data-model.md): a create dialog starts on
+the project's default, else the agent's, and only there says so, in a line
+under the list ("Picked for you from this project's default..."). The pick is
+saved on the task as is, `""` for No secrets, so there is no per-row
+"default" badge: once created, nothing is inherited, and the Settings hints
+say a default only reaches new tasks.
 
 ## Checking out an existing branch
 
@@ -1727,6 +1810,31 @@ While a host terminal (agent tab with the sandbox off, shell tab, footer shell) 
 - Every button also dismisses it for the current prompt. Rust only raises it again on the next sudo run, and withdraws it as soon as sudo is no longer the foreground job.
 
 Rust decides when it shows (see [ipc.md](ipc.md)); the frontend only listens and renders.
+
+## A shell's Secrets role
+
+A shell started with a role (docs/sandbox.md "Shells") carries a badge on its
+own tab: key glyph, the role name in the role's colour, and `· N` once the
+role blocked something. Amber when gh sent its own token (an rc file exported
+`GH_TOKEN` after Termic did, and the shell's pane shows a dismissible banner
+with a Copy a fix), red on anything else suspicious. A plain shell draws none
+of it. The status bar is the agent's and never shows a shell's role.
+
+The badge is a button: it opens the Cage activity panel pre-filtered to
+this shell, where its blocks Allow onto the role only (a shell has no task
+allows) and Pause holds that shell's broker. Its role changes from the tab's
+"Restart with secrets" menu. Counts are polled only for the shell someone can see (the active tab
+of the active task), once per shell however
+many surfaces read them (`lib/shellCounts.ts`, 2s, notify on change only).
+
+Starting one: ⌘T's default list is unchanged (1 is Terminal, then the
+agents), and its Terminal row carries "with secrets →". → there (or a click
+on it) swaps the list for the roles, numbered from 1, each with the bound
+hosts, the secret count, and for a gh login the note that the shell could
+still read it from the Keychain; ←, Backspace or Esc goes back. Typing a role
+name in the main list also finds "Terminal as <role>". Role rows never sit in
+the default list, because people pick agents by number. Switching one: "Restart with secrets ▸"
+on the tab's menu, which lists the other roles and No secrets.
 
 ## Confirms for recoverable actions
 
@@ -2377,7 +2485,7 @@ A project can standing-instruct arming in its own Code navigation sub-tab (Setti
 
 **Status, because a silent server looks like a broken one.** A cold rust-analyzer indexes a crate graph for minutes, and until it finishes hover and go-to-definition return nothing. The chip is the indicator, and it is ONE control: the compass becomes a pulsing dot while the server is starting or reading the repo, and the label holds still at "Code intelligence" throughout. The detail goes in the tooltip ("Loading crate graph 42%: answers are incomplete until this finishes", or why the server stopped), which is where someone wondering why a hover did nothing will look. A label that changed on every percentage would reflow the path bar under the reader, and the dot stops pulsing for BOTH settled states: ready, and failed, since a dot still pulsing on a dead server promises an answer that is not coming. That is why the client advertises `window.workDoneProgress` (the plan said not to until there was somewhere to show it, since a server whose `window/workDoneProgress/create` goes unanswered blocks; the Rust host answers it) and why `$/progress` is handled in `lib/lsp/host.ts`. The Activity window carries the other half: every live server as a row with its CPU, memory and a stop button, filed under no task because it belongs to the checkout.
 
-The gap worth knowing about: the chip lives on the editor path bar, so while you are looking at a terminal tab nothing on screen says a server is running. Activity is where to look for that.
+The gap worth knowing about: the chip lives on the editor path bar, so while you are looking at a terminal tab nothing on screen says a server is running. The Activity monitor window is where to look for that.
 
 **Python environments are named, not inferred.** The host answers `workspace/configuration` per section: `python` gets `pythonPath` (pyright and basedpyright find their interpreter THERE and ignore `VIRTUAL_ENV`), `ty` gets `environment.python`, and every other section gets `null`, which is what the rest expect. Without this, a project whose packages live in `.venv` gets analysed against some other Python and fills with errors about imports that are installed. Termic also warns when a checkout has Django but no `django-stubs`: Django adds `Model.objects` at runtime, so a checker is right to call it missing, and the fix is a package rather than a setting (measured: ty reports that error without the stubs and zero diagnostics with them).
 
@@ -2633,7 +2741,7 @@ ResizeObserver, scope it to the chip strip and set state only when the fitting
 count changes, never per pixel.
 
 The chips also sit in their own `min-w-0 overflow-hidden` box inside the right
-group, so width is shed from the left and the sandbox status stays pinned as
+group, so width is shed from the left and the cage chip stays pinned as
 the rightmost item whatever happens.
 
 **A fill behind text costs that text contrast, and the cost lands where you
@@ -2662,6 +2770,56 @@ through without the component knowing any of them.
 Measurements live next to the constants in `AgentChip.tsx`. Re-derive them
 before moving a number, and do it in both themes: every one of these values is
 the ceiling of something.
+
+## The cage chip (status bar)
+
+One pill at the right end of the task footer says what the agent can reach,
+with two targets: `[shield] <mode> · [key] <role>` opens the settings
+popover, and the tail (`N blocked`, `N suspicious`, `paused`), only when
+something needs you, opens the wide Cage activity panel. The panel is not a
+dialog: it floats from the task's footer and blocks nothing, so blocks can
+be watched arriving while the agent works. It replaced four
+controls (the sandbox status button, its "N blocked" count, the secrets chip
+and the "No secrets" notice) and their two popovers. Settings and lists are
+two interactions on purpose: one popover holding both was too dense, too
+narrow, and mixed sandbox denies with role blocks. Grammar, states and both
+views: [sandbox.md](sandbox.md), "The cage chip". Rules that hold it
+together:
+
+- **One derivation.** `cageChipState` (`lib/cageChip.ts`) turns the task,
+  the broker counts, the cage's own count and the resolved role into the
+  chip's state. Every state on the design board is a row in
+  `cageChip.test.ts`; add a row before adding a state.
+- **No poll of its own.** The chip reads FooterBar's 2s tick, which for
+  the active task also fetches its role shells' counts (so a background
+  shell's suspicious or blocked rows reach the tail; the tick runs for an
+  uncaged task too while it has a role shell). Its one subscription is
+  `useShellRoles` (the roles list, cheap). The settings popover mounts
+  only while open and does not poll; Activity polls once (1.5s) only
+  while open, its task active and the window visible, and keeps the old
+  object when a reply's fingerprint did not change.
+- **One line per row, one row of filters.** Activity's table is
+  `table-fixed` (when, times, kind, what, action); cells truncate instead
+  of wrapping. Anything that would not fit in a column (why, the rule, the
+  process, who) lives in the row's detail, opened by a click, so no column
+  is ever too narrow to read.
+- **Decisions stay on screen.** An allowed row is kept even after Rust
+  drops the deny, green, with its Allow turned into the undo. Colour is
+  status only: the row's stripe and the detail's action box are amber
+  (blocked), green (allowed) or red (suspicious). Filters beyond Show are menus
+  naming their value, so the bar stays one row however many shells or
+  roles there are. `secrets-task.e2e.ts` measures both.
+- **Glyphs are holdovers, never new.** Settings rows lead with the glyph the
+  chip, the sidebar and the task menu already use: the shield (its fill and
+  colour are the mode), the key in the role's colour, the bolt for YOLO,
+  the container for Docker. The lock for the store block is the one
+  addition, since that checkbox never had a glyph.
+- **Under 560px** the mode label, the role name and "restart to apply"
+  drop; the icons and the tail stay, since the tail is what needs you.
+- **One glyph language for a role**, wherever it shows: the key in the
+  role's colour (chip, settings, `TaskRoleKey` in the sidebar row and title
+  bar), the dot in lists and menus. Role colour = applied, amber = set but
+  cannot apply, red = something suspicious, nothing = no role.
 
 ## Scheduled queue messages (GH #300)
 
@@ -2816,8 +2974,8 @@ Seatbelt sandbox and YOLO seeded the way New Task seeds them, catch-up,
 runs to keep, report retention) or from a task's "Schedule..." menu item,
 where the agent settings are the task's and are not asked for. A Docker
 default seeds no sandbox at all and Create waits for a choice. The dialog
-takes New Task's two widths (`max-w-xl`, or `max-w-[72rem]` with a right
-column): picking a Seatbelt mode for a new parent opens the cage's allowed
+takes the two widths New Task used to (`max-w-xl`, or `max-w-[72rem]` with a
+right column): picking a Seatbelt mode for a new parent opens the cage's allowed
 paths and hosts beside the form, seeded from the app-wide and project lists
 and editable for this schedule, exactly as New Task does. Size it with
 `max-w-*`, never `w-*`: AppDialog's own `max-w-md` caps a bare width, which is

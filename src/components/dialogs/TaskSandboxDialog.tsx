@@ -21,8 +21,8 @@ import {
 } from "@/lib/ipc";
 import { effectiveSandboxMode, type SandboxMode, type SandboxSelection, type Settings } from "@/lib/types";
 import { AlertTriangle, Shield, Zap, Save, RotateCw } from "lucide-react";
-import { SandboxPicker, DockerEngineNote, KeychainBlockField } from "@/components/SandboxPicker";
-import { SANDBOX_PRESETS, presetHint, presetLabel } from "@/lib/sandboxPresets";
+import { SandboxPicker, DockerEngineNote, KeychainBlockField, SandboxPresetRow } from "@/components/SandboxPicker";
+import { useSecrets } from "@/store/secrets";
 import { dockerToggleMessage, leaveDockerMessage } from "@/lib/sandboxSwitchCopy";
 
 export function TaskSandboxDialog() {
@@ -98,6 +98,11 @@ export function TaskSandboxDialog() {
   // row is hidden and the stored flag is left alone (not dirty, not sent),
   // so a trip through Monitor does not silently rewrite it.
   const keychainRow = enabled && mode !== "monitor";
+  // the Secrets role is not edited here (New Task / Edit task own it), but
+  // a role needs Enforce and the Keychain block, and Rust drops it on a save
+  // that takes either away. Say so before the save, not after.
+  const roleName = useSecrets(s => (task?.role ? s.roles.find(r => r.id === task.role)?.name ?? task.role : null));
+  const dropsRole = !!roleName && (dockerOn || !keychainRow || !blockKeychain);
 
   // Command preview: the exact `docker run ...` a launch would build right
   // now (docker_command_preview -> the SAME build_spec/render_argv the real
@@ -255,11 +260,12 @@ export function TaskSandboxDialog() {
       // Mark BEFORE the IPC fires so TerminalPane sees the flag when
       // the pty-exit handler runs (the SIGKILL is fast - sometimes
       // exits land before this function's await even unblocks).
+      const block = keychainRow ? blockKeychain : undefined;
       if (restart) useUI.getState().markPendingPtyRestart(task.id);
       const killed = await taskSetSandbox(
         task.id, mode,
         lines(rwText), lines(hostsText),
-        restart, keychainRow ? blockKeychain : undefined,
+        restart, block,
       );
       await loadAll();
       // Quiet success - the kill is the visible feedback (overlay
@@ -517,6 +523,12 @@ export function TaskSandboxDialog() {
 
         {/* Keychain block. Enforcing modes only: Monitor never blocks. */}
         {keychainRow && <KeychainBlockField checked={blockKeychain} onChange={setBlockKeychain} />}
+        {dropsRole && (
+          <div data-testid="sandbox-drops-role" className="flex items-start gap-1.5 text-[11.5px] text-[var(--color-warn)]">
+            <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
+            <span>{t("taskSandbox.dropsRole", { role: roleName })}</span>
+          </div>
+        )}
 
         {/* Built-in defaults moved inline under each field below -
             the standalone <details> made users miss what was already
@@ -530,21 +542,13 @@ export function TaskSandboxDialog() {
             because the project's current defaults are user-owned
             (vs the bundled Presets which are app-owned). */}
         {enabled && (
-          <div className="flex flex-wrap items-center gap-2 text-[13px]">
-            <span className="text-[var(--color-fg-faint)]">{t("taskSandbox.presetLabel")}</span>
-            {SANDBOX_PRESETS.map(p => (
-              <button
-                key={p.id} type="button"
-                title={presetHint(p)}
-                onClick={() => {
-                  setRwText(p.rwPaths.join("\n"));
-                  setHostsText(p.allowedHosts.join("\n"));
-                }}
-                className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-0.5 text-[13px] text-[var(--color-fg-dim)] hover:border-[var(--color-accent-soft)] hover:text-[var(--color-fg)]"
-              >
-                {presetLabel(p)}
-              </button>
-            ))}
+          <SandboxPresetRow
+            mode={mode}
+            rw={rwText}
+            hosts={hostsText}
+            onPick={p => { setRwText(p.rwPaths.join("\n")); setHostsText(p.allowedHosts.join("\n")); }}
+            className="text-[13px]"
+          >
             {project && (
               <button
                 type="button"
@@ -558,7 +562,7 @@ export function TaskSandboxDialog() {
                 {t("taskSandbox.resetProjectDefaults")}
               </button>
             )}
-          </div>
+          </SandboxPresetRow>
         )}
 
         {/* Allow-list config only matters when there's a cage (Monitoring

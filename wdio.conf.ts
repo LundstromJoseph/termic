@@ -2,6 +2,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { appendFileSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
+import { createServer } from "node:net";
 
 // End-to-end config for the termic app. WebdriverIO drives the REAL macOS
 // WKWebView window via @wdio/tauri-service's embedded WebDriver provider
@@ -13,6 +14,16 @@ import { execFileSync } from "node:child_process";
 // differing only by WebDriver port — so per-worker TERMIC_DATA_DIR (isolated
 // profiles for the fixture-mutating specs) can't be injected without an
 // invasive, flake-prone app-side port→datadir mapping. Stability wins.
+
+// an enforcing Termic cage denies what the app under test needs (its WebKit
+// storage, the spawn base, ~/.config/termic), so a caged run takes ~40 min and
+// fails about 19 spec files for reasons that are not regressions. Refuse it up
+// front. Same test as termic-cli's cage_refused: monitor mode denies nothing.
+// Workers never see this: onPrepare scrubs TERMIC_* before they spawn.
+if (process.env.TERMIC_SANDBOX === "1" && process.env.TERMIC_SANDBOX_MODE !== "monitor") {
+  throw new Error("e2e cannot run inside a sandboxed Termic task: the cage denies the app's "
+    + "WebKit storage, spawn dir and config. Run `make e2e` from an unsandboxed shell.");
+}
 
 const repoRoot = path.dirname(fileURLToPath(import.meta.url));
 // TERMIC_E2E_BINARY points the suite at a binary built somewhere else, which is
@@ -35,6 +46,9 @@ export const config: WebdriverIO.Config = {
   // macOS only.
   exclude: [
     ...(process.platform === "darwin" ? [] : ["sudo-touchid"]),
+    // Stages the README's screenshots and asserts nothing about features;
+    // run on purpose with TERMIC_E2E_README_SHOTS=1 (see the spec's header).
+    ...(process.env.TERMIC_E2E_README_SHOTS ? [] : ["readme-shots"]),
   ].map(n => path.join(repoRoot, "e2e", "specs", `${n}.e2e.ts`)),
   maxInstances: 1,
 
@@ -72,8 +86,27 @@ export const config: WebdriverIO.Config = {
   waitforTimeout: 15_000,
   waitforInterval: 100,
 
-  onPrepare() {
+  async onPrepare() {
     mkdirSync(artifactsDir, { recursive: true });
+    // a run launched from an agent tab inherits that tab's TERMIC_* (task,
+    // tab, pty, sandbox mode). They describe the outer app, not the one under
+    // test, and the app and every termic-cli a spec runs would act on them.
+    // First, so the sets below survive it; TERMIC_E2E_* are this suite's own
+    // knobs and stay.
+    for (const k of Object.keys(process.env)) {
+      if (k.startsWith("TERMIC_") && !k.startsWith("TERMIC_E2E_")) delete process.env[k];
+    }
+    // the embedded WebDriver defaults to 4445 for every run, so two agents
+    // running e2e at once drive each other's app. A free port per run; the
+    // tauri-service's own onPrepare reads it, and runs after this one.
+    if (!process.env.TAURI_WEBDRIVER_PORT) {
+      process.env.TAURI_WEBDRIVER_PORT = String(await new Promise<number>((resolve, reject) => {
+        const s = createServer().once("error", reject).listen(0, "127.0.0.1", () => {
+          const { port } = s.address() as { port: number };
+          s.close(() => resolve(port));
+        });
+      }));
+    }
     // The app is launched as a child of this process and inherits env, so
     // point it at the throwaway profile (seeded by scripts/e2e-seed.mjs).
     process.env.TERMIC_DATA_DIR = dataDir;
@@ -83,6 +116,12 @@ export const config: WebdriverIO.Config = {
     // spec whose second machine is a fake in this process. Debug builds only
     // (src-tauri/src/peers.rs, Node::start).
     process.env.TERMIC_PEER_LOOPBACK = "1";
+    // a run launched from inside an agent tab inherits that agent's relocated
+    // login (agent_dirs.rs), and the app passes it to every fixture agent: they
+    // would read the developer's real login store, and the adopted-account
+    // case in credentials.e2e.ts sees a relocation that is not the app's.
+    // XDG_DATA_HOME is re-set below on Linux, after this.
+    for (const k of ["CLAUDE_CONFIG_DIR", "CODEX_HOME", "CURSOR_CONFIG_DIR", "GEMINI_CLI_HOME", "GROK_HOME", "XDG_DATA_HOME"]) delete process.env[k];
     // Windows: WebView2 keeps its profile (localStorage, so every pref) in a
     // folder named after the app identifier, NOT under TERMIC_DATA_DIR, and
     // runs one browser process per folder. Left alone, a run shares both with
@@ -122,6 +161,10 @@ export const config: WebdriverIO.Config = {
     // forced and the enable script is a stub (sudo_touchid.rs). Honoured only
     // by the `e2e`-feature binary.
     process.env.TERMIC_E2E_FAKE_SUDO = "1";
+    // A token-shaped var in the app's own environment, for the "Kept out of
+    // agents" list (secrets-settings.e2e.ts). Synthetic: the shape is a
+    // GitHub classic token, the characters spell out that it is not one.
+    process.env.TERMIC_E2E_FAKE_PAT = "ghp_" + "e2eFakeTokenNotReal0".repeat(2);
     // Purge accumulated tasks so every run starts lean (specs create their own;
     // archived tasks otherwise pile up across runs and bloat loadAll/sidebar).
     try {

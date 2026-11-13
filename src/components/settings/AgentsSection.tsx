@@ -7,9 +7,10 @@
 // removing them would orphan existing tasks that reference them.
 // Saves are debounced (500ms) so typing doesn't hammer the JSON file.
 
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { useTranslation, Trans } from "react-i18next";
 import { settingsLoad, agentsSave, agentsDefaults, projectUpdate } from "@/lib/ipc";
+import { AgentRoleField } from "./secretsSettings/RolePickers";
 import { useUI } from "@/store/ui";
 import { useApp } from "@/store/app";
 import { agentOverrides, resolveAgent } from "@/lib/agents";
@@ -21,7 +22,8 @@ import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { AppDialog } from "@/components/ui/Dialog";
 import { Tip } from "@/components/ui/Tooltip";
-import { Trash2, Plus, Check, AlertTriangle, RotateCcw, Copy, ChevronRight, ChevronDown, Info } from "lucide-react";
+import { Trash2, Plus, Check, AlertTriangle, RotateCcw, Copy, ChevronRight, ChevronDown } from "lucide-react";
+import { InfoTip } from "@/components/ui/InfoTip";
 import { AgentAccountsRow, AgentAccountsAction } from "@/components/settings/AgentAccountsRow";
 import { CliIcon, CLI_BRAND_COLOR, resolveIconId, TOOL_ICONS } from "@/icons/cli";
 import { SignalInspector } from "./SignalInspector";
@@ -36,6 +38,7 @@ import { launcherVisibilityOf } from "@/lib/launcherUsage";
 import { DropdownRoot, DropdownTrigger, DropdownMenu, DropdownItem, DropdownSeparator } from "@/components/ui/Dropdown";
 import { PopoverRoot, PopoverTrigger, PopoverContent } from "@/components/ui/Popover";
 import { footerReports } from "@/lib/agentContext";
+import { InheritedEnv } from "./secretsSettings/KeptOut";
 
 export function AgentsSection() {
   const { t } = useTranslation("settings");
@@ -106,7 +109,8 @@ export function AgentsSection() {
    *  None of them describe how the agent runs, which is what "defaults" and
    *  "modified" are about:
    *
-   *  - `env` is a personal setup detail (`CLAUDE_CODE_NO_FLICKER=1`).
+   *  - `env` is a personal setup detail (`CLAUDE_CODE_NO_FLICKER=1`), and
+   *    `pass_env` (kept-out vars this agent gets anyway) is the same kind.
    *  - the ACCOUNT fields are user DATA (GH #278). They name real login
    *    stores on disk, so wiping them on a reset orphans directories the user
    *    signed into and silently drops the agent back to one login. Naming a
@@ -117,6 +121,7 @@ export function AgentsSection() {
   function carriedOver(a: Agent): Partial<Agent> {
     return {
       env: a.env ?? {},
+      pass_env: a.pass_env,
       accounts: a.accounts,
       default_account: a.default_account,
       adopted_account: a.adopted_account,
@@ -133,11 +138,11 @@ export function AgentsSection() {
     if (!d) return false; // custom agents have no "defaults" to revert to
     const strip = (x: Agent) => {
       const {
-        env: _e, disabled: _d,
+        env: _e, pass_env: _pe, disabled: _d,
         accounts: _acc, default_account: _da, adopted_account: _aa,
         auto_switch_account: _as, ...rest
       } = x;
-      void _e; void _d; void _acc; void _da; void _aa; void _as;
+      void _e; void _pe; void _d; void _acc; void _da; void _aa; void _as;
       return rest;
     };
     return JSON.stringify(strip(d)) !== JSON.stringify(strip(a));
@@ -1195,6 +1200,7 @@ function AgentCard({ agent, detected, onPatch, onCommitId, onPatchCaps, onRemove
       )}
 
       <div className="grid grid-cols-1 gap-4">
+        {!isTerminal && <AgentRoleField agentId={agent.id} agentName={agent.display_name || agent.id} value={agent.default_role} onChange={default_role => onPatch({ default_role })} />}
         <Field label={t("agents.card.commandLabel")} hint={isTerminal
           ? t("agents.card.commandHintTerminal")
           : t("agents.card.commandHintAgent")}>
@@ -1277,6 +1283,7 @@ function AgentCard({ agent, detected, onPatch, onCommitId, onPatchCaps, onRemove
             onChange={(env) => onPatch({ env })}
           />
         </Field>
+        <InheritedEnv agent={agent} onPassEnv={(pass_env) => onPatch({ pass_env })} />
         {/* Docker-only environment. Hidden entirely while Docker sandboxing
             is off, because it would be a box that provably does nothing:
             the field is read on the Docker spawn path and nowhere else. */}
@@ -1699,20 +1706,19 @@ function parseEnv(text: string): string {
 
 /** A labelled field. The hint is an info tooltip beside the label rather
  *  than a paragraph above the input: the card has ~15 fields and their
- *  hints, some three lines long, made it a wall of text. */
+ *  hints, some three lines long, made it a wall of text. Not a wrapping
+ *  `<label>`: a label with no `for` binds its first labelable child, which
+ *  is not always the input. The group carries the name instead. */
 function Field({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
+  const id = useId();
   return (
-    <label className="block">
+    <div role="group" aria-labelledby={id}>
       <div className="mb-1.5 flex items-center gap-1.5 text-[13px] font-medium">
-        {label}
-        {hint && (
-          <Tip content={<span className="block max-w-[340px] whitespace-normal">{hint}</span>} side="top">
-            <Info className="h-3.5 w-3.5 shrink-0 text-[var(--color-fg-faint)] hover:text-[var(--color-fg-dim)]" />
-          </Tip>
-        )}
+        <span id={id}>{label}</span>
+        {hint && <InfoTip text={hint} />}
       </div>
       {children}
-    </label>
+    </div>
   );
 }
 
@@ -1760,9 +1766,7 @@ function FooterReadouts({ agentId }: { agentId: string }) {
     <div className="border-t border-[var(--color-border-soft)] pt-4">
       <div className="mb-1.5 flex items-center gap-1.5 text-[13px] font-medium">
         {t("agents.card.footerLabel")}
-        <Tip content={t("agents.card.footerHint")} side="top">
-          <Info className="h-3.5 w-3.5 shrink-0 text-[var(--color-fg-faint)] hover:text-[var(--color-fg-dim)]" />
-        </Tip>
+        <InfoTip text={t("agents.card.footerHint")} />
       </div>
       <div data-testid={`agent-footer-${agentId}`} className="flex flex-wrap gap-x-5 gap-y-1.5">
         {rows.map(([key, label, tip]) => {

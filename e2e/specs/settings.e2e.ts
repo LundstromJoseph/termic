@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import os from "node:os";
 import path from "node:path";
 import { dataDir } from "../../wdio.conf.js";
-import { archiveTask, clearLanguagePref, clickPresent, clickWhenVisible, dismissOverlays, openTask, pointerDrag, requireTermicApi, snap, textOf, waitForAppShell, waitForText, waitForTextGone, waitGone, waitVisible, rmTree } from "../helpers";
+import { archiveTask, clearLanguagePref, clickPresent, clickWhenVisible, dismissOverlays, openTask, pointerDrag, requireTermicApi, snap, textOf, waitForAppShell, waitForText, waitForTextGone, waitGone, waitVisible, rmTree, newTaskSection } from "../helpers";
 
 /** Click the [role="switch"] in the settings row whose label matches exactly.
  *  Toggle rows are label + switch inside one .justify-between wrapper
@@ -262,6 +262,9 @@ describe("settings rail", () => {
     // the page shows (the fixture profile is not connected).
     ["sync", "Sync", "Stays on this machine"],
     ["sandbox", "Sandbox", "Global sandbox defaults"],
+    // The Add button renders only once settings have loaded, so it also
+    // proves the page got past its loading state.
+    ["secrets", "Secrets", "Add secret"],
     // Marker has to be above the master toggle: everything else on this
     // page renders only once Docker sandboxing is enabled, and the fixture
     // profile leaves it off.
@@ -1630,13 +1633,19 @@ describe("task sandbox", () => {
     (id) => window.__termic!.useApp.getState().tasks.find((t: any) => t.id === id)?.sandbox_block_keychain,
     taskId,
   );
-  // The footer suffix's state, or null when it is absent. A suffix that is
-  // in the DOM but not displayed (the narrow-footer collapse) reads as null,
-  // so a CSS-hidden claim cannot pass for a visible one.
+  // What the cage chip claims about the Keychain, or null when it claims
+  // nothing. Read off the chip that paints, since every visited task keeps
+  // its footer mounted. "blocked" is a claim, so before the first poll there
+  // is none; a pending block must also read "restart to apply" on the chip.
   const footerKeychain = (want: "blocked" | "pending" | null) => browser.waitUntil(
     async () => (await browser.execute(() => {
-      const el = document.querySelector('[data-testid="task-footer"] [data-testid="footer-keychain"]') as HTMLElement | null;
-      return el && el.getClientRects().length > 0 ? el.dataset.keychainState ?? null : null;
+      const el = [...document.querySelectorAll('[data-testid="task-footer"] [data-testid="cage-chip"]')]
+        .find(e => e.getClientRects().length > 0) as HTMLElement | undefined;
+      if (!el) return "no chip";
+      const state = el.dataset.keychain ?? null;
+      const pending = !!el.querySelector('[data-testid="cage-chip-pending"]');
+      if ((state === "pending") !== pending) return "chip disagrees";
+      return state;
     })) === want,
     { timeout: 10_000, timeoutMsg: `footer keychain state never became ${want}` },
   );
@@ -1709,6 +1718,13 @@ describe("task sandbox", () => {
     expect(await stored()).toBe(true);
     // saved, but the running agent still holds the open profile.
     await footerKeychain("pending");
+    // the settings popover says why, with the restart offered.
+    await clickWhenVisible(`[data-task-id="${taskId}"] [data-testid="cage-chip"]`);
+    await waitVisible('[data-testid="cage-settings"] [data-testid="secrets-pending-banner"]');
+    await waitVisible('[data-testid="cage-settings"] [data-testid="cage-restart"]');
+    await snap("cage-keychain-pending.png");
+    await browser.keys("Escape");
+    await waitGone('[data-testid="cage-settings"]');
     await restartUnder("enforce");
     await browser.waitUntil(async () => (await keychainOpen()) === 0,
       { timeout: 15_000, timeoutMsg: "the open agent never went away" });
@@ -1785,6 +1801,7 @@ describe("task sandbox", () => {
     }, dialog);
     await clickButton("Terminal");
 
+    await newTaskSection("isolation");
     await clickWhenVisible(`${dialog} [data-sandbox-option="monitor"]`);
     await waitGone(box);
     await clickWhenVisible(`${dialog} [data-sandbox-option="enforce"]`);
@@ -2353,6 +2370,59 @@ describe("default tasks path", () => {
       timeout: 8_000, timeoutMsg: "a valid override never resumed autosaving",
     });
     await setProjectTasksPath("");
+  });
+
+  // The same guard when the check is SLOW. The save fires 500ms after the
+  // last keystroke and the conflict check answers after its own 300ms debounce
+  // plus an IPC round trip; on a loaded machine that answer came after the
+  // save, which read "no conflicts" from a check still running and wrote `.`.
+  // Delaying the command at `fetch` (where a Tauri command leaves the page;
+  // `__TAURI_INTERNALS__.invoke` cannot be replaced) makes that order certain.
+  it("does not persist a repo-swallowing override while its check is still running", async () => {
+    await setProjectTasksPath("");
+    await browser.execute(() => {
+      const w = window as unknown as { __slowConflicts?: boolean; __slowConflictsRig?: boolean };
+      w.__slowConflicts = true;
+      if (w.__slowConflictsRig) return;
+      w.__slowConflictsRig = true;
+      const real = window.fetch;
+      window.fetch = async function (this: unknown, input: RequestInfo | URL, init?: RequestInit) {
+        const url = String((input as Request).url ?? input);
+        if (w.__slowConflicts && url.endsWith("/tasks_path_conflicts")) {
+          await new Promise(r => setTimeout(r, 1_500));
+        }
+        return real.call(this, input, init);
+      } as typeof window.fetch;
+    });
+    try {
+      await browser.execute(
+        (id) => window.__termic!.useApp.getState().openSettings("repositories", id), projectId,
+      );
+      await waitVisible('[data-repo-tab="advanced"]');
+      await browser.execute(() =>
+        (document.querySelector('[data-repo-tab="advanced"]') as HTMLElement).click(),
+      );
+      await waitVisible('[data-testid="project-tasks-path-input"]');
+      await browser.execute(() => {
+        const input = document.querySelector('[data-testid="project-tasks-path-input"]') as HTMLInputElement;
+        Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")!.set!.call(input, ".");
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+      const stored = () => browser.execute(
+        (id) => window.__termic!.useApp.getState().projects.find((p: any) => p.id === id)?.tasks_path ?? null,
+        projectId,
+      );
+      // The verdict arrives at ~1.8s; the unguarded save fired at 500ms.
+      await waitVisible('[data-testid="project-tasks-path-conflict"]', 8_000);
+      // Inverted wait, as above: timing out IS the pass.
+      await expect(
+        browser.waitUntil(async () => (await stored()) === ".", { timeout: 2_500 }),
+      ).rejects.toThrow();
+      expect(await stored()).toBe("");
+    } finally {
+      await browser.execute(() => { (window as unknown as { __slowConflicts?: boolean }).__slowConflicts = false; });
+      await setProjectTasksPath("");
+    }
   });
 
   // The global field itself: it carries a REAL value (not a placeholder), and
@@ -4223,6 +4293,38 @@ describe("agent hooks", () => {
     expect(readFileSync(devinConfig, "utf8")).toBe(userDevinConfig);
     expect(existsSync(devinScripts)).toBe(false);
     rmTree(devinDir, { bestEffort: true });
+  });
+
+  // opencode's install is two files: the module opencode 1 and 2 both load,
+  // and opencode 2's TUI plugin, which opencode 2 finds only as a DIRECTORY
+  // under plugins/ (docs/agent-hooks.md "opencode 2"). Both go on install,
+  // both go on remove, and a plugin of the user's beside them stays.
+  (process.platform === "win32" ? it.skip : it)("installs opencode's module and its opencode 2 TUI plugin, and removes only those", async () => {
+    const st = await browser.execute(async () =>
+      await window.__termic!.invoke("agent_hooks_status", { agentId: "opencode" }));
+    const mod = (st as { host: { settings_path: string } }).host.settings_path;
+    expect(mod.endsWith("/plugins/termic.js")).toBe(true);
+    const plugins = mod.slice(0, -"/termic.js".length);
+    const tuiDir = `${plugins}/termic`;
+    const theirs = `${plugins}/mine.js`;
+    mkdirSync(plugins, { recursive: true });
+    writeFileSync(theirs, "export default {};\n");
+
+    const after = await browser.execute(async () =>
+      await window.__termic!.invoke("agent_hooks_install", { agentId: "opencode" }));
+    expect((after as { host: { installed: boolean } }).host.installed).toBe(true);
+    // One default export for both loaders, no named one.
+    const body = readFileSync(mod, "utf8");
+    expect(body).toContain('export default { id: "termic", server: TermicStatus, setup() {} };');
+    expect(body).not.toContain("export const");
+    expect(readFileSync(`${tuiDir}/tui.js`, "utf8")).toContain("termic agent hook for opencode 2");
+
+    await browser.execute(async () =>
+      await window.__termic!.invoke("agent_hooks_remove", { agentId: "opencode" }));
+    expect(existsSync(mod)).toBe(false);
+    expect(existsSync(tuiDir)).toBe(false);
+    expect(readFileSync(theirs, "utf8")).toBe("export default {};\n");
+    rmTree(plugins, { bestEffort: true });
   });
 
   it("refuses a malformed config rather than clobbering it", async () => {

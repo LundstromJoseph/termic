@@ -78,6 +78,8 @@ pub(crate) const PROJECT_LOCAL: &[&str] = &[
     "created",
     // Detected from this clone's layout, never synced.
     "bare",
+    // Names a role, and roles are local (see SETTINGS_LOCAL).
+    "default_role",
 ];
 
 pub(crate) const MEMBER_SYNC: &[&str] = &[
@@ -116,7 +118,7 @@ pub(crate) const SETTINGS_LOCAL: &[&str] = &[
     "docker_shared_config_dirs",
     "discovery_dismissed",
     // CLI and MCP install state, one-time migration markers.
-    "cli_enabled", "cli_default_migrated", "hooks_auto_default_migrated",
+    "cli_enabled", "cli_default_migrated", "hooks_auto_default_migrated", "task_roles_seeded_migrated",
     "cli_user_link_installed", "mcp_enabled", "mcp_bind_address", "mcp_port",
     // Opening this machine to its network is a decision about THIS machine
     // and THIS network; a synced `true` would switch sharing on somewhere
@@ -125,6 +127,14 @@ pub(crate) const SETTINGS_LOCAL: &[&str] = &[
     "welcomed", "schema_version",
     // This module's own per-profile state.
     "sync",
+    // Secrets point at Keychain items, which exist per machine (another Mac
+    // may have a different gh login or none). Roles name secret ids, so a
+    // role synced without its secrets would fail `secrets::validate` on
+    // arrival and block every settings save there. Both stay local in v1;
+    // syncing them is a later call, and would belong in the SAFETY lists.
+    "secrets", "roles",
+    // Names THIS machine's environment, which another Mac does not share.
+    "env_guard",
 ];
 
 pub(crate) const AGENT_SYNC: &[&str] = &[
@@ -133,7 +143,7 @@ pub(crate) const AGENT_SYNC: &[&str] = &[
     "post_launch_capture",
     // Account NAMES only. The login each one names lives in `logins/`, which
     // never syncs; on another machine the account shows as not signed in.
-    "accounts", "default_account", "auto_switch_account",
+    "accounts", "default_account", "auto_switch_account", "account_labels",
 ];
 
 // Read only by the classification test: export and apply need just SYNC.
@@ -141,6 +151,8 @@ pub(crate) const AGENT_SYNC: &[&str] = &[
 pub(crate) const AGENT_LOCAL: &[&str] = &[
     // Never. These are where people put API keys.
     "env", "docker_env",
+    // Names env vars THIS machine has (see env_guard in SETTINGS_LOCAL).
+    "pass_env",
     // The login that already existed on THIS machine.
     "adopted_account",
     // Often hides a CLI that is not installed here.
@@ -148,6 +160,8 @@ pub(crate) const AGENT_LOCAL: &[&str] = &[
     "sandbox_allowed_paths",
     // Derived from this build's built-in list, not a user choice.
     "builtin",
+    // Names a role, and roles are local (see SETTINGS_LOCAL).
+    "default_role",
 ];
 
 /// Project fields whose change is shown before or as it applies: they can
@@ -3614,6 +3628,7 @@ mod tests {
 
     fn full_project() -> Project {
         Project {
+            default_role: None,
             id: "p1".into(),
             name: "app".into(),
             root_path: "/Users/u/src/app".into(),
@@ -3659,6 +3674,7 @@ mod tests {
 
     fn full_agent() -> Agent {
         Agent {
+            default_role: None,
             id: "my-agent".into(),
             display_name: "My agent".into(),
             command: "claude".into(),
@@ -3670,12 +3686,14 @@ mod tests {
             capabilities: AgentCapabilities::default(),
             env: hm("API_KEY", "s3cret-token"),
             docker_env: hm("API_KEY", "s3cret-docker"),
+            pass_env: vec!["GITHUB_TOKEN".into()],
             sandbox_allowed_paths: vec!["$HOME/.my".into()],
             sandbox_allowed_hosts: vec!["api.acme.com".into()],
             work_done: true,
             accounts: vec!["Work".into()],
             default_account: Some("Work".into()),
             auto_switch_account: true,
+            account_labels: [("Work".to_string(), "Acme seat".to_string())].into(),
             adopted_account: Some("Work".into()),
             extends: Some("claude".into()),
             kind: "agent".into(),
@@ -3686,6 +3704,9 @@ mod tests {
     fn full_settings() -> Settings {
         Settings {
             customizations_enabled: Some(true),
+            roles: Vec::new(),
+            secrets: Vec::new(),
+            env_guard: vec![crate::env_guard::Rule { name: "STRIPE_SECRET_KEY".into(), all: true }],
             repos_dir: "/Users/u/src".into(),
             welcomed: true,
             agents: vec![full_agent()],
@@ -3707,6 +3728,7 @@ mod tests {
             cli_enabled: true,
             cli_default_migrated: true,
             hooks_auto_default_migrated: true,
+            task_roles_seeded_migrated: true,
             cli_user_link_installed: true,
             mcp_enabled: true,
             mcp_bind_address: "0.0.0.0".into(),
@@ -4029,7 +4051,17 @@ mod tests {
         // protocol, so git waits on it until the deadline kills the group.
         let dir = tempfile::tempdir().unwrap();
         let t = std::time::Instant::now();
-        let err = git_bounded(&["-c", "protocol.ext.allow=always", "ls-remote", "ext::sleep 30"], dir.path(), Duration::from_millis(800))
+        // a deadline of its own: the kill hits git's whole group, and where it
+        // only reaches git (a cage allowing signals to `children` alone) the
+        // surviving `sleep` holds stderr open and git_bounded waits it out.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let path = dir.path().to_path_buf();
+        std::thread::spawn(move || {
+            let _ = tx.send(git_bounded(&["-c", "protocol.ext.allow=always", "ls-remote", "ext::sleep 30"], &path, Duration::from_millis(800)));
+        });
+        let err = rx.recv_timeout(Duration::from_secs(10))
+            .expect("still waiting past 10s: the group kill missed the transport's child \
+                     (in a Termic cage the profile must allow signalling a sibling)")
             .unwrap_err();
         assert!(err.contains("timed out"), "{err}");
         assert!(t.elapsed() < Duration::from_secs(10), "took {:?}", t.elapsed());

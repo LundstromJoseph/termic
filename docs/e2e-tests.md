@@ -121,6 +121,31 @@ CARGO_TARGET_DIR=$PWD/src-tauri/target/e2e-build npm run e2e:build
 TERMIC_E2E_BINARY=$PWD/src-tauri/target/e2e-build/debug/termic npm run test:e2e
 ```
 
+### The README's screenshots
+
+`docs/hero.png` and `docs/screenshots/*.png` come from
+`e2e/specs/readme-shots.e2e.ts`, which the suite skips unless asked for. It
+stages three `acme-*` demo repos and a handful of tasks in every state, with
+agents labelled claude and codex that run `e2e/fixtures/readme-agent.sh`, so
+nothing on screen comes from a real machine. Each shot is refused if the page
+text holds the home path, user name or host name. To retake them after a
+`make e2e`:
+
+```sh
+TERMIC_E2E_README_SHOTS=1 npm run test:e2e -- --spec e2e/specs/readme-shots.e2e.ts
+sips -Z 2000 .e2e/artifacts/readme-hero.png --out docs/hero.png
+for n in markdown-review scheduled; do
+  sips -Z 2000 .e2e/artifacts/readme-$n.png --out docs/screenshots/$n.png
+done
+# The board's cards fill the top of the window: keep the top 60%.
+# (--cropOffset 0 0 means "centred" to sips; 1 1 anchors the top.)
+sips -c 1080 2880 --cropOffset 1 1 .e2e/artifacts/readme-board.png --out /tmp/board.png
+sips -Z 2000 /tmp/board.png --out docs/screenshots/board.png
+```
+
+The window is 1440x900. The driver's `setWindowSize` counts physical pixels,
+so the spec asks for twice that on a 2x display.
+
 ## CI
 
 The suite runs on all three platforms for PRs and pushes to `main`: `e2e`
@@ -149,6 +174,22 @@ left a worktree behind, and every later run then failed on `a worktree already
 lives at …` (or, once the directory was gone but the registration was not,
 `branch … is already checked out elsewhere`). `seed()` now wipes that directory
 and prunes the fixture repo's worktrees on every run.
+
+A run launched from an agent tab is isolated from that tab too. `onPrepare`
+drops every inherited `TERMIC_*` except `TERMIC_E2E_*` (they name the outer
+app's task, tab and sandbox, and a spec's `termic-cli` would act on them), and
+picks a free WebDriver port unless `TAURI_WEBDRIVER_PORT` is set. The plugin's
+default is a fixed 4445, so two agents running the suite at once drove each
+other's app and both runs died on `ECONNREFUSED`.
+
+**It refuses to run inside an enforcing Termic cage.** The cage denies the
+app's WebKit storage (`~/Library/WebKit/termic`), the real spawn base
+(`/private/tmp/termic-<uid>`) and `~/.config/termic`. A caged run measured on
+2026-11-12 took 38 minutes and failed 19 of 48 spec files, none of them a
+regression, so `wdio.conf.ts` now throws at load with the reason. Run it from
+an unsandboxed shell. Making it pass caged needs a per-run WebKit store, an e2e
+spawn base and a themes dir override; until then the refusal is the honest
+answer.
 
 ### The language: an e2e build defaults to English, and writes no pref
 

@@ -53,7 +53,7 @@ Four states, set per-task at create + editable later. `Enforce` is the full cage
 
 `src-tauri/src/docker.rs` + Settings → Docker Sandbox (`DockerSection.tsx`) + `SandboxPicker.tsx` (`NewTaskDialog.tsx`, `TaskSandboxDialog.tsx`, and Settings → Sandbox, see "Unified picker" below). A mutually-exclusive alternative to Seatbelt: the agent CLI runs inside `docker run` instead, and can only touch what termic bind-mounts. See `docs/docker-sandbox/` for the full design + research.
 
-- **Unified picker**: `SandboxPicker.tsx` renders FIVE peer cards - Off, Seatbelt's Enforcing (FS) / Monitoring / Enforcing, and Docker Container (its own full-width row, since it's a different cage MECHANISM, not another intensity level of Seatbelt's) - shared by `NewTaskDialog` (task creation), `TaskSandboxDialog` (editing an existing task), and Settings → Sandbox (the app-wide default, see below). This replaced an earlier two-tier design (an engine row, then a conditional Seatbelt submode grid underneath) once real usage showed Docker being reachable only from a second-level control read as an afterthought rather than a peer choice. `SandboxSelection` (`lib/types.ts`: `SandboxMode | "docker"`) is the flat type; `selectionFor(mode, dockerEnabled)` / `selectionToFields(selection)` convert to/from the SAME two independent backend fields (`sandbox_mode`, `docker_sandbox_enabled`) - still no new data model, just one picker instead of two, and `Docker` never gets a `monitor` submode of its own (there's nothing at the container level equivalent to Seatbelt's proxy/FS-op watcher to log). In `TaskSandboxDialog` the two engines keep their pre-existing, independent commit paths: Docker still commits IMMEDIATELY through its own confirm (`toggleDocker`/`task_set_docker`, always SIGKILLs), while Seatbelt stays a draft the Save button commits (`taskSetSandbox`/`task_set_sandbox`, restart-or-not choice) - `choose()` just decides which of the two a click should drive, rather than merging them into one commit; a Seatbelt card click there IS the final mode now (no separate submode step). Picking "Docker Container" always shows the `<u>network is unrestricted for now</u>` note (`DockerEngineNote`, same copy as Settings → Docker Sandbox) and, in the edit dialog, the "Preview command" toggle. Every confirm that CROSSES the Docker boundary (`toggleDocker` in either direction, `leaveDockerFor`) also carries `SESSION_LOSS_NOTE`: an agent keeps its history inside the cage it ran in (`docker-agents/<agent>` in Docker mode, the real `~/.claude` outside it), so the tab's stored session id names a conversation only one of the two stores has heard of, the post-switch `--resume` finds nothing, and `TerminalPane`'s `failedResume` path relaunches fresh. Nothing is deleted and nothing carries over, and the confirm is the last moment anyone can be told. A Seatbelt-to-Seatbelt mode change does NOT carry it, because that keeps the same store.
+- **Unified picker**: `SandboxPicker.tsx` renders FIVE peer options - Off, Seatbelt's Enforcing (FS) / Monitoring / Enforcing, and Docker Container (its own full-width row, since it's a different cage MECHANISM, not another intensity level of Seatbelt's) - as cards, or as one segmented strip with the picked mode's description under it (`layout="row"`, New Task's Isolation pane). Shared by `NewTaskDialog` (task creation, the strip), `TaskSandboxDialog` (editing an existing task), and Settings → Sandbox (the app-wide default, see below). This replaced an earlier two-tier design (an engine row, then a conditional Seatbelt submode grid underneath) once real usage showed Docker being reachable only from a second-level control read as an afterthought rather than a peer choice. `SandboxSelection` (`lib/types.ts`: `SandboxMode | "docker"`) is the flat type; `selectionFor(mode, dockerEnabled)` / `selectionToFields(selection)` convert to/from the SAME two independent backend fields (`sandbox_mode`, `docker_sandbox_enabled`) - still no new data model, just one picker instead of two, and `Docker` never gets a `monitor` submode of its own (there's nothing at the container level equivalent to Seatbelt's proxy/FS-op watcher to log). In `TaskSandboxDialog` the two engines keep their pre-existing, independent commit paths: Docker still commits IMMEDIATELY through its own confirm (`toggleDocker`/`task_set_docker`, always SIGKILLs), while Seatbelt stays a draft the Save button commits (`taskSetSandbox`/`task_set_sandbox`, restart-or-not choice) - `choose()` just decides which of the two a click should drive, rather than merging them into one commit; a Seatbelt card click there IS the final mode now (no separate submode step). Picking "Docker Container" always shows the `<u>network is unrestricted for now</u>` note (`DockerEngineNote`, same copy as Settings → Docker Sandbox) and, in the edit dialog, the "Preview command" toggle. Every confirm that CROSSES the Docker boundary (`toggleDocker` in either direction, `leaveDockerFor`) also carries `SESSION_LOSS_NOTE`: an agent keeps its history inside the cage it ran in (`docker-agents/<agent>` in Docker mode, the real `~/.claude` outside it), so the tab's stored session id names a conversation only one of the two stores has heard of, the post-switch `--resume` finds nothing, and `TerminalPane`'s `failedResume` path relaunches fresh. Nothing is deleted and nothing carries over, and the confirm is the last moment anyone can be told. A Seatbelt-to-Seatbelt mode change does NOT carry it, because that keeps the same store.
 - **App-wide default**: Settings → Sandbox's "Sandbox new tasks by default" is the SAME `SandboxPicker`, backed by `usePrefs().globalDefaultSandboxKind` (a `SandboxSelection`, localStorage-only - never Rust-persisted). Used by `NewTaskDialog` as the last fallback when seeding a new task's selection: last-used habit (`newTaskLastSandboxMode`, now also tracks `"docker"`) → the project's own `default_sandbox_mode`/`default_sandbox` (still Seatbelt-only - a project can't default new tasks to Docker yet) → this app-wide pick. Migrated automatically from the old boolean `globalDefaultSandbox` pref the first time it's read (`true` → `"enforce"`, `false` → `"off"`) - the new key wins once it exists, so the migration runs at most once per browser profile.
 - **Docker's own status icon**: `DockerSandboxIcon` (`SandboxIcon.tsx`, next to `SANDBOX_VISUALS`/`SandboxIcon`) is a `Container` glyph colored `DOCKER_SANDBOX_COLOR` (`var(--color-ok)`) - the same green Seatbelt's `enforce`/`enforce-fs` use, since Docker mode IS a real filesystem cage too, just via a different mechanism. (An earlier version used the warning red `--color-err` on the mistaken assumption it was already established for Seatbelt; that red is YOLO's "on but the cage isn't actually enforced" warning color and is unrelated to any sandbox mode's own identity.) Because Docker mode always stores `sandbox_mode` as `off` (mutually exclusive with Seatbelt), every surface that used to key off `effectiveSandboxMode(task) !== "off"` to decide whether to show a sandbox badge had to add an explicit `task.docker_sandbox_enabled` check FIRST - otherwise a Docker-sandboxed task showed no badge at all, reading as unsandboxed. Wired into the same four places `SandboxIcon` already appeared: the sidebar row badge + its task-menu item (`Sidebar.tsx`), the terminal footer chip (`TerminalPane.tsx`'s `FooterBar`), the top toolbar badge (`UnifiedBar.tsx`), and the command palette's "Sandbox settings" suffix (`CommandPalette.tsx`, text-only there - no icon to swap).
 - **Sidebar row badge greys out when idle**: `SandboxIcon`/`DockerSandboxIcon` both take an `active` prop (default `true`, every other caller unaffected) - `false` forces the icon to the same faint gray as OFF regardless of mode, instead of its real color. Only the sidebar row's idle badge (`Sidebar.tsx`, `active={terminalTabs.length > 0}`) passes `false`; it used to show the mode's real color at reduced opacity whether or not the task had ever been launched, which read as "this task is actively caged" even for one sitting untouched. Fill (filled shield for `enforce`, outline for `enforce-fs`/`monitor`) still encodes the mode either way, so the two enforce modes stay distinguishable even gray. The YOLO-danger `Zap` badge in the same row is deliberately NOT included - it's a warning about a dangerous config, not a live status, so it stays red (just dimmer) even when idle.
@@ -88,13 +88,30 @@ Four states, set per-task at create + editable later. `Enforce` is the full cage
   The location is the load-bearing part, and it is NOT the app data dir: the Seatbelt profile ends with a final, last-match-wins `(deny file-read* (subpath <data_dir>))` protecting the CLI token, so a pasted image there would be unreadable in the mode most tasks run under. `/private/var/folders` is already on `builtin_runtime_paths`. It is canonicalized for the same reason it is mounted at the same path both sides: `/var` is a symlink to `/private/var`, and the Seatbelt rule, the Docker mount and the text typed at the prompt all have to name one string.
 
 - **User-added extra dirs**: `Settings.docker_agent_extra_dirs` (Settings → Docker Sandbox → "Per-agent config dirs", collapsed by default) lets a user append extra dirs to mount alongside `agent_dirs::state_dirs()`'s built-in list - e.g. a custom skills dir or an MCP server's own state dir. `docker::sanitize_extra_dir` rejects anything absolute or containing `..` before it can become a mount target (a raw `/root/{entry}` concatenation would otherwise let a stray `../../etc` resolve outside `/root`). Read + write both go through the normal `docker_agent_dirs` (read: builtin + extra + `is_builtin`/`persist_offerable`/`persist_enabled`, one row per REGISTERED agent, not just the known-safe ones) / `settings_save` (write: patches the map directly, no separate command) path - the built-in list itself is never editable.
-- **A capture-resume agent's session id in Docker**: `post_launch_capture` runs on the HOST (`run_capture_command`), and for a Docker task that is the wrong machine. The agent wrote its sessions inside the container, into `/root/.local/share/<agent>`, which is bind-mounted from `docker-agents/<agent>/local/share/<agent>`; left alone the command reads the user's own `~/.local/share` and captures an id the container has never seen, so the next spawn resumes into the agent's own "no saved log" error. Reported on a Docker main-checkout muse task. `run_capture_command` therefore takes the agent id + a docker flag and points `XDG_DATA_HOME` at the mounted parent, so the same command is correct on both sides. Only the DATA root is remapped: an agent whose capture also reads its CONFIG dir is not covered, because the first state dir is mounted AT the agent root rather than under a config parent, so no single `XDG_CONFIG_HOME` resolves correctly and guessing one would point at a directory that exists and is wrong.
+- **A capture-resume agent's session id in Docker**: `post_launch_capture` runs on the HOST (`run_capture_command`), and for a Docker task that is the wrong machine. The agent wrote its sessions inside the container, into `/root/.local/share/<agent>`, which is bind-mounted from `docker-agents/<agent>/local/share/<agent>`; left alone the command reads the user's own `~/.local/share` and captures an id the container has never seen, so the next spawn resumes into the agent's own "no saved log" error. Reported on a Docker main-checkout muse task. `run_capture_command` therefore takes the agent id + a docker flag and points `XDG_DATA_HOME` at the mounted parent, so the same command is correct on both sides. Only the DATA root is remapped: an agent whose capture also reads its CONFIG dir is not covered, because the first state dir is mounted AT the agent root rather than under a config parent, so no single `XDG_CONFIG_HOME` resolves correctly and guessing one would point at a directory that exists and is wrong. Known gap, read from the opencode 2.2.5 source and not measured: a HOST opencode 2 answers `session list` through its shared background service (`ServerConnection.resolve`), not by reading `XDG_DATA_HOME` itself, so the remap likely reaches nothing and the capture lists the host's sessions. The default image installs opencode 1, and so does a host that still has `opencode-ai`.
 - **Custom-agent opt-in**: for anything outside `docker::KNOWN_SAFE_AGENTS` (claude/codex/copilot/agy/opencode/pi/omp/muse/cursor; omp's installer drops its binary in `~/.local/bin`, outside the mounted `~/.omp`, so the mount cannot shadow it) - including every custom agent a user adds - `docker_agent_extra_dirs` mounts NOTHING unless `Settings.docker_agent_persist_enabled` is also true for that agent id. Off by default even for a brand-new agent. This is deliberate: `agent_config()` has no confirmed state dir for an agent it's never seen, and guessing one risks the exact failure `agent_dirs.rs` documents for grok/agy - an empty dir mounted over a path that ALSO holds a binary baked into the image at build time silently shadows it. grok itself is a PERMANENT exception (`docker::persist_offerable` returns `false` for it, and `agent_config` refuses it outright regardless of the opt-in) - its binary lives inside its own `~/.grok` config dir, so no warning text can make that combination safe. The frontend hides the opt-in toggle entirely for grok rather than offering one that can never do anything.
 - **Unified allow-list with Seatbelt**: Docker's `build_spec` now takes the SAME live-rendered list Seatbelt's `sandbox::provision` reads (`live_sandbox_lists` in `lib.rs`: global Settings defaults + the task's own pinned `sandbox_rw_paths` + the project's committed `.termic.yaml`, re-read fresh on every spawn) and mounts every plain entry rw at its own resolved absolute path - same convention as the worktree and composition members. Before this, switching a task from Seatbelt to Docker silently dropped every extra allowed directory; now the two engines agree on "what's allowed" and only differ in enforcement mechanism. `regex:`-prefixed entries are Seatbelt-only (no literal path to mount) and are skipped; a path already covered by an implicit mount (the worktree itself, a composition member) is deduped rather than mounted twice.
 - **Per-task extra mounts**: `Task.docker_extra_mounts` (`Vec<String>`, `host_path:container_path` entries, Docker's own `-v` shape) is a DEDICATED field, deliberately NOT part of `sandbox_rw_paths`/"Allowed paths" - that list is shared with Seatbelt via `live_sandbox_lists` and has no concept of a container path, so a `host:container` entry there would be ambiguous the moment a Seatbelt task reuses the same global/project default. Unlike the worktree/git-metadata mounts (host path == container path, a git `commondir`-pointer requirement, not a choice), an extra mount's container path is a free user choice with no same-path constraint. The use case is narrow and intentional: persisting something a fresh container otherwise loses on every restart that the built-in per-agent config dir doesn't cover (a custom MCP server's own data dir, say) - not a general bind-mount escape hatch. `docker::sanitize_extra_mount` validates each entry at spawn time (host: `$HOME`/`$WORKSPACE`-expanded via `subst_path`, must resolve to a non-empty absolute path; container: absolute, no `..`, and not under `docker::UNSAFE_MOUNT_TARGET_ROOTS` - `/root` and every system dir an empty mount could shadow or reach into) and silently drops a malformed entry, same as every other sandbox list parser in this file; `docker::validate_extra_mounts` runs the same container-path shape checks at SAVE time (`task_set_docker`) so a malformed entry surfaces as an error to the user instead of silently vanishing. **No host side in termic's data dir**: the data dir holds the sync clone, every agent's Docker login, the forge logins and the CLI token, so a host path that resolves to it or into it (`docker::resolve_host`: canonicalised, symlinks followed, the deepest existing ancestor when the leaf does not exist yet, since Docker creates a missing bind source) is refused at save by `docker::refuse_data_dir_mounts` (called from `validate_extra_mounts`, and by `project_update` / `settings_save` when `Project.docker_extra_mounts` / `Settings.docker_default_extra_mounts` change) and skipped at spawn by `build_spec`, so a value already on disk, or one using `$WORKSPACE`, cannot slip through either. Pinned by `docker::tests::an_extra_mount_cannot_take_termics_data_dir_or_anything_in_it` and `an_extra_mount_cannot_reach_the_data_dir_through_a_symlink`. An ANCESTOR of the data dir (`$HOME`) is not refused. Runs LAST among `build_spec`'s mount steps so it can dedupe against every mount staged above by either host OR container path - a mount whose container path collides with an already-claimed one (the agent config dir, say) is dropped rather than silently shadowing it. Editable post-create via `task_set_docker(id, enabled, extra_args, extra_mounts)` (`TaskSandboxDialog`'s "Extra mounts" field, saved + SIGKILLs like the rest of that command), and settable at creation too: `CreateTaskArgs`/`CreateMultiArgs`/`task_open_repo`/`task_import_worktree` all take an optional `docker_extra_mounts` override (`NewTaskDialog`'s own "Extra mounts" field, shown under the Docker card in every task-creation shape including the main-checkout/import paths) - unset falls back to `Settings.docker_default_extra_mounts` when Docker mode is on, `Vec::new()` otherwise.
 - **Default extra mounts**: `Settings.docker_default_extra_mounts` (Settings → Docker Sandbox → "Default extra mounts", same `host_path:container_path` format and `ListField` widget as a task's own field) is the Settings-level companion - unioned into a NEW Docker-sandboxed task's `docker_extra_mounts` at creation time (`NewTaskDialog` seeds its field from this, same convention as `sandbox_default_rw_paths` seeding a project's allow-list), then owned entirely by the task from then on: editing the default later only affects tasks created from now on, and a task can freely edit/remove/add past whatever it was seeded with. Global rather than per-agent, unlike "Per-agent config dirs" above - an extra mount's use case (persisting an MCP server's own data dir, say) isn't tied to which agent is running. Only the data-dir refusal runs at `settings_save` (and only when the list changed); the shape is not validated there (same lazy-validation precedent as `docker_agent_extra_dirs`): a malformed entry is silently dropped by `docker::sanitize_extra_mount` wherever it would actually become a mount.
 - **Command preview**: `docker_command_preview(task_id, agent_id?)` calls the exact `build_spec`/`render_argv` the real spawn path uses (never a separate approximation, so it can't drift) and returns the argv + annotated `DockerSpec.mounts` (each with its `why`) to the frontend. Shown behind a "Preview command" toggle in `TaskSandboxDialog`'s Docker section. Works even before the image is built (falls back to a `<image not built yet>` placeholder tag) so it stays useful as a "what would this actually do" check while still setting Docker mode up. Not byte-exact for the *command itself* (a real launch also mints/resumes a session id and composes YOLO flags, frontend-side logic this command doesn't have access to) - but the mounts/env/hardening flags, the security-relevant part this exists to show, are identical either way.
 - **How Settings → Agents & Terminals relates to Docker mode**: Docker mode is not a separate set of agents - it's an alternative CONTAINER for the same agents configured there. The command + args to run, any resolved CLI flags (YOLO, etc.), and `Agent.env` (the per-agent `KEY=VAL` block, via `SpawnArgs.env` / `envForCli`) all carry over into the container's argv/`-e` flags, appended after the base `TERM`/`COLORTERM`/relocation-env so a per-agent value wins on key collision - same precedence as the unsandboxed/Seatbelt path. What does NOT carry over: `Agent.sandbox_allowed_paths` is Seatbelt-only and is simply unused in Docker mode (fixed mounts, not an allow-list), and the raw inherited HOST environment (API keys sitting in your shell, say) is deliberately NOT passed through - Docker's isolation model relies on the mounted per-agent config dir for credentials/login instead.
+
+## Known gap: opencode 2 runs its tools outside the sandboxed PTY
+
+Read from the opencode 2.2.5 source, not measured. Seatbelt wraps the agent
+CLI's PTY, and for every other agent that is where tools run. opencode 2's
+`opencode` is a CLIENT: it connects to a background service
+(`opencode serve --service`) shared by every opencode on the machine, and
+tools execute there (`core/src/session/model-request.ts`). A service that a
+sandboxed task spawned inherits that task's cage, so other tasks' tools run
+in it; one started outside termic (the desktop app, a plain terminal) runs a
+sandboxed task's tools uncaged. Whether a caged client can even reach a
+service on loopback is unmeasured. opencode 1 runs everything in-process and
+is unaffected, and so is Docker, whose container gets a service of its own.
+`opencode --standalone` instead runs a private server as the client's own
+child (`cli/src/services/standalone.ts`, env extended from the client's),
+which would inherit the cage; that is the likely fix, also unmeasured. See
+docs/agent-hooks.md "opencode 2".
 
 ## Known gap: the webview is outside the cage
 
@@ -304,19 +321,22 @@ counted in `KEYCHAIN_OPEN`: a caged one whose profile left it open
 (`provision`), and an uncaged one, Off or a failed provision
 (`pty_spawn`, which knows there is no bundle). `sandbox_deny_counts`
 reports that count (`keychain_open`) on the poll the footer already
-makes. Nonzero reads "Keychain block applies on restart"; zero reads
-"Keychain blocked"; before the first answer, or after a failed poll, the
-suffix is not shown at all, since "blocked" is a claim and never a
-default. Whether the profile blocks comes from one function,
+makes. Nonzero reads "restart to apply" on the cage chip and "Blocked
+from the next restart" on the popover's Keychain row; zero reads
+"Blocked"; before the first answer, or after a failed poll, the chip
+claims nothing and the row reads "Checking", since "blocked" is a claim
+and never a default (the chip carries it as `data-keychain`). Whether the profile blocks comes from one function,
 `blocks_keychain`, which both the renderer and `provision` call.
 
 When set, `render_profile_with` emits `KEYCHAIN_MACH_DENY` and a
 read+write deny on `~/Library/Keychains`. The Mach list is every
 Keychain service `launchctl print gui/$UID` / `system` shows on macOS
-26: SecurityServer, every `com.apple.securityd*` endpoint (secd: the
-data-protection keychain, the system keychain, CKKS / SOS sync), the
+26 except SecurityServer: every `com.apple.securityd*` endpoint (secd:
+the data-protection keychain, the system keychain, CKKS / SOS sync), the
 keychain agents and sync helpers, and every `com.apple.ctkd*`
-(CryptoTokenKit, smart-card and token identities). The dir deny is
+(CryptoTokenKit, smart-card and token identities). SecurityServer stays
+reachable because Secure Transport needs it for every TLS handshake (see
+"SecurityServer is not denied" below). The dir deny is
 emitted for the literal path and, when it differs, its resolved form,
 mirroring the runtime allow loop; otherwise a symlinked home keeps its
 resolved allow. Both come after every file allow, the control plane's
@@ -362,8 +382,8 @@ as complete:
   return 200; gh with a fake token gets its 401 with no x509 error;
   claude `/login`, codex and gemini start inside the blocked task. The
   extra names (the rest of `securityd*`, `ctkd*`, the sync helpers) are
-  defence in depth. `keychain_block_cuts_off_securityd_in_the_cage`
-  repeats the dir and data-protection probes with a positive control;
+  defence in depth. `keychain_block_cuts_off_the_keychain_in_the_cage`
+  repeats the search-list, dir and data-protection probes with a positive control;
   like every live cage test it needs an uncaged shell. Service names
   move between macOS releases: re-enumerate when a new one ships.
 - the header still allows every other `mach-lookup`, launchd included,
@@ -394,8 +414,68 @@ as complete:
   claims an agent cannot see a Keychain secret has to close these
   first, or say "cannot read it directly".
 
-TLS does not need the Keychain services in any stack tried (Codex and
-sandbox-runtime keep `SecurityServer` "for TLS"; not needed here).
+**SecurityServer is not denied.** It was, until 2026-10-23, and that
+broke Secure Transport everywhere in a blocked cage: system curl with
+`CURL_SSL_BACKEND=secure-transport` (or its default; Apple's curl lists
+Secure Transport first) and Apple git against any host failed with
+"Couldn't understand the server certificate format". Go, node, python
+urllib and curl on LibreSSL were unaffected, which is why the table
+above showed 200s. Forcing OpenSSL is not an answer: it trusts
+`/etc/ssl/cert.pem` instead of Apple's trust store, so it misses
+distrust decisions such as the October 2026 emSign removal. Codex and
+sandbox-runtime keep `SecurityServer` "for TLS"; this is that case.
+
+The legacy login keychain is read by the client process, with securityd
+only doing the crypto, so the `~/Library/Keychains` dir deny is what
+keeps it out. Measured 2026-10-23 on macOS 26.5 with fake items, the
+block as shipped vs the block minus SecurityServer (both with the dir
+deny):
+
+| Probe | Block + SecurityServer deny | Block, SecurityServer reachable |
+|---|---|---|
+| `security find-generic-password -w` | not found | not found |
+| python ctypes `SecKeychainFindGenericPassword` | -50 | -25300 (not found) |
+| `git credential-osxkeychain get` | nothing | nothing |
+| `security list-keychains` | fails | System.keychain only |
+| curl, Secure Transport | fails | 200 |
+| `/usr/bin/git ls-remote`, Secure Transport | fails | works |
+
+The System keychain stays visible; its items need admin authorization,
+and the security agents that would ask for it are still denied.
+
+The dir deny only covers `~/Library/Keychains`. With SecurityServer
+reachable, an unlocked keychain kept anywhere else the cage can read
+(`security create-keychain <path>`) is decrypted for the agent:
+measured 2026-10-23, a fake item in a temp-dir keychain leaked with the
+dir deny alone. So the block also emits `KEYCHAIN_FILE_DENY`, a
+read+write deny on any `*.keychain` / `*.keychain-db`, extension in any
+case, outside `/System/Library/Keychains` and `/Library/Keychains` (roots
+and the System keychain). Not all of `/System`: `/System/Volumes/Data`
+is another path to every home dir.
+
+Measured 2026-10-23 against a real EnforceFs task profile, fake items in
+throwaway keychains, all three blocks (pre-2026-10-23 with the
+SecurityServer deny, the dir deny + lowercase rule, and the shipped one):
+
+| Probe | No block | Any of the three blocks |
+|---|---|---|
+| item in `~/Library/Keychains` | leaked | not found |
+| same, via `/System/Volumes/Data<path>` | | not found |
+| `ln` it out of `~/Library/Keychains` | linked | `ln` refused |
+| keychain in `$TMPDIR`, `.keychain-db` | leaked | not found |
+| keychain in `$TMPDIR`, `.KEYCHAIN-DB` | leaked | not found |
+| `security list-keychains` | login + System | login + System (old block: fails) |
+| curl / Apple git, Secure Transport | works | works (old block: fails) |
+
+Two things that table does not say. `list-keychains` still printing the
+login keychain is not a leak, items in it are not found, so it is no use
+as a test signal. And the lowercase-only rule also refused the
+`.KEYCHAIN-DB` read, for a reason not pinned down; the rule matches any
+case explicitly so the result does not rest on that. The limit: a
+keychain saved under a non-keychain name outside `~/Library/Keychains`
+is not caught, since the profile matches names and does not enumerate
+the user's keychains. `keychain_block_cuts_off_the_keychain_in_the_cage`
+repeats the inside, hard-link and both outside probes with controls.
 
 **Why the dir is not read-only for everyone.** With the services
 reachable and the dir read-only, `security add-generic-password` fails
@@ -424,6 +504,489 @@ posture once every built-in agent has a measured file fallback; until
 then it is opt-in. A stopgap that needs no termic change:
 `gh auth login --insecure-storage` and `credential.helper store` move
 those two credentials into files the cage already denies.
+
+## Env vars kept out of agents
+
+Termic launched from a shell (`make beta`, `open` from a terminal) inherits
+that shell's exports, and every agent it spawns inherits them in turn. A
+`GITHUB_TOKEN` exported for the user's own `gh` then sits in a caged agent's
+environment, where the cage cannot stop it leaving through an allow-listed
+host. A Dock launch gets launchd's bare env and has nothing to keep out. Code:
+`src-tauri/src/env_guard.rs`, applied in `pty_spawn`; UI: the Env vars tab
+of Settings > Secrets, and the "Inherited from Termic" list on each agent's
+card (its "Edit the list" link opens that tab). The tab's tip lists the
+built-in names from `ENV_GUARD_BUILTIN` in `secretsSettings/model.ts`, which
+`model.test.ts` pins to `env_guard::BUILTIN`.
+
+**What is on the list.** A name in `env_guard::BUILTIN` (credentials with no
+recognisable value shape: `GITHUB_TOKEN`, `AWS_SECRET_ACCESS_KEY`, ...), a
+value `secrets::token_prefix` recognises under ANY name, or a name the user
+added (`Settings.env_guard`). The UI only ever sees names: `env_guard_list`
+reports why a var is listed, never any part of its value.
+
+**Who it is kept from.** Caged agents by default. A rule with `all` keeps a
+var from every agent tab, caged or not, including the login-shell delta an
+uncaged spawn otherwise gets; a name the user adds starts at `all`. "Caged"
+is the task's intended mode (`effective_sandbox_mode() != Off`), so a
+provision that failed and fell back to an unsandboxed spawn still keeps
+caged-only vars out.
+
+**What always wins.** `Agent.pass_env` (the user passed that var to that
+agent) and the agent's own login var (`env_guard::own_login`, by base agent
+id, so a clone inherits it: `ANTHROPIC_API_KEY` for claude, `OPENAI_API_KEY`
+for codex, ...). The per-spawn overlay (`Agent.env`, a task's `.env`) is
+applied after the inherited env, so a value typed there arrives regardless.
+The broker's own `env -u` in `wrap_command` runs after all of this, so a
+brokered spawn never gets the real GitHub token even when it is passed
+through.
+
+**Out of scope.** The AuxTerminal, scripts and shell tabs see everything:
+they are the user's, not the threat model. Docker needs nothing, since a
+container never gets host env (only `TERM` and the relocation vars). The
+one exception is a shell the user started with a Secrets role: it loses
+what its role's recipes strip (`GH_TOKEN` and friends, an API key's own
+vars), and nothing else (see "Shells" below).
+
+## Credential broker (Secrets roles)
+
+A task with a Secrets role lets its caged agent USE a GitHub login or
+an API key without ever holding it. Code: `src-tauri/src/broker/`, wired in
+`sandbox::provision` / `wrap_command`, MITM hook in `proxy.rs`.
+
+**When it applies.** Seatbelt Enforce or EnforceFs, the Keychain block
+on (`sandbox::blocks_keychain`), and the task's own role (`lib.rs`
+`spawn_broker_setup`, every agent of the task runs it). Defaults are
+read only at creation: a task created with no role is given the
+project's default, else its primary agent's, else No secrets
+(`seed_task_role`), so a default changed later never moves an existing
+task. An
+agent that can read the Keychain can read the real token itself, so
+without the block the spawn is exactly what it would be with no role.
+Agent PTYs get it through `provision`; a shell (a main-area shell tab or
+the bottom split) gets one only when the user starts that shell with a
+role (see "Shells" below), and no default ever applies to one. Scripts
+never do.
+Docker never gets a role (no proxy there yet). So picking a role in a
+task dialog (New Task, Edit, Sandbox, Schedule) moves an uncaged or
+Monitor draft to Enforcing (FS) and ticks the block, and the picker says
+so before the click; the Sandbox and Edit dialogs save the sandbox
+before the role, because `task_set_role` refuses a role until the task
+blocks the Keychain.
+
+**Per agent spawn**, owned by the `SandboxBundle` and dropped with it:
+
+- a placeholder per secret, `termic_ph_` + 32 hex chars;
+- a dir `/private/tmp/termic-<uid>/<12 hex>/` (0700; the base dir is
+  refused if it is a symlink or not ours) holding `gh/config.yml`,
+  `gh.sock` (0600) and, for git, `ca.pem`. Short because macOS caps a
+  socket path at 104 bytes. Drop unlinks the socket and removes the dir,
+  and a broker that fails to start removes its dir too;
+- every Enforce / EnforceFs profile denies the whole base
+  `/private/tmp/termic-<uid>` after the runtime allows (which open
+  `/private/tmp` read+write). All agents run as one uid, so without it one
+  task's agent could rewrite another's gh config (repoint its socket, set
+  a pager that runs inside it), swap its CA bundle, or unlink its socket;
+- a brokered profile then re-opens only its own dir, appended last: read on
+  the dir, rw only on `gh/` (gh's config dir), outbound to its socket. The
+  socket and CA files stay read-only, so the agent cannot unlink or swap
+  them. Those rules follow the control-plane deny (different path, so that
+  deny still holds);
+- env: `env -u` for `GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`,
+  `GITHUB_ENTERPRISE_TOKEN` (they would otherwise be inherited from
+  Termic's own env), then `GH_TOKEN=<placeholder>`, `GH_CONFIG_DIR`,
+  `GH_NO_UPDATE_NOTIFIER=1`, and env-only git config appended after any
+  inherited `GIT_CONFIG_COUNT`: `credential.helper=` (reset), a
+  `credential.https://github.com.helper` answering `x-access-token` +
+  the placeholder, and for `https://github.com/` `sslCAInfo`, `proxy`,
+  `proxyAuthMethod=basic` and `sslBackend=openssl`. The last was added
+  when the Keychain block still denied `com.apple.SecurityServer`, which
+  Secure Transport needs (see "SecurityServer is not denied"). It stays:
+  this leg only trusts the spawn CA, and the broker verifies the real
+  github.com with the platform verifier, so Apple's trust store still
+  decides. Scoped to the URL (verified: a bogus scoped value breaks only that
+  host), so every other host keeps the user's backend. A git whose curl
+  lacks OpenSSL fails here instead (Apple git verified; Homebrew's curl is
+  built on OpenSSL but was not tested);
+- for an API key: `env -u` its own env vars too (Termic's env may hold
+  the real `OPENAI_API_KEY`), then `<env>=<placeholder>`, its base-URL
+  var at the endpoint below, and the env-proxy vars below.
+
+**gh** reads `http_unix_socket` from its config and sends plaintext HTTP
+to the socket; the broker dials verified TLS upstream (rustls + the
+platform verifier, aws-lc-rs). The peer is checked with `LOCAL_PEERPID`
+against the task's registered root pids (`sandbox::pid_in_task`): its
+parent chain, or else its session id, since an orphan is reparented to
+launchd but keeps the session portable-pty `setsid()` started. Any other
+process gets 403 and a Suspicious `wrong_peer`. Hosts no secret
+covers are forwarded only if the task's allow-list matches (EnforceFs:
+any), with no substitution; a 401 from one is recorded as "no secret".
+
+**git** is pointed at the task's proxy with credentials only it has
+(`http.https://github.com/.proxy=http://termic:<marker>@127.0.0.1:<port>`,
+sent up front because of `proxyAuthMethod=basic`; verified with Apple
+git 2.50.1). A CONNECT to a bound host on 443 carrying them, from a
+process of the task ("TCP peer check" below), is terminated with a leaf from a per-spawn CA name-constrained to the
+bound hosts (key in memory only), ALPN http/1.1. Every other CONNECT,
+including other tools going to github.com, is the blind tunnel it
+always was, so nothing else ever sees the CA. In Enforce this is the
+existing proxy; EnforceFs has none, so a role with a MITM delivery
+(git, or an API key's env proxy) starts an allow-all one.
+
+**API keys** (recipe `api_key`) reach the broker two ways, and the
+real value goes into the one header the secret names (`authorization:
+Bearer`, `x-api-key`):
+
+- **Base URL.** `OPENAI_BASE_URL` (whatever var the secret names) is
+  `http://127.0.0.1:<port>/<marker>/<host><path>`, a per-spawn plaintext
+  loopback listener (`broker/baseurl.rs`) the profile allows outbound
+  to. The broker strips `/<marker>/<host>`, sets `Host`, and dials
+  verified TLS to that host; a host the secret is not bound to over
+  this route is a 403 `not-bound`, so the endpoint never forwards
+  elsewhere. No CA is involved, so this reaches Go and Rust clients
+  the MITM cannot. The client must be a process of the task (see "TCP
+  peer check" below), checked before the connection takes a slot, and
+  the request must carry the random marker; failing either is a 403
+  and a Suspicious `wrong_peer`.
+- **Env proxy.** `HTTPS_PROXY` / `https_proxy` carry a SECOND set of
+  proxy credentials, distinct from git's, and `SSL_CERT_FILE`,
+  `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE` point at a bundle of the trust
+  the agent would have had (the first of those vars already set in
+  Termic's or the login shell's env, so a corporate CA survives, else
+  `/etc/ssl/cert.pem`) plus the spawn CA (those vars replace the trust
+  store), and `NODE_EXTRA_CA_CERTS` at any extra certs it already named
+  plus the CA (it adds). A CONNECT is
+  MITM'd only when its credentials match the delivery that binds the
+  host: git's never open an API key's host and HTTPS_PROXY's never open
+  github.com, because a Go tool on `HTTPS_PROXY` ignores the CA vars on
+  macOS and would fail TLS against a host it used to tunnel to.
+  `NO_PROXY` covers loopback, so base-URL requests go direct.
+
+**TCP peer check.** The base-URL endpoint, git's proxy and the env
+proxy are TCP, which has no `LOCAL_PEERPID`, so the broker names the
+peer itself (`sandbox::tcp_peer_in_task`, libproc in `procmon.rs`): it
+looks for the process holding the client end of the connection: a TCP
+stream socket (`SOCKINFO_TCP`, `SOCK_STREAM`, `IPPROTO_TCP`) whose local
+address and port are the peer's and whose remote address and port are
+the listener's, the whole 4-tuple, with the address form taken from
+`insi_vflag` so a v6 socket is never read as v4. A UDP socket on the
+same ports does not count. Only the task's own tree is searched:
+its registered roots and their descendants (`PROC_PPID_ONLY`), then, on
+a miss, launchd's children whose session id is a root's, the same two
+ways `pid_in_task` accepts a pid. A process outside the task is never
+found, and the pid found still goes through `pid_in_task`. Anything
+else is a 403 and a Suspicious `wrong_peer`. Measured on an Apple
+silicon Mac (release build): about 12us when the client is in the tree,
+about 90-100us for an orphan or a miss (both list launchd's children),
+and about 100us more for each tree process holding ~60 sockets. Well
+under a millisecond for a normal agent tree, so nothing is cached.
+
+It runs on the base-URL endpoint's accept thread, before the connection
+takes one of its 64 slots, so a same-user process can neither spend the
+secret nor crowd the endpoint out. On the task's proxy it runs only for
+a CONNECT carrying this spawn's git or env-proxy credentials, the ones
+the broker would MITM; every other CONNECT is the blind tunnel it
+always was, for any process. The path marker and the proxy credentials
+are still checked too.
+
+What is left: any process of the same task passes, which is intended
+(every tool the agent runs may use its role). Off macOS there is no
+lookup (`Deps::tcp_peer` is None) and these deliveries stay on their
+markers alone. A process that `setsid()`s and is then orphaned has left
+the tree and is refused, as `pid_in_task` refuses it. A base-URL client
+refused on accept may see a reset instead of the 403 if it had already
+sent its request, because the refusal does not read it; the Suspicious
+row is the record either way.
+
+**Substitution** happens in one spot per delivery and only when the
+broker dials a bound host itself: `Authorization: token|Bearer <ph>` on
+gh's socket, the Basic password (re-encoded) on git's MITM, never the
+other way round, and an API key's named header on its two deliveries
+(present exactly once, or nothing is swapped). Any other header keeps
+the placeholder. Deliveries,
+their spot, the env each recipe strips and which classifiers its rules
+get (GraphQL, git) are one table per recipe in `broker/recipe.rs`. A spawn's placeholder seen anywhere (headers, decoded Basic,
+the URL) on a host its secret is not bound to, or in a plain-HTTP proxy
+request, is refused 403 and recorded Suspicious
+`placeholder_unbound_host`. A CONNECT tunnel to an unbound host is
+opaque TLS, so attempts there are not seen (the placeholder is worthless
+there anyway).
+
+**Requests are parsed strictly**: HTTP/1.1, one per connection,
+`Connection: close` forced, origin-form only, exactly one Host, at most
+one Authorization, no CL+TE, no TE but exactly `chunked` (passed through
+untouched, framing checked so nothing after the body rides along), head
+capped at the proxy's 16 KiB. Paths GitHub might read differently than
+the rule glob are refused 400 before any rule runs: encoded `/` or `\`,
+a raw `\`, `.` / `..` segments (raw or `%2E`), `//`, a literal `*`,
+and `#` / `;` (a server that cuts the path at a fragment or a matrix
+parameter would run a route the rules did not see).
+Escapes of unreserved characters (`%6D` for `m`) are decoded first, and
+the decoded path is what both the rules and upstream see; a path whose
+decode would build a new escape (`%%36D`) is refused.
+Redirects are never followed: a 3xx goes back to the client.
+
+**Rules** are read per request (the task's own file + settings re-read
+from disk, so edits apply to the next request; the spawn-time role is the
+fallback if the role was deleted). The binding (which secrets the agent
+holds placeholders for) is fixed at spawn, so a secret taken off the live
+role, or deleted, is refused 403 `secret-revoked` from the next request:
+its rule sets went with it, and judging it would allow. The other way
+round (a secret added or swapped onto the role, or a bound secret's hosts
+or Keychain item edited) only lands on restart, so `broker_counts`
+reports `stale` and the cage chip reads "restart to apply". A deleted role (or
+settings that fail to parse) reads as a role with no secrets, so it
+revokes everything instead of falling back to the spawn-time rules. Task allows
+first, then the role's rule set for (secret, host), first match, then its
+fallback. A (secret, host) with no rule set takes the role's default: deny
+when any of the role's sets falls back to deny (the role was written
+deny-by-default, like the Reviewer starter, so a host added later never
+opens up), allow otherwise. A popover allow that creates a set gives it
+that default as its fallback. A mutation the classifier cannot name
+(unparsed, an unknown fragment, past the depth or visit caps, a non-POST
+`/graphql`, an empty mutation) is denied unless a rule allows `MUTATION *`,
+whatever the fallback and the task allows: it could hide the very mutation
+a named DENY is there for, and the popover refuses to allow one by name.
+Host matching ignores case, and
+`settings_save` refuses a host that is not a lowercase DNS name, a rule
+with no method, and an empty pattern on anything but `QUERY` (an empty
+pattern matches every path). A rule with `disabled` set stays in the list
+and is skipped. `TRACE`, `TRACK`, `CONNECT`, and a method spelled like a
+pseudo-verb (`QUERY`, `push`) are refused 405 on bound hosts: the first
+two echo the request, swapped header included, and the last would be
+judged as that pseudo-verb. A bound host with its own echo or debug route
+would still hand the value back; nothing in the broker can see that.
+Methods are HTTP verbs, `*`, `QUERY` / `MUTATION` for `POST /graphql`
+(body buffered up to 1 MiB, larger is 413; mutation names are the
+top-level fields, resolved through aliases and fragments; anything that
+does not parse, or holds no operation, counts as an unknown mutation, and
+so does one nested deeper than 64 selection sets or needing more than
+10,000 visits to expand its fragments, so a hostile body cannot overflow a
+thread's stack or fan out exponentially; comments end at `\r` as well as
+`\n`), or `fetch` / `push` for
+git (`git-upload-pack` / `git-receive-pack`, pattern globs
+`owner/repo`). Globs: `*` one segment, `**` any, case-insensitive
+(GitHub resolves owner and repo that way, so `ACME/prod` must hit a rule
+written for `acme/prod`); a trailing `/` is dropped before matching.
+Matching is asymmetric so a rule is always read the strict way. An
+ALLOW matches only what a request does (`QUERY`, `MUTATION <name>`,
+`fetch` / `push <repo>`, or a plain HTTP verb and path), and its `*`
+method means any HTTP verb, never a pseudo-verb: `ALLOW * /**` or
+`ALLOW POST /**` cannot let a mutation or a push through. A DENY also
+matches the HTTP request carrying a GraphQL or git operation, and its
+`*` matches everything: `DENY POST /graphql` still stops GraphQL. Any non-POST
+request to `/graphql` is an unknown mutation, a doubled `service=` on
+`info/refs` is a push if any value is receive-pack, and method overrides
+(`X-HTTP-Method-Override` and friends, `_method=`) are refused with a
+400, so upstream never runs a verb the rules did not judge. A deny is a 403 with
+`X-Termic-Secrets: blocked-by-role` and the body
+`blocked by Termic role "<name>" (<METHOD> <path>)`.
+
+**The Keychain read** (`security-framework`, explicit account, gh's
+`go-keyring-base64:` unwrapped) is cached 60s in memory. gh's items
+(`gh:*` generic passwords) are the exception: they are read through
+`/usr/bin/security find-generic-password -w`, because go-keyring writes
+them with that tool and so their ACL trusts it, not Termic. Read that
+way there is no "Termic wants to access" prompt on any build, and it
+opens nothing a same-user process could not already do. `security`
+exits with the low byte of the OSStatus (44 is not found). A locked,
+missing or denied item fails closed with a 503 naming the secret, and
+so does a value holding a control character (it would split the header
+it lands in). A pasted value (an API key, or a GitHub token for a secret
+that does not point at a gh login) is written by `secret_store` as a
+generic password `termic:<id>` / `termic`, the only items Termic owns,
+labelled `Termic: <secret name>` (the label is what the access prompt
+and Keychain Access show; the service stays the id, so a rename does not
+lose the item, and the label catches up on the next Replace value);
+removing the secret deletes it. The e2e build keeps those items in
+memory.
+
+**Where owned items live.** `secret_store` writes to the data protection
+keychain first (`kSecUseDataProtectionKeychain`), where access is by code
+signature and keychain access group, not a per-item ACL: Termic's signed
+build reads with no "wants to access" prompt, and no other same-user
+process can ask for the item at all (in the login keychain one can, and
+the user may click Allow). A build without the entitlement (`tauri dev`,
+contributor and ad-hoc builds) gets errSecMissingEntitlement (-34018) and
+falls back to the login keychain; that error and only that one, so a
+locked keychain is still reported instead of quietly moving stores. The
+secret saves the kind the write returned (`protected` or `generic`), and
+reads and deletes go to that store. After a write the other store's copy
+of `termic:<id>` is deleted, so a Replace on a build that changed stores
+leaves one item; removing a secret deletes from both.
+`secrets_protected_available` reports which case this build is in. Items
+are written without `kSecAttrSynchronizable`: an agent-scoped token has
+no business in iCloud. No custom keychain (`SecKeychainCreate`): that
+API is deprecated, and Apple's direction for new code is the data
+protection keychain (TN3137). The cage blocks that keychain too (-25291
+above); the broker reads outside the cage, so nothing it relies on
+changes. Signing for it needs a Developer ID provisioning profile.
+
+**Events** (per task, in memory, never a header value): Used (per secret
+and host, by method or fetch/push), Blocked, No secret, Suspicious
+(`placeholder_unbound_host`, `wrong_peer`, and `keychain_denied`: a
+brokered task's path deny under `~/Library/Keychains`). Used and Blocked
+rows name the role the spawn runs, which is the role a role-scoped Allow
+lands on (not the task's saved role, which a switch makes differ until
+the agent restarts), and `broker_counts.roles` lists the roles live spawns run.
+Each map keeps at most 200 rows (oldest evicted) and clips fields to 512
+bytes, since paths and hosts are agent-chosen. Cleared at `provision` only
+when none of the task's agents still holds a broker, so a second tab or a
+restart keeps a running agent's evidence; an Allow clears the rows it
+covers. Pause refuses every brokered request of the task until resumed,
+live.
+
+**The cage chip** (`CageChip.tsx`, state in `lib/cageChip.ts`, a vitest
+table per state) is the status bar's one control for what an agent can
+reach, as one pill with two targets. The left part reads `[shield] <mode> ·
+[key] <role>` ("Sandbox off · No secrets" when nothing is set; "No
+secrets" only shows when a role exists to pick), then "restart to apply"
+when something saved waits for a restart (a role switch, a stale role, a
+store block the live agent predates). A role set but unable to apply (no
+store block, Monitor, Docker) is struck through in amber. The right part,
+the tail, is the one thing that needs you, highest first: `N suspicious`
+(red, pill tinted), `paused`, then one `N blocked` that adds the cage's
+denies to the role's blocks (`N accesses` in Monitor); it is absent when
+nothing does.
+
+The left part opens **Settings**, a compact popover with no lists: one row
+per setting, each led by the glyph the chip and the sidebar already use.
+Sandbox mode is five glyph buttons (Off, Monitoring, Enforcing FS,
+Enforcing, and Docker once it is offered), the credential-store block a
+lock switch (only inside the enforcing modes), the Secrets role the one
+role list with an "Edit <role> in Settings" link, and YOLO a bolt switch
+(forced on, disabled, inside a cage). Edits are a draft until Save or Save
+& restart: picking a role on an uncaged draft turns on Enforcing FS and the
+block, leaving the cage or the block takes the role with it, and a role
+saved where it cannot apply offers "Turn both on". Docker switches at once
+with its own confirm, as in the Sandbox dialog. "Sandbox settings…" opens
+that dialog for the allow-lists.
+
+The tail opens **Cage activity** (`CageActivity.tsx`), a wide panel that floats
+above the task's status bar, inside that task's column, and blocks nothing
+(no dialog, no backdrop: it takes focus when it opens and hands it back to
+where it came from, usually the terminal, when Esc from inside it, its ✕,
+or the tail again closes it). It lists what the agent AND
+the task's role shells were blocked from, flagged for, or used, one table
+of one-line rows: when, times, kind, what and the row's action, each
+with a status stripe (amber blocked, green allowed, red suspicious). Every
+header sorts (a click sorts, a second flips, a third goes back to newest
+first). Clicking a row opens its detail under it, one at a time: a
+header (the whole request, why, and who / process / when on one line)
+over two equal panels. The left is the evidence: the role's rules for that
+host with the one that matched marked, the allow-lists a host was checked
+against, a path's segments (where you pick the file or a folder above it;
+the home folder and top-level folders are never offered), the role's
+secrets for a host with none. The right is the decision: the scopes as a
+radio list with an Allow, saying when it takes effect (a rule from the
+next request, a host or path at the agent's next restart), or once
+allowed, where and an Undo.
+An allowed row stays, its button a green "✓ Allowed · <scope>" that
+undoes it (`sandbox_remove_allowed`, `broker_unallow`). "Allow by
+default" on the filter row sets what an Allow button's face does, for
+hosts and paths and for secret requests; not set (the default) means
+every Allow asks, and the ▾ always allows somewhere else for that row
+only. A shell's request always asks, since its role may be shared. One row
+of filters: keyword, show (blocked, suspicious, used) as a segmented
+control, then kind (network, file, role rule, no secret), who, role and
+time window as compact menus that name their value. A shell's tab badge opens it pre-filtered to that shell. Pause sits in its header and belongs to the shell picked in Who,
+else the agent. In Monitor it shows the access view (aggregate and
+detailed, with its recording filters) instead of the agent's rows. It polls
+once (cage lists plus every broker key's events and counts, 1.5s) only
+while open; the chip rides the footer's 2s tick. The command palette
+reaches it too ("Sandbox and secrets activity").
+
+**Allow scopes** are per row kind, on a split button whose label carries
+the remembered scope ("Allow · this project", "Allow · Reviewer"); the
+caret lists the scopes that row can take, and a pick there both allows and
+becomes that kind's memory. Cage hosts and paths: this project (writes the
+task and the project, `task_sandbox_add_allowed_*`), the agent in every
+project, or `.termic.yaml`, remembered in `prefs.allowScope`, which starts
+empty: with nothing remembered a click opens the menu instead of acting.
+Role rules: this task or everyone on the blocking role, remembered in
+`prefs.secretsAllowScope` (default the role). No-secret rows only offer
+Grant. A role-rule Allow applies to the next request; a host or path Allow
+lands on the next spawn, as before.
+
+**Listeners** (gh socket, base URL) share one accept loop
+(`broker/accept.rs`): shutdown is a self-pipe, never a connection to the
+listener's own path, so an unlinked socket cannot hang the drop; an accept
+error backs off 50ms instead of spinning; at most 64 connections per
+listener, and the gh socket's pid check runs before a connection takes
+one. Client sockets time out after 15s idle while sending the request
+(60s on writes), upstream ones after 120s / 60s. The
+per-spawn CA and its leaves are valid from a day ago to 90 days out.
+
+### Shells
+
+A shell gets nothing until the user assigns a role to that shell.
+`SpawnArgs.shell_secrets` (`{ task_id, tab_id, role }`) is the only way
+in; without it the spawn is exactly what it always was: no broker, no
+proxy, no placeholder or CA env, no root pid (`plan_shell_secrets`, pure,
+so that is a unit test). It never comes with `task_id` (that would be an
+agent, which gets its role from the task), and off macOS, or with a role
+or task that no longer exists, the spawn fails. So does a role that fails
+to start, instead of falling back to a plain shell: a silent plain shell
+would leave the user's real `gh` login in play while the tab claims a
+role. Agents keep their "secrets lost, spawn kept" behaviour.
+
+- **Own identity.** The broker key is `shell:<task_id>:<tab_id>`
+  (`broker::shell_key`), used everywhere the broker takes a task id:
+  root pid registration, events, counts, pause, the peer check. A shell
+  never shares the agent's identity, so it never passes the agent's peer
+  check and its requests never count on the agent's chip. `live_rules`
+  finds no task under that key, so a shell gets the role's rules and no
+  task allows.
+- **No cage.** `sandbox::provision_shell` reuses the broker start without
+  Seatbelt: no profile, path watcher or Keychain hold, and an allow-all
+  proxy only when the role has a MITM delivery (git, an API key's env
+  proxy), as EnforceFs does. The `ShellBundle` rides the PTY slot, broker
+  dropped before proxy.
+- **Env.** `sandbox::wrap_shell_command` is `env -u <strip_env>
+  TERMIC_SECRETS_ROLE=<role name> <broker env> <shell>`: none of the
+  cage's vars (`TERMIC_SANDBOX*`, the generic `http_proxy`). The env
+  proxy's `HTTPS_PROXY` and CA vars are part of the broker's own env, so
+  both wraps share them. The shell's rc files run after that, so a
+  `~/.zshrc` that exports `GH_TOKEN` wins; gh then sends that token to the
+  socket, which forwards it untouched (as it always has) and records a
+  `foreign_token` event (host and count, never the value;
+  `BrokerCounts.foreign_token`). On an agent it shows under Suspicious;
+  on a shell it drives the rc-file banner. An rc file that overwrites
+  `HTTPS_PROXY` cannot be detected.
+- **Allow.** A shell's blocked row only takes the `role` scope:
+  `broker_allow` with the shell's key as `id`, like every `broker_*`
+  command; the task (and so the profile) is read off the key.
+- **Lifetime.** A shell key belongs to one tab. `pty_kill` drops its
+  broker and root pid at once, not after the kill grace, so a Restart's
+  new shell never shares the key with the dying one, and forgets its
+  events and pause; archive forgets every shell key of the task. A
+  task-level pause also pauses its shells.
+- **Activity.** `broker_all_events` returns shell keys too; Settings >
+  Secrets > Activity shows one as "<task> › shell".
+
+**UI.** The role is chosen per shell, at start, and nowhere else: the
+⌘T launcher (main area, or the pane it was opened from), where → on the
+Terminal row swaps the list for the roles and typing a role name finds
+"Terminal as <role>"; the default list never carries a role, so every
+agent keeps its 1-9. And "Restart with secrets ▸" on a shell tab's menu (main,
+split pane or bottom split; the bottom `+` stays a plain shell). The pick
+lives on the tab (`TerminalTab.secretsRole`, `bottomTabs[].secretsRole`),
+session-only: shell tabs in the main area and the bottom split are never
+persisted, and a split-pane shell that is persisted comes back without its
+role. Switching a role respawns the shell (`setShellSecretsRole`), after a
+confirm naming what still runs under it (`pty_children`). The role shows on
+the shell's own tab, never in the status bar (it stays the agent's); see
+ui.md "A shell's Secrets role". Every entry point is hidden off macOS and
+when no role exists (`useShellRoles`).
+
+What it guarantees:
+
+- A pasted secret on a signed build: the shell cannot read it (data
+  protection keychain); only the broker sees the value.
+- A pasted secret on a dev or ad-hoc build: it falls back to the login
+  keychain, readable with `security find-generic-password`.
+- A gh login secret: `gh:github.com` trusts `/usr/bin/security`, so any
+  shell can print it. The role still keeps it out of env, history and
+  dotfiles and puts rules on it.
 
 ## Known gap: Monitor mode reaches the CLI control plane
 
