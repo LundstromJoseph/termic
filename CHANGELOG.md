@@ -4,7 +4,7 @@ All notable changes to Termic, newest first. This file is the human-authored
 source of truth: the in-app Update card and the /changelog page on termic.dev
 are generated from it. See the `release` skill for how entries are added.
 
-## [1.25.1] - 2026-11-23
+## [1.25.2] - 2026-11-23
 
 Two new features: a phone app to remote-control Termic, and agents on your own servers.
 
@@ -19,6 +19,7 @@ Two new features: a phone app to remote-control Termic, and agents on your own s
 
 ### Improvements
 - Sidebar: projects, folders and task groups animate open and shut.
+- Connect a phone says plainly that away from your network the phone needs your own VPN to this computer (your router's VPN or Tailscale), since Termic has no relay.
 
 ### Bug fixes
 - A task started with a prompt (New task with a prompt, a PR review, a race) now comes back in its Claude session after a restart, instead of a fresh one.

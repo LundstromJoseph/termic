@@ -209,7 +209,7 @@ function ConnectPhoneBody({ onClose }: { onClose: () => void }) {
                 </div>
               ))}
               {!hasVpn && (
-                <p className="flex gap-2 text-[12px] text-[var(--color-fg-faint)]">
+                <p data-testid="phone-no-vpn" className="flex gap-2 text-[12.5px] text-[var(--color-fg-dim)]">
                   <Globe className="mt-0.5 h-3.5 w-3.5 shrink-0" />
                   <span>{t("qr.noVpn")}</span>
                 </p>
