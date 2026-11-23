@@ -171,6 +171,12 @@ pub fn question(lines: &[String]) -> Option<Question> {
     if marked.len() > 1 {
         return None;
     }
+    // A live menu has a cursor on a choice or a confirm footer. A numbered
+    // list with neither is text the agent wrote (steps in a reply), and
+    // reading it as a question left a finished task on "Needs you".
+    if marked.is_empty() && !footer {
+        return None;
+    }
     let current = marked.first().copied().unwrap_or(0);
 
     // The dialog above the options: up to a rule, a box top, or two blank
@@ -440,6 +446,16 @@ Enter to select \u{b7} \u{2191}/\u{2193} to navigate \u{b7} Esc to cancel",
         assert_eq!(q.body, "head -1 src/math.js");
         assert_eq!(q.title, "Do you want to proceed?");
         assert_eq!(q.options.len(), 3);
+    }
+
+    #[test]
+    fn a_numbered_list_in_a_finished_reply_is_not_a_question() {
+        // Steps the agent wrote, then its prompt: no cursor on a choice, no
+        // confirm footer. Read as a menu, it put a done task on "Needs you".
+        let reply = "For PATCH with IsOrgAdmin:\n\n1. Token valid? If not, 401.\n2. Load the users row.\n3. Org admin? If not, 403.\n4. The handler runs.\n\nIs this the shape you want?\n\n\u{276f} \n";
+        assert!(question(&lines(reply)).is_none());
+        // The same list with a cursor on a choice is a live menu.
+        assert!(question(&lines("Proceed?\n\u{276f} 1. Yes\n  2. No\n")).is_some());
     }
 
     #[test]
