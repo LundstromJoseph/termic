@@ -155,6 +155,18 @@ session started in the task's folder, which a task sharing the project
 checkout cannot use, so it gets none. Account-relocated config dirs are
 not followed yet: the default home dirs are read.
 
+**Copy and image paste cross machines.** An agent's copy (OSC 52, Claude's
+"copied N chars") lands on the viewing computer's clipboard: the paired
+view loads the same `ClipboardAddon` + `Osc52Base64` as a local terminal.
+Ctrl+V is the agents' "attach the clipboard image", and an agent reads the
+clipboard of the computer it runs on. A paired computer: the viewer sends
+its clipboard image (`clipboard_image`, a drive-grant call) to the host's
+clipboard, then forwards the Ctrl+V, so the agent attaches it natively; no
+image and the keystroke goes as always. A server: a headless box has no
+clipboard, so the image is copied into a temp file there
+(`server_paste_image`, over `exec`) and that path is pasted, the Docker
+route.
+
 **The last window worked in owns a terminal's size** (tmux's "latest").
 One program draws for one width, so a terminal is one size at a time.
 Every host offers `resize`: a viewer sends `term_size` when its terminal

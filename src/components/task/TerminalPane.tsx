@@ -1384,12 +1384,25 @@ const captureArmedRef = useRef(false);
     // underneath and would otherwise consume the event first. Text pastes
     // fall straight through (`imageFromClipboard` returns null), so the
     // common path is untouched.
+    // A server task's agent cannot read this computer's clipboard either (a
+    // headless box has none): the same route, with the file copied onto the
+    // box first and the box's path pasted.
+    const serverOf = () => {
+      const st = useApp.getState();
+      const p = st.projects.find(x => x.id === st.tasks.find(t => t.id === task.id)?.project_id);
+      return p?.server ? { server: p.server, cwd: p.root_path } : null;
+    };
+    const pasteImageAt = async (path: string) => {
+      const srv = serverOf();
+      if (srv) term.paste(pastePathText(await ipc.serverPasteImage(srv.server, srv.cwd, path), false, false));
+      else term.paste(pastePathText(path, true));
+    };
     const onPaste = (e: ClipboardEvent) => {
       // Live read, not the captured `task`: toggling Docker restarts the PTY
       // but does not necessarily re-run this effect, and a stale answer here
       // would either break a native paste or silently drop a caged one.
       const live = useApp.getState().tasks.find(t => t.id === task.id);
-      if (!live?.docker_sandbox_enabled) return;
+      if (!live?.docker_sandbox_enabled && !serverOf()) return;
       const file = imageFromClipboard(e.clipboardData);
       if (!file) return;
       e.preventDefault();
@@ -1397,11 +1410,11 @@ const captureArmedRef = useRef(false);
       file.arrayBuffer()
         .then(buf => ipc.clipboardImageSave(new Uint8Array(buf)))
         .then(path => {
-          // Still Docker, and still a live PTY: this lands an IPC round trip
-          // after the gesture, and either could have changed in between.
+          // Still Docker (or a server), and still a live PTY: this lands an
+          // IPC round trip after the gesture, and either could have changed.
           const now = useApp.getState().tasks.find(t => t.id === task.id);
-          if (!now?.docker_sandbox_enabled || !ptyRef.current) return;
-          term.paste(pastePathText(path, true));
+          if ((!now?.docker_sandbox_enabled && !serverOf()) || !ptyRef.current) return;
+          return pasteImageAt(path);
         })
         .catch(err => {
           // Silence here would read as "paste is broken": the image is gone
@@ -1503,12 +1516,12 @@ const captureArmedRef = useRef(false);
       if (
         e.type === "keydown" && e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey
         && (e.key === "v" || e.key === "V")
-        && useApp.getState().tasks.find(t => t.id === task.id)?.docker_sandbox_enabled
+        && (useApp.getState().tasks.find(t => t.id === task.id)?.docker_sandbox_enabled || serverOf())
       ) {
         e.preventDefault();
         e.stopPropagation();
         ipc.clipboardImageCapture()
-          .then(path => { term.paste(pastePathText(path, true)); })
+          .then(path => pasteImageAt(path))
           .catch(() => {
             // No image on the clipboard (or the read failed): hand the agent
             // the keystroke it was going to get anyway and let it answer.

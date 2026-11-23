@@ -17606,6 +17606,48 @@ fn save_clipboard_image(bytes: &[u8], dir: &Path) -> Result<String, String> {
 /// clipboard, an AppHandle, or a running app - and because the ONE thing
 /// that must hold here is that the result is identifiable by
 /// `image_extension`, which is what every downstream reader uses.
+/// A PNG's pixels as 8-bit RGBA (a paired computer's pasted image, written
+/// to this computer's clipboard). Palette and grey images are expanded.
+pub(crate) fn decode_png_rgba(png_bytes: &[u8]) -> Result<(Vec<u8>, u32, u32), String> {
+    let mut dec = png::Decoder::new(png_bytes);
+    dec.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16 | png::Transformations::ALPHA);
+    let mut reader = dec.read_info().map_err(|e| e.to_string())?;
+    let mut buf = vec![0; reader.output_buffer_size()];
+    let info = reader.next_frame(&mut buf).map_err(|e| e.to_string())?;
+    buf.truncate(info.buffer_size());
+    let rgba = match info.color_type {
+        png::ColorType::Rgba => buf,
+        png::ColorType::GrayscaleAlpha => buf.chunks(2).flat_map(|p| [p[0], p[0], p[0], p[1]]).collect(),
+        other => return Err(format!("unexpected PNG colour type {other:?}")),
+    };
+    Ok((rgba, info.width, info.height))
+}
+
+#[cfg(test)]
+#[test]
+fn a_png_round_trips_to_the_same_pixels() {
+    let px = vec![10u8, 20, 30, 255, 40, 50, 60, 128];
+    let png = encode_rgba_png(&px, 2, 1).unwrap();
+    assert_eq!(decode_png_rgba(&png).unwrap(), (px, 2, 1));
+}
+
+/// Base64 PNG of this computer's clipboard image, for sending to a paired
+/// computer before forwarding a Ctrl+V there. Err when there is none.
+#[tauri::command]
+async fn clipboard_image_png_b64(app: tauri::AppHandle) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        use tauri_plugin_clipboard_manager::ClipboardExt;
+        let image = app.clipboard().read_image().map_err(|e| e.to_string())?;
+        let (w, h) = (image.width(), image.height());
+        if w == 0 || h == 0 {
+            return Err("clipboard image had no size".to_string());
+        }
+        Ok(termic_remote::b64(&encode_rgba_png(image.rgba(), w, h)?))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 fn encode_rgba_png(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>, String> {
     let expected = (width as usize) * (height as usize) * 4;
     if rgba.len() < expected {
@@ -17685,6 +17727,31 @@ async fn clipboard_image_save(request: tauri::ipc::Request<'_>) -> Result<String
     tauri::async_runtime::spawn_blocking(move || save_clipboard_image(&bytes, &dir))
         .await
         .map_err(|e| e.to_string())?
+}
+
+/// Put a pasted clipboard image on a server, for a server task's agent to
+/// read. A headless box has no clipboard for the agent to read, so the image
+/// saved on THIS computer (`clipboard_image_capture`) is copied into a temp
+/// file there and its path is pasted, which the agent turns into an image
+/// (the Docker route). Only files from this app's clipboard folder.
+#[tauri::command]
+async fn server_paste_image(server: String, cwd: String, path: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let dir = std::fs::canonicalize(clipboard_dir()?).map_err(|e| e.to_string())?;
+        let file = std::fs::canonicalize(&path).map_err(|e| e.to_string())?;
+        if !file.starts_with(&dir) {
+            return Err("not a pasted image".into());
+        }
+        let bytes = std::fs::read(&file).map_err(|e| e.to_string())?;
+        let script = "f=$(mktemp \"${TMPDIR:-/tmp}/termic-paste-XXXXXX\") && mv \"$f\" \"$f.png\" && cat > \"$f.png\" && printf %s \"$f.png\"";
+        let (code, out, err) = server_projects::exec_with_stdin(&server, std::path::Path::new(&cwd), &["sh", "-c", script], &[], Some(&bytes))?;
+        if code != 0 {
+            return Err(if err.trim().is_empty() { format!("exited {code}") } else { err.trim().to_string() });
+        }
+        Ok(String::from_utf8_lossy(&out).trim().to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Read a text file by ABSOLUTE path, with NO task containment (GH #240).
@@ -29188,7 +29255,7 @@ pub fn run() {
             task_git_log, task_git_refs, task_git_push, task_git_commit_files, task_git_compare, task_git_blame, task_git_commit_meta, task_git_commit_offset,
             detect_forges, forge_rate_status, task_pr_status, task_pr_status_batch, project_forge_lists, task_member_pr_status, task_pr_create, task_pr_comments, task_set_pr_watch, task_set_pr_comments_seen,
             project_forge_issues, project_forge_provider, project_forge_prs, project_fetch_pr_branch, project_git_checkout,
-            task_file_diff, task_file_diff_sides, task_file_read, file_read_external, clipboard_image_save, clipboard_image_capture, task_file_read_base64, task_file_fp, task_file_write, task_dir_list, task_path_stat,
+            task_file_diff, task_file_diff_sides, task_file_read, file_read_external, clipboard_image_save, clipboard_image_capture, server_paste_image, clipboard_image_png_b64, task_file_read_base64, task_file_fp, task_file_write, task_dir_list, task_path_stat,
             task_path_rename, task_path_delete, task_reveal_path,
             scratch_list, scratch_read, scratch_write, scratch_set_meta, scratch_delete,
             scratch_promote, scratch_promote_target_exists,

@@ -958,6 +958,10 @@ pub enum Command {
     /// Set the local name of a paired machine (empty: back to the name it
     /// gives itself). Local only: the other machine is not told.
     PeerRename { target: String, name: String },
+    /// Put an image (base64 PNG) on this computer's clipboard. A paired
+    /// computer sends it before forwarding a Ctrl+V to an agent here, which
+    /// then reads the image from the clipboard natively, as a local paste.
+    ClipboardImage { png: String },
     /// List recurring schedules across projects, optionally filtered to one project.
     ScheduleList {
         #[serde(default, skip_serializing_if = "Option::is_none")]

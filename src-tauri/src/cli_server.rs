@@ -703,6 +703,10 @@ pub(crate) trait CliHost: Send + Sync {
     }
     /// Resize a PTY (the attach `resize` path, opt-in client-side).
     fn pty_set_size(&self, pty_id: &str, rows: u16, cols: u16) -> Result<(), String>;
+    /// Put a PNG on this computer's clipboard (a paired computer's paste).
+    fn set_clipboard_image(&self, _png: &[u8]) -> Result<(), String> {
+        Err("this host has no clipboard".into())
+    }
     /// Tell live attach sessions on this task why they are ending,
     /// BEFORE the PTYs are killed.
     fn notify_detach(&self, task_id: &str, reason: &str);
@@ -863,6 +867,15 @@ pub(crate) fn dispatch_authenticated(
         };
     }
     match &req.cmd {
+        Command::ClipboardImage { png } => {
+            let Some(bytes) = termic_remote::unb64(png) else {
+                return Reply::err(&req.id, ErrorCode::BadRequest, "not base64");
+            };
+            match host.set_clipboard_image(&bytes) {
+                Ok(()) => Reply { id: req.id.clone(), ok: true, data: None, error: None },
+                Err(e) => Reply::err(&req.id, ErrorCode::Internal, e),
+            }
+        }
         Command::PeerList | Command::PeerPair { .. } | Command::PeerUnpair { .. } | Command::PeerRename { .. } => {
             match host.peers() {
                 Some(node) => crate::peers::handle_verb(&node, req, sink),
@@ -4736,6 +4749,11 @@ impl CliHost for TauriHost {
     fn notify_detach(&self, task_id: &str, reason: &str) {
         crate::notify_task_detach(&self.app.state::<crate::PtyManager>(), task_id, reason);
     }
+    fn set_clipboard_image(&self, png: &[u8]) -> Result<(), String> {
+        let (rgba, w, h) = crate::decode_png_rgba(png)?;
+        use tauri_plugin_clipboard_manager::ClipboardExt;
+        self.app.clipboard().write_image(&tauri::image::Image::new_owned(rgba, w, h)).map_err(|e| e.to_string())
+    }
     fn notify_tab_detach(&self, task_id: &str, tab_id: &str, reason: &str) {
         crate::notify_tab_detach(&self.app.state::<crate::PtyManager>(), task_id, tab_id, reason);
     }
@@ -6958,6 +6976,19 @@ mod tests {
     // preflight connection has none, and the URL only pre-fills a dialog a
     // human still has to confirm. If this ever needed auth, a deep link
     // would silently do nothing on Windows/Linux.
+    #[test]
+    fn clipboard_image_reaches_the_host_and_refuses_bad_input() {
+        let host = StubHost::default();
+        let tok = Some(host.token());
+        // Not base64: refused before the host is asked.
+        let bad = handle(&req(Command::ClipboardImage { png: "%%%".into() }, tok), &host);
+        assert_eq!(bad.error.as_ref().map(|e| e.code), Some(ErrorCode::BadRequest));
+        // Valid base64 reaches the host's clipboard (the stub has none, so
+        // its own error comes back: the routing is what is checked here).
+        let ok = handle(&req(Command::ClipboardImage { png: termic_remote::b64(b"png") }, tok), &host);
+        assert_eq!(ok.error.map(|e| e.message), Some("this host has no clipboard".into()));
+    }
+
     #[test]
     fn open_url_is_unauthenticated_and_queues_the_link() {
         let host = StubHost::default();

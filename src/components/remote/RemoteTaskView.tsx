@@ -11,6 +11,10 @@
 // already has a terminal answering those, and a duplicate answer arrives as
 // typed garbage.
 
+import * as ipc from "@/lib/ipc";
+import { ClipboardAddon } from "@xterm/addon-clipboard";
+import { Osc52Base64 } from "@/lib/osc52";
+import { attachCopyOnSelect } from "@/lib/terminalSelection";
 import { useEffect, useRef, useState } from "react";
 import { create } from "zustand";
 import { useTranslation } from "react-i18next";
@@ -209,7 +213,12 @@ function RemoteTerminal({ machineId, taskId, tabId }: { machineId: string; taskI
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
+    // Copies the agent makes (OSC 52: Claude's "copied N chars") land on
+    // THIS computer's clipboard, as in a local terminal, with the same codec
+    // that repairs Claude's double-encoded payloads.
+    term.loadAddon(new ClipboardAddon(new Osc52Base64()));
     term.open(box);
+    const disposeCopyOnSelect = attachCopyOnSelect(term, box);
     let alive = true;
     // What this pane fits, and whether the PTY is at it (this window owns
     // the size) or at another window's (draw scaled).
@@ -262,6 +271,19 @@ function RemoteTerminal({ machineId, taskId, tabId }: { machineId: string; taskI
         setClosed(e.reason);
       }
     };
+    // Ctrl+V is the agents' "attach the clipboard image", and they read the
+    // clipboard of the computer they run on, which is not this one. So the
+    // image on this clipboard is put on that computer's first, then the
+    // keystroke follows and the agent attaches it natively. No image: the
+    // keystroke goes as it always did.
+    term.attachCustomKeyEventHandler(e => {
+      if (e.type !== "keydown" || !e.ctrlKey || e.metaKey || e.altKey || e.shiftKey || (e.key !== "v" && e.key !== "V")) return true;
+      const sendCtrlV = () => void remoteTermInput(machineId, b64encode("\x16")).catch(() => {});
+      ipc.clipboardImagePngB64()
+        .then(png => remoteCall(machineId, req("clipboard_image", { png })))
+        .then(sendCtrlV, sendCtrlV);
+      return false;
+    });
     const sub = term.onData(data => {
       if (isTerminalReply(data)) return;
       void remoteTermInput(machineId, b64encode(data)).catch(() => {});
@@ -296,6 +318,7 @@ function RemoteTerminal({ machineId, taskId, tabId }: { machineId: string; taskI
       window.removeEventListener("pointerdown", onHuman, true);
       window.removeEventListener("keydown", onHuman, true);
       sub.dispose();
+      disposeCopyOnSelect();
       if (reopening.current) reopening.current = false;
       else void remoteTermClose(machineId).catch(() => {});
       term.dispose();

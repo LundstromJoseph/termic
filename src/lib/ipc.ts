@@ -781,6 +781,11 @@ export const clipboardImageSave = (bytes: Uint8Array) => invoke<string>("clipboa
  *  pasteboard has to be read natively. Rejects when the clipboard holds no
  *  image, which the caller treats as "forward the keystroke", not an error. */
 export const clipboardImageCapture = () => invoke<string>("clipboard_image_capture");
+/** Copy a pasted image (a path from clipboardImageCapture/Save) onto a
+ *  server; resolves to its path there. */
+/** This computer's clipboard image as base64 PNG; rejects when there is none. */
+export const clipboardImagePngB64 = () => invoke<string>("clipboard_image_png_b64");
+export const serverPasteImage = (server: string, cwd: string, path: string) => invoke<string>("server_paste_image", { server, cwd, path });
 /** Read a task image or PDF as base64, for the markdown preview's inline
  *  images or the file-tree preview pane (image/PDF extensions, 20 MB cap).
  *  Member-aware + worktree-contained, same checks as taskFileRead. Pass the
