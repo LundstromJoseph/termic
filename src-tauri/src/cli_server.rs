@@ -3675,6 +3675,10 @@ fn handle_stop(id: &str, host: &dyn CliHost, task: &str, project: Option<&str>) 
     let project_name = projects.iter().find(|p| p.id == t.project_id).map(|p| p.name.clone()).unwrap_or_else(|| t.project_id.clone());
     host.notify_detach(&t.id, "stopped");
     let stopped = host.kill_task_ptys(&t.id);
+    // Then the webview's own Stop (unmount, clear the tabs), so a task open
+    // here does not sit on an exited banner and read as running. After the
+    // kill, which counts what it stopped (the unmount kills PTYs too).
+    let _ = host.rpc("stop_task", serde_json::json!({ "taskId": t.id }), Duration::from_secs(5));
     Reply::ok(id, ReplyData::Stop(proto::StopData { task_id: t.id, name: t.name, project: project_name, stopped_agents: stopped }))
 }
 

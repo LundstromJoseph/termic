@@ -294,6 +294,21 @@ describe("Phones and servers", () => {
     await waitVisible('[data-testid="remote-section"]');
   });
 
+  it("a stop from outside (a phone, another computer, the CLI) stops the task here too", async () => {
+    // It only killed the PTYs: the task open here kept its tab on the exited
+    // banner and read as running, and a Reopen added a second tab.
+    const task = await openTask("outside-stop");
+    await waitForAgentPty(task);
+    await cliRpc({ cmd: "stop", task: "outside-stop" });
+    await browser.waitUntil(() => browser.execute((t) => {
+      const s = window.__termic!.useApp.getState();
+      return !s.mountedTasks.has(t) && s.activeTaskId !== t && !(s.tabs[t] ?? []).some((x: any) => x.ptyId);
+    }, task), { timeout: 10_000, timeoutMsg: "the task was not stopped here" });
+    await cliRpc({ cmd: "archive", task: "outside-stop", force: true });
+    await browser.execute(() => window.__termic!.useApp.getState().openSettings("remote"));
+    await waitVisible('[data-testid="remote-section"]');
+  });
+
   it("unpairs a phone after a confirmation, cutting its live connection", async () => {
     const p = await phone(link, phoneId, "My iPhone");
     await waitForAttr(`[data-testid="phone-row-${phoneId}"]`, "data-connected", "true");

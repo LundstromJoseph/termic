@@ -436,12 +436,21 @@ function RemoteFolder({ m, folder, projects }: { m: MachineView; folder: RemoteG
 }
 
 function RemoteProjectRows({ m, project }: { m: MachineView; project: RemoteProject }) {
+  const key = `project:${m.id}:${project.name}`;
+  const folded = useRemote(s => !!s.folded[key]);
+  const toggle = useRemote(s => s.toggleFold);
   return (
-    <div data-testid={`remote-project-${project.name}`}>
-      {/* The local project header's type: the same uppercase, weight and
-          tracking, so a paired computer's projects read like this one's. */}
-      <div className="flex h-7 items-center px-2 text-[12px] font-semibold uppercase tracking-[0.06em] text-[var(--color-fg-dim)]"><span className="truncate">{project.name}</span></div>
-      {project.segments.map(seg => seg.kind === "task"
+    <div data-testid={`remote-project-${project.name}`} data-folded={folded} className="[[data-testid^=remote-project-]+&]:mt-0.5">
+      {/* The local project header: its band, type, chevron and padding, and
+          it folds the same way (the fold is this computer's, per machine). */}
+      <button type="button" aria-expanded={!folded} onClick={() => toggle(key)}
+        className="group flex w-full select-none items-center gap-1.5 rounded-md bg-[var(--color-bg-2)]/50 py-1.5 pl-2 pr-0 text-left text-[12px] font-semibold uppercase tracking-[0.06em] text-[var(--color-fg)] hover:bg-[var(--color-bg-2)]">
+        {folded
+          ? <ChevronRight className="h-3.5 w-3.5 shrink-0 text-[var(--color-fg-faint)]" />
+          : <ChevronDown className="h-3.5 w-3.5 shrink-0 text-[var(--color-fg-faint)]" />}
+        <span className="truncate">{project.name}</span>
+      </button>
+      {!folded && project.segments.map(seg => seg.kind === "task"
         ? <RemoteTaskRow key={seg.task.id} m={m} task={seg.task} />
         : (
           <RemoteGroupBlock key={`g:${seg.group.id}`} m={m} group={seg.group} tasks={seg.tasks} />

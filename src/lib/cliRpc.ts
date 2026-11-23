@@ -815,6 +815,19 @@ async function wakeAgentHandler(params: unknown): Promise<{ running: boolean }> 
   return { running: await waitForAgentPty(taskId, exited?.id) };
 }
 
+// ─────────────────────────── stop ────────────────────────────────────
+
+/** Stop a task as the sidebar's Stop does: leave its view, unmount it, clear
+ *  its tabs' live fields. `termic stop` (and a phone's or another computer's
+ *  Stop) only killed the PTYs, so a task open here kept its tab on the
+ *  exited banner and read as running; a Reopen then added a second tab. */
+async function stopTaskHandler(params: unknown): Promise<null> {
+  const taskId = (params as { taskId?: unknown })?.taskId;
+  if (typeof taskId !== "string" || !taskId) throw new Error("stop_task requires a taskId");
+  useApp.getState().stopTask(taskId);
+  return null;
+}
+
 // ─────────────────────────── archive ─────────────────────────────────
 
 /** The GUI's archive flow minus its confirm dialog (the CLI confirms on
@@ -1514,6 +1527,7 @@ const handlers: Record<string, Handler> = {
   list_prompts: listPromptsHandler,
   send_prompt: sendPromptHandler,
   wake_agent: wakeAgentHandler,
+  stop_task: stopTaskHandler,
   archive_task: archiveTaskHandler,
   rename_task: renameTaskHandler,
   pin_task: pinTaskHandler,

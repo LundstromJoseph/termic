@@ -853,6 +853,12 @@ describe("LAN pairing", () => {
         document.querySelector('[data-testid="remote-task-rt-1"] [data-testid="task-branch"]')?.getAttribute("data-branch") === "fix/login")),
       { timeout: 3_000, timeoutMsg: "the branch setting did not reach the remote row" });
       await prefs("setTaskBranchName", "none");
+      // A paired computer's project folds like a local one.
+      await browser.execute(() => (document.querySelector('[data-testid="remote-project-webapp"] > button') as HTMLElement).click());
+      await browser.waitUntil(async () => !(await browser.execute(() => !!document.querySelector('[data-testid="remote-task-rt-1"]'))),
+        { timeout: 3_000, timeoutMsg: "folding the project did not hide its tasks" });
+      await browser.execute(() => (document.querySelector('[data-testid="remote-project-webapp"] > button') as HTMLElement).click());
+      await waitVisible('[data-testid="remote-task-rt-1"]');
       // A task whose agent is not running reads as such: greyed, as a local
       // or server task's row is.
       const dimmed = (id: string) => browser.execute((x) => getComputedStyle(document.querySelector(`[data-testid="remote-task-${x}"]`)!).opacity, id);
