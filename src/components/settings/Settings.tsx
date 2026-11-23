@@ -118,9 +118,9 @@ export function Settings() {
         <RailItem icon={<Bot className="h-4 w-4" />} label={t("rail.cli")} tabId="cli"
           active={tab === "cli" || tab === "mcp"} onClick={() => openSettings("mcp")} />
         {/* "peers" is an old tab id that lands on Remote control. */}
-        <RailItem icon={<Smartphone className="h-4 w-4" />} label={tr("rail.label")} tabId="remote"
+        <RailItem icon={<Smartphone className="h-4 w-4" />} label={tr("rail.label")} badge={t("rail.badgeExp")} tabId="remote"
           active={tab === "remote" || tab === "peers"} onClick={() => openSettings("remote")} />
-        <RailItem icon={<Server className="h-4 w-4" />} label={tr("rail.servers")} tabId="servers"
+        <RailItem icon={<Server className="h-4 w-4" />} label={tr("rail.servers")} badge={t("rail.badgeExp")} tabId="servers"
           active={tab === "servers"} onClick={() => openSettings("servers")} />
 
         <RailDivider />

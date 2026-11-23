@@ -77,6 +77,7 @@ async function confirmed(title: string, message: string, label: string): Promise
 
 export function RemoteSection() {
   const { t } = useTranslation("remote");
+  const { t: ts } = useTranslation("settings");
   const [status, refresh] = usePhones();
   const setDialog = useRemote(s => s.setDialog);
   const phones = status?.phones ?? [];
@@ -84,7 +85,7 @@ export function RemoteSection() {
   return (
     <div className="flex flex-col gap-6" data-testid="remote-section">
       <div className="flex flex-col gap-1.5">
-        <SectionTitle title={t("section.title")} />
+        <SectionTitle title={t("section.title")} badge={ts("shared.experimental")} />
         <p className="text-[13px] text-[var(--color-fg-dim)]">{t("section.lead")}</p>
       </div>
 
@@ -128,12 +129,13 @@ export function RemoteSection() {
 /** Settings > Servers: the SSH boxes this computer runs projects on. */
 export function ServersSection() {
   const { t } = useTranslation("remote");
+  const { t: ts } = useTranslation("settings");
   const setDialog = useRemote(s => s.setDialog);
   const machines = useRemote(s => s.machines);
   const servers = useMemo(() => machines.filter(m => m.kind === "server"), [machines]);
   return (
     <div className="flex flex-col gap-6" data-testid="servers-section">
-      <SectionTitle title={t("servers.sectionTitle")} />
+      <SectionTitle title={t("servers.sectionTitle")} badge={ts("shared.experimental")} />
       <Card
         icon={<Server className="h-4 w-4" />}
         title={t("servers.title")}

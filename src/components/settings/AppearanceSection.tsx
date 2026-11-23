@@ -462,6 +462,8 @@ function SidebarSection() {
   const taskPrBadge = usePrefs(s => s.taskPrBadge);
   const setTaskPrBadge = usePrefs(s => s.setTaskPrBadge);
   const sidebarHoverReveal = usePrefs(s => s.sidebarHoverReveal);
+  const showRemote = usePrefs(s => s.showRemote);
+  const setShowRemote = usePrefs(s => s.setShowRemote);
   const setSidebarHoverReveal = usePrefs(s => s.setSidebarHoverReveal);
   const showStatusSection = usePrefs(s => s.showStatusSection);
   const setShowStatusSection = usePrefs(s => s.setShowStatusSection);
@@ -604,6 +606,12 @@ function SidebarSection() {
       />
       {/* Also a check row in the sidebar's Project list options menu; both
           write the same pref. */}
+      <Toggle
+        label={t("appearance.remoteSection.label")}
+        hint={t("appearance.remoteSection.hint")}
+        value={showRemote}
+        onChange={setShowRemote}
+      />
       <Toggle
         label={t("appearance.statusSection.label")}
         hint={t("appearance.statusSection.hint")}

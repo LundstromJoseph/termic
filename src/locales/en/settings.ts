@@ -628,6 +628,10 @@ export default {
       always: "Always",
       alwaysHint: "Whether or not anything is scheduled.",
     },
+    remoteSection: {
+      label: "Remote in the sidebar",
+      hint: "The REMOTE section with your servers and paired computers, or while there are none, the globe at the bottom of the sidebar. Turn it off if you never use them; Settings, Remote control and Servers stay.",
+    },
     statusSection: {
       label: "Status section",
       hint: "A section above Projects listing the tasks that need you, are working or are in review, in the Kanban board's columns. Settled and Not started show a count until opened.",

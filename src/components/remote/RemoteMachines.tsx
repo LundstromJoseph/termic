@@ -14,6 +14,7 @@ import { CliIcon, CLI_BRAND_COLOR, resolveIconId } from "@/icons/cli";
 import { Spinner } from "@/components/ui/Spinner";
 import { Tip } from "@/components/ui/Tooltip";
 import { Button } from "@/components/ui/Button";
+import { usePrefs } from "@/store/prefs";
 import { useApp } from "@/store/app";
 import { cn } from "@/lib/utils";
 import { ACCENTS, accentCss } from "@/lib/accents";
@@ -34,7 +35,7 @@ import { joinableGroups, layoutRemote, remoteCall, remoteProps, remoteReconnect,
 
 /** A top-level sidebar section header, styled as PROJECTS': a filled bar
  *  with the label, a fold, and its actions on the right. */
-export function SidebarSectionHeader({ testId, icon, label, folded, onToggle, children }: { testId: string; icon: ReactNode; label: string; folded: boolean; onToggle: () => void; children?: ReactNode }) {
+export function SidebarSectionHeader({ testId, icon, label, badge, folded, onToggle, children }: { testId: string; icon: ReactNode; label: string; badge?: string; folded: boolean; onToggle: () => void; children?: ReactNode }) {
   return (
     <div data-testid={testId} className="group mb-1.5 flex h-8 select-none items-center justify-between rounded-md bg-[var(--color-bg-2)] pl-1 pr-0.5 text-[12px] font-semibold uppercase tracking-[0.06em] text-[var(--color-fg-dim)]">
       <button type="button" onClick={onToggle} aria-expanded={!folded} className="flex min-w-0 flex-1 items-center gap-1.5 py-0.5 text-left">
@@ -42,6 +43,8 @@ export function SidebarSectionHeader({ testId, icon, label, folded, onToggle, ch
         {icon}
         {/* A button resets text-transform: the case goes on the label. */}
         <span className="truncate uppercase">{label}</span>
+        {/* The settings rail's experimental pill, the same look. */}
+        {badge && <span data-testid={`${testId}-badge`} className="shrink-0 rounded bg-[var(--color-bg-3)] px-1 py-px text-[10px] font-normal uppercase tracking-wider text-[var(--color-fg-faint)]">{badge}</span>}
       </button>
       <div className="flex shrink-0 items-center gap-0.5">{children}</div>
     </div>
@@ -92,7 +95,8 @@ function RemoteAddMenu({ children }: { children: ReactNode }) {
 /** The footer's globe: the way in to remote control while REMOTE has no rows. */
 export function RemoteFooterButton({ className }: { className: string }) {
   const { t } = useTranslation("remote");
-  if (useHasRemoteRows()) return null;
+  const shown = usePrefs(s => s.showRemote);
+  if (useHasRemoteRows() || !shown) return null;
   return (
     <RemoteAddMenu>
       <Button size="icon" variant="icon" data-testid="sidebar-footer-remote" aria-label={t("sidebar.addRemote")}><Globe className={className} /></Button>
@@ -107,10 +111,12 @@ export function RemoteSidebarSection({ projects, renderProject }: { projects: Pr
   const computers = useMemo(() => all.filter(m => m.kind !== "server" && mine(m)), [all]);
   const folded = useRemote(s => !!s.folded["section:remote"]);
   const toggle = useRemote(s => s.toggleFold);
-  if (servers.length === 0 && computers.length === 0) return null;
+  const { t: ts } = useTranslation("settings");
+  const shown = usePrefs(s => s.showRemote);
+  if (!shown || (servers.length === 0 && computers.length === 0)) return null;
   return (
     <div data-testid="remote-sidebar-section" className="mt-3">
-      <SidebarSectionHeader testId="remote-section-header" icon={<Globe className="h-4 w-4 shrink-0" />} label={t("sidebar.remoteHeader")}
+      <SidebarSectionHeader testId="remote-section-header" icon={<Globe className="h-4 w-4 shrink-0" />} label={t("sidebar.remoteHeader")} badge={ts("rail.badgeExp")}
         folded={folded} onToggle={() => toggle("section:remote")}>
         <RemoteAddMenu>
           <button type="button" data-testid="sidebar-add-remote" aria-label={t("sidebar.addRemote")} className={headerBtn}><Plus className="h-3.5 w-3.5" /></button>
@@ -547,12 +553,6 @@ const RemoteTaskRow = memo(function RemoteTaskRow({ m, task }: { m: MachineView;
       <span className="flex-1" />
       {task.pinned && <Pin data-testid="remote-task-pinned" aria-hidden className="h-3 w-3 shrink-0 text-[var(--color-fg-faint)]" />}
       <RemotePrBadge task={task} />
-      {task.diff && (task.diff.insertions > 0 || task.diff.deletions > 0) && (
-        <span className="shrink-0 font-mono text-[11px] tabular-nums">
-          <span className="text-[var(--color-ok)]/80">+{task.diff.insertions}</span>{" "}
-          <span className="text-[var(--color-err)]/80">-{task.diff.deletions}</span>
-        </span>
-      )}
       <span className="flex w-4 shrink-0 justify-center"><StateGlyph state={task.state} /></span>
     </div>
   );

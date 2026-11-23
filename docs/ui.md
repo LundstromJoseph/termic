@@ -179,9 +179,9 @@ carries the Layers icon (the ⋯ dots were rejected as a stray glyph).
 **The New task button under a project.** The dashed button the empty project
 shows sits BELOW the task rows, where a new task lands. The
 `newTaskButton` pref (Settings > Appearance, sidebar) decides when a project
-that has tasks shows it too: Empty projects (never), Auto (while there are
-two or fewer projects, the default: one long list puts the header's `+` far
-from where the task appears), or Always (`newTaskButtonShown` in
+that has tasks shows it too: Empty projects (never, the default: the
+header's `+` is how a task starts), Auto (while there are two or fewer
+projects), or Always (`newTaskButtonShown` in
 `store/prefs.ts`). Under tasks it draws as a lone centered `+` on a borderless row the height of a task row (`--task-row-h`)
 (`data-variant="quiet"`, labelled by its tooltip), so it does not read as
 one more task; the row highlights on hover and while its menu is open. The

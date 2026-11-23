@@ -64,6 +64,7 @@ export const PREF_KEYS: readonly PrefKey[] = [
   { key: "splitPaneDim", scoped: false, class: "sync" },
   { key: "splitPaneDimAmount", scoped: false, class: "sync" },
   { key: "sidebarHoverReveal", scoped: false, class: "sync" },
+  { key: "showRemote", scoped: false, class: "sync" },
   { key: "profileSidebarWash", scoped: false, class: "sync" },
   { key: "markdownDefaultView", scoped: false, class: "local", reason: "last-used view, rewritten by every toggle in a markdown tab" },
   { key: "markdownReader", scoped: false, class: "sync" },
