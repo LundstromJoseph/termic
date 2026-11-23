@@ -11,6 +11,8 @@
 // already has a terminal answering those, and a duplicate answer arrives as
 // typed garbage.
 
+import { terminalKeysAfter, terminalKeysBefore } from "@/lib/terminalKeys";
+import { builtinBaseId } from "@/lib/agents";
 import * as ipc from "@/lib/ipc";
 import { ClipboardAddon } from "@xterm/addon-clipboard";
 import { Osc52Base64 } from "@/lib/osc52";
@@ -146,7 +148,7 @@ export function RemoteTaskView({ machineId, taskId }: { machineId: string; taskI
 
       <div className="relative min-h-0 flex-1">
         <div className="absolute inset-0">
-          {online && <RemoteTerminal key={tabId ?? "default"} machineId={machineId} taskId={task.id} tabId={tabId} />}
+          {online && <RemoteTerminal key={tabId ?? "default"} machineId={machineId} taskId={task.id} tabId={tabId} agent={task.agent} />}
         </div>
       </div>
     </div>
@@ -187,7 +189,7 @@ function Gone({ message, onClose }: { message: string; onClose: () => void }) {
  *  owns it; when that computer takes it back, this draws at its size,
  *  scaled to fit the pane. A terminal cannot be two sizes at once (one
  *  program draws for one width), so the other window scales instead. */
-function RemoteTerminal({ machineId, taskId, tabId }: { machineId: string; taskId: string; tabId: string | null }) {
+function RemoteTerminal({ machineId, taskId, tabId, agent }: { machineId: string; taskId: string; tabId: string | null; agent: string }) {
   const { t } = useTranslation("remote");
   const host = useRef<HTMLDivElement>(null);
   const [closed, setClosed] = useState<string | null>(null);
@@ -271,18 +273,30 @@ function RemoteTerminal({ machineId, taskId, tabId }: { machineId: string; taskI
         setClosed(e.reason);
       }
     };
-    // Ctrl+V is the agents' "attach the clipboard image", and they read the
-    // clipboard of the computer they run on, which is not this one. So the
-    // image on this clipboard is put on that computer's first, then the
-    // keystroke follows and the agent attaches it natively. No image: the
-    // keystroke goes as it always did.
+    // The keys every terminal shares (lib/terminalKeys: the IME guard, app
+    // shortcuts, Shift+Enter as a newline, ⌘⌫, ⌘←/⌘→, copy/paste off
+    // macOS), with this view's one of its own between them: Ctrl+V.
+    const keys = {
+      term,
+      write: (bytes: number[]) => void remoteTermInput(machineId, b64encode(String.fromCharCode(...bytes))).catch(() => {}),
+      agentBaseId: () => builtinBaseId(agent, useApp.getState().agents),
+    };
     term.attachCustomKeyEventHandler(e => {
-      if (e.type !== "keydown" || !e.ctrlKey || e.metaKey || e.altKey || e.shiftKey || (e.key !== "v" && e.key !== "V")) return true;
-      const sendCtrlV = () => void remoteTermInput(machineId, b64encode("\x16")).catch(() => {});
-      ipc.clipboardImagePngB64()
-        .then(png => remoteCall(machineId, req("clipboard_image", { png })))
-        .then(sendCtrlV, sendCtrlV);
-      return false;
+      if (terminalKeysBefore(e) === false) return false;
+      // Ctrl+V is the agents' "attach the clipboard image", and they read the
+      // clipboard of the computer they run on, which is not this one. So the
+      // image on this clipboard is put on that computer's first, then the
+      // keystroke follows and the agent attaches it natively. No image: the
+      // keystroke goes as it always did.
+      if (e.type === "keydown" && e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && (e.key === "v" || e.key === "V")) {
+        const sendCtrlV = () => keys.write([0x16]);
+        ipc.clipboardImagePngB64()
+          .then(png => remoteCall(machineId, req("clipboard_image", { png })))
+          .then(sendCtrlV, sendCtrlV);
+        return false;
+      }
+      if (terminalKeysAfter(e, keys) === false) return false;
+      return true;
     });
     const sub = term.onData(data => {
       if (isTerminalReply(data)) return;
@@ -323,7 +337,7 @@ function RemoteTerminal({ machineId, taskId, tabId }: { machineId: string; taskI
       else void remoteTermClose(machineId).catch(() => {});
       term.dispose();
     };
-  }, [machineId, taskId, tabId, generation]);
+  }, [machineId, taskId, tabId, generation, agent]);
 
   return (
     <div className="flex h-full min-h-0 flex-col">

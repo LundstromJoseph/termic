@@ -2,6 +2,7 @@
 // the resize/refit dance and the attention/unread heuristics. Stays mounted
 // across tab switches (parent toggles visibility) so we don't reconnect PTYs.
 
+import { terminalKeysAfter, terminalKeysBefore } from "@/lib/terminalKeys";
 import { listen } from "@tauri-apps/api/event";
 import { ShellRcBanner } from "@/components/secretsUi/ShellRcBanner";
 import { parseRoleShells, roleShellsKey, setShellPty, shellSecretsArg } from "@/lib/shellSecrets";
@@ -36,9 +37,8 @@ import { preserveImagesOnErase } from "@/lib/terminalImagePersistence";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { SearchAddon } from "@xterm/addon-search";
 import { loadTerminalRenderer, awaitTerminalFonts } from "@/lib/terminalRenderer";
-import { terminalNewlineBytes } from "@/lib/terminalNewline";
 import { resyncViewportAfterReveal } from "@/lib/xtermViewportSync";
-import { IS_MAC, bindingMatches, isAppChordInTerminal, superIsHeld, terminalPassesToApp, type ShortcutId } from "@/lib/shortcuts";
+import { IS_MAC } from "@/lib/shortcuts";
 import { registerTerminalDropTarget } from "@/lib/terminalDrop";
 import { HOOK_OSC_TITLE, HOOK_OSC_READY_BODY, HOOK_OSC_SESSION_PREFIX, HOOK_OSC_WORKING_BODY, HOOK_OSC_DONE_BODY, HOOK_OSC_DELEGATED_PREFIX, hookOscSessionId, sessionHolder } from "@/lib/agentHooks";
 import { parseDelegatedBody, delegatedVerdict, isAgentOwned, delegatedChipText, atUsageLimit, USAGE_LIMIT_WORK, DELEGATED_DETACHED_GRACE_MS, type DelegatedWork } from "@/lib/delegatedWork";
@@ -68,7 +68,7 @@ import { sameCounts } from "@/lib/secretsUi";
 import { TerminalExitedBanner } from "@/components/task/TerminalExitedBanner";
 import { SudoTouchIdBanner } from "@/components/task/SudoTouchIdBanner";
 import { TerminalFindBar } from "@/components/task/TerminalFindBar";
-import { isTerminalCloseCombo, isTerminalFindCombo } from "@/lib/terminalFind";
+import { isTerminalFindCombo } from "@/lib/terminalFind";
 import * as ipc from "@/lib/ipc";
 import { wrapWithDotEnv, loadTaskDotEnv } from "@/lib/dotenv";
 import { maybeRebuildDockerImageForLaunch } from "@/lib/dockerDailyRebuild";
@@ -1424,53 +1424,7 @@ const captureArmedRef = useRef(false);
     };
     host.addEventListener("paste", onPaste, true);
 
-    // Shift+Enter → newline-without-submit.
-    //
-    // xterm.js by default sends plain \r for BOTH Enter and Shift+Enter,
-    // so without an override the agent can't tell them apart.
-    //
-    // OpenCode uses its Ctrl+J newline binding (LF); other agents keep
-    // backslash + CR. Resolve the base agent so OpenCode clones work too.
-    //
-    // For the other agents:
-    // We send `\\` + `\r` (literal backslash then CR) — the same
-    // sequence `/terminal-setup` writes into iTerm2 for Claude Code.
-    // Claude's input parser reads the trailing backslash as a
-    // continuation marker and inserts a soft newline instead of
-    // submitting. Gemini + codex also accept this convention.
-    //
-    // ESC+CR (`\x1b\r`, the old Option+Enter convention) was tried
-    // first but recent claude builds no longer recognize it — they
-    // require the explicit backslash-Enter pair.
-    // Global app shortcuts that must still work while the terminal has
-    // focus. xterm would otherwise swallow the keys (send them to the PTY
-    // and preventDefault), so the window-level handler never fires. We
-    // return false for these → xterm ignores the event → it bubbles up to
-    // useShortcuts, which dispatches the command. Read from resolved prefs
-    // so user rebinds are honored.
-    const PASS_TO_APP: ShortcutId[] = [
-      "file-finder", "find-in-files", "broadcast", "open-settings",
-      // Unbound by default; once recorded it reaches the app from a terminal
-      // too, the way double-Shift does (that one is tracked on the window, so
-      // it never needed passing). On macOS with Cmd; elsewhere only when the
-      // chord carries Shift or Alt, since plain Ctrl+letter is the shell's.
-      "search-everywhere",
-    ];
     term.attachCustomKeyEventHandler((e) => {
-      // IME composition guard (Korean/Japanese/Chinese). xterm's
-      // CompositionHelper.keydown() decides "still composing?" purely by
-      // `keyCode === 229`. Chromium sets that for every composition keystroke,
-      // but WKWebView (WebKit) reports the real jamo key instead, so xterm
-      // finalizes the composition on EVERY keystroke — committing the partial
-      // syllable and resetting (안녕하세요 → ㅇㄴㅎ세). Returning false here
-      // short-circuits xterm's keydown BEFORE its composition handler runs and,
-      // crucially, without preventDefault — so the native textarea + xterm's
-      // own compositionstart/update/end listeners assemble the full syllable
-      // and emit it once on compositionend. `isComposing` covers continuation
-      // keystrokes; `keyCode === 229` covers the one that starts composition.
-      if (e.type === "keydown" && (e.isComposing || e.keyCode === 229)) {
-        return false;
-      }
       // Open find in terminal (TerminalFindBar). See isTerminalFindCombo.
       // BEFORE the pass-through below, which would hand a Ctrl+Alt chord to
       // the app (off macOS the combo is Ctrl+Alt+F).
@@ -1480,21 +1434,10 @@ const captureArmedRef = useRef(false);
         e.stopPropagation();
         return false;
       }
-      // Ctrl+Shift+W off macOS: not for the PTY, let it bubble to useShortcuts,
-      // which closes the tab (see isTerminalCloseCombo).
-      if (e.type === "keydown" && isTerminalCloseCombo(e, IS_MAC)) return false;
-      if (e.type === "keydown") {
-        const binds = usePrefs.getState().shortcuts;
-        // macOS: the Cmd press only (Ctrl is the shell's, ⌃R stays reverse
-        // search). Elsewhere: only a binding that also carries Shift or Alt,
-        // since plain Ctrl+letter is the shell's. See terminalPassesToApp.
-        if (terminalPassesToApp(e, binds, PASS_TO_APP)) {
-          return false; // let the global handler take it (file finder, find-in-files, …)
-        }
-        // The same rule for EVERY shortcut, not only the four above: a chord
-        // with Shift or Alt on it is the app's (isAppChordInTerminal).
-        if (isAppChordInTerminal(e, binds)) return false;
-      }
+      // The keys every terminal shares (lib/terminalKeys): the IME guard,
+      // the close chord, the app's shortcuts. AFTER find, which the
+      // pass-through would otherwise hand to the app (Ctrl+Alt+F).
+      if (terminalKeysBefore(e) === false) return false;
       // ctrl+V inside a DOCKER task: attach the clipboard image, the way the
       // agent would if it could reach the pasteboard.
       //
@@ -1556,86 +1499,13 @@ const captureArmedRef = useRef(false);
         return false;
       }
 
-      // Linux/Windows terminal copy/paste. macOS keeps native ⌘C / ⌘V (this
-      // whole block is skipped), so standard Mac behavior is untouched. Defaults
-      // are Ctrl+Shift+C / Ctrl+Shift+V — the Shift keeps plain Ctrl+C as SIGINT
-      // for the shell. Rebindable via Settings > Shortcuts.
-      if (!IS_MAC && e.type === "keydown") {
-        const binds = usePrefs.getState().shortcuts;
-        // Copy only when there's a selection; otherwise fall through so the
-        // combo isn't swallowed.
-        if (bindingMatches(e, binds["terminal-copy"]) && term.hasSelection()) {
-          writeClipboardText(term.getSelection()).catch(() => {});
-          e.preventDefault();
-          e.stopPropagation();
-          return false;
-        }
-        if (bindingMatches(e, binds["terminal-paste"])) {
-          readClipboardText().then(t => term.paste(t)).catch(() => {});
-          e.preventDefault();
-          e.stopPropagation();
-          return false;
-        }
-      }
-      // Linux: Super is held, so this key is an app shortcut (Super+J) and
-      // not text. WebKitGTK reports the chord as a bare letter, which xterm
-      // would send to the PTY; returning false leaves it for useShortcuts.
-      // Keypress too, or the letter is typed after the shortcut fired.
-      // AFTER copy / paste above: those are the terminal's own, and
-      // Super+Shift+V has to paste here like Ctrl+Shift+V does.
-      if (superIsHeld() && (e.type === "keydown" || e.type === "keypress")) {
-        return false;
-      }
-      const isEnter = e.key === "Enter" || e.code === "Enter" || e.code === "NumpadEnter";
-      if (e.type === "keydown" && e.shiftKey && isEnter && !e.altKey && !e.ctrlKey && !e.metaKey) {
-        const pid = ptyRef.current;
-        if (pid) {
-          // For non-OpenCode agents:
-          // `\` + `\r` (0x5c 0x0d) — claude's `hasUsedBackslashReturn`
-          // path. Gemini + codex accept it too.
-          const baseId = builtinBaseId(tab.cli, useApp.getState().agents);
-          ipc.ptyWrite(pid, terminalNewlineBytes(baseId)).catch(() => {});
-        }
-        // BOTH stops are required:
-        //   - return false      → xterm.js skips its keydown handler
-        //                         (otherwise it'd also emit \r)
-        //   - preventDefault    → WKWebView skips inserting `\n` into
-        //                         the helper textarea, which would
-        //                         otherwise fire xterm's input-event
-        //                         listener and submit anyway. This was
-        //                         the bit that took the longest to
-        //                         find: every "right" byte sequence
-        //                         (ESC+CR, \\\r, LF, modifyOtherKeys)
-        //                         was being suffixed by a stray LF
-        //                         from the textarea insertion, so
-        //                         claude always submitted.
-        e.preventDefault();
-        e.stopPropagation();
-        return false;
-      }
-      // Cmd+Backspace → kill line to beginning (\x15, Ctrl+U), matching
-      // macOS Terminal.app and iTerm2. xterm.js does not translate this
-      // combo on its own; without the override WKWebView may also navigate
-      // back, so both preventDefault and return false are required.
-      if (IS_MAC && e.type === "keydown" && e.metaKey && !e.shiftKey && !e.altKey && !e.ctrlKey && e.key === "Backspace") {
-        const pid = ptyRef.current;
-        if (pid) ipc.ptyWrite(pid, [0x15]).catch(() => {});
-        e.preventDefault();
-        e.stopPropagation();
-        return false;
-      }
-      // Cmd+Left → beginning of line (\x01, Ctrl+A); Cmd+Right → end of line
-      // (\x05, Ctrl+E). macOS Terminal.app / iTerm2 convention. xterm.js does
-      // not send these on its own for Cmd+Arrow on macOS.
-      if (IS_MAC && e.type === "keydown" && e.metaKey && !e.shiftKey && !e.altKey && !e.ctrlKey) {
-        if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
-          const pid = ptyRef.current;
-          if (pid) ipc.ptyWrite(pid, [e.key === "ArrowLeft" ? 0x01 : 0x05]).catch(() => {});
-          e.preventDefault();
-          e.stopPropagation();
-          return false;
-        }
-      }
+      // The rest every terminal shares (lib/terminalKeys): copy / paste off
+      // macOS, Super chords, Shift+Enter, ⌘⌫ and ⌘←/⌘→.
+      if (terminalKeysAfter(e, {
+        term,
+        write: (bytes) => { const pid = ptyRef.current; if (pid) ipc.ptyWrite(pid, bytes).catch(() => {}); },
+        agentBaseId: () => builtinBaseId(tab.cli, useApp.getState().agents),
+      }) === false) return false;
       return true;
     });
 
