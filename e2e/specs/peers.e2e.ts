@@ -853,6 +853,13 @@ describe("LAN pairing", () => {
         document.querySelector('[data-testid="remote-task-rt-1"] [data-testid="task-branch"]')?.getAttribute("data-branch") === "fix/login")),
       { timeout: 3_000, timeoutMsg: "the branch setting did not reach the remote row" });
       await prefs("setTaskBranchName", "none");
+      // A task whose agent is not running reads as such: greyed, as a local
+      // or server task's row is.
+      const dimmed = (id: string) => browser.execute((x) => getComputedStyle(document.querySelector(`[data-testid="remote-task-${x}"]`)!).opacity, id);
+      expect(Number(await dimmed("rt-3"))).toBe(1);
+      pushTasks!(baseTasks().map((x: any) => x.id === "rt-3" ? { ...x, state: "inactive" } : x));
+      await browser.waitUntil(async () => Number(await dimmed("rt-3")) < 1, { timeout: 3_000, timeoutMsg: "an inactive remote task was not greyed" });
+      pushTasks!(baseTasks());
     });
 
     it("rings the desktop when a paired computer's task starts needing you, and when it finishes", async () => {

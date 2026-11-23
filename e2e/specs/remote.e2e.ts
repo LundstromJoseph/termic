@@ -278,6 +278,12 @@ describe("Phones and servers", () => {
     p.send({ t: "term_size", cols: 40, rows: 12 });
     await browser.waitUntil(async () => (await pane()).transform.startsWith("scale("),
       { timeout: 10_000, timeoutMsg: "this pane did not scale to the viewer's size" });
+    // The terminal's own traffic does not count: a focus (programmatic, as
+    // a redraw's focus report rides on) leaves it scaled. Counting it made
+    // two windows on one task take the size from each other forever.
+    await browser.execute((id) => (document.querySelector(`[data-terminal-host="${id}"] textarea`) as HTMLTextAreaElement | null)?.focus(), tab);
+    await browser.pause(400);
+    expect((await pane()).transform.startsWith("scale(")).toBe(true);
     // Worked in here again: it takes its own size back, unscaled.
     await browser.execute((id) => document.querySelector(`[data-terminal-host="${id}"]`)!.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true })), tab);
     await browser.waitUntil(async () => (await pane()).transform === "",

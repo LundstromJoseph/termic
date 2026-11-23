@@ -158,12 +158,14 @@ not followed yet: the default home dirs are read.
 **The last window worked in owns a terminal's size** (tmux's "latest").
 One program draws for one width, so a terminal is one size at a time.
 Every host offers `resize`: a viewer sends `term_size` when its terminal
-is opened, focused, clicked or typed in, follows its own pane while it
+is opened, or on a human click or key anywhere in its window while the
+terminal is on screen (never the terminal's own focus reports and query
+replies, which ping-ponged two windows), follows its own pane while it
 owns the size, and otherwise draws the PTY's size scaled to fit
 (`RemoteTerminal`). The host's own pane learns of an outside resize from
 `termic://pty-resized` (emitted by the host's `pty_set_size`), draws that
-size scaled meanwhile, and takes its size back on a click, a key or a
-focus in it (`TerminalPane`). A desktop host still restores its size
+size scaled meanwhile, and takes its size back on a click or a key in
+its window (`TerminalPane`). A desktop host still restores its size
 when the viewer closes the terminal (`restore`). 1.25.3 resized without
 the scaling: the host's pane garbled and neither side redrew until its
 window changed size. A server, whose PTYs have no screen of their own,

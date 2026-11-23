@@ -3632,8 +3632,8 @@ const captureArmedRef = useRef(false);
     let wasHiddenAtZeroGeometry = false;
     // Sized from outside (a phone, another computer, `termic attach`): the
     // last window worked in owns a terminal's size. Meanwhile this pane draws
-    // at that size, scaled to fit, and working in it here (a click, a key, a
-    // focus) takes the size back. Before, the program drew for the other
+    // at that size, scaled to fit, and a click or a key in this window takes
+    // the size back. Before, the program drew for the other
     // size into this pane's grid, garbled until this window was resized.
     let remoteSized = false;
     const rescale = () => {
@@ -3657,9 +3657,14 @@ const captureArmedRef = useRef(false);
       if (remoteSized) requestAnimationFrame(rescale);
       else if (term.element) term.element.style.transform = "";
     });
-    host.addEventListener("pointerdown", reclaim, true);
-    host.addEventListener("focusin", reclaim);
-    const reclaimOnKey = term.onData(reclaim);
+    // Only a person takes the size back: a click or a key anywhere in this
+    // window (the sidebar included) while this terminal is on screen. Never
+    // the terminal's own traffic: focus reports and query replies flow on
+    // every redraw, and counting them made two windows on one task take the
+    // size from each other forever.
+    const onHuman = () => requestAnimationFrame(() => { if (host.offsetParent) reclaim(); });
+    window.addEventListener("pointerdown", onHuman, true);
+    window.addEventListener("keydown", onHuman, true);
     const ro = new ResizeObserver((entries) => {
       for (const e of entries) {
         const r = e.contentRect;
@@ -3679,9 +3684,8 @@ const captureArmedRef = useRef(false);
       cancelled = true;
       ro.disconnect();
       void unlistenSized.then(u => u());
-      host.removeEventListener("pointerdown", reclaim, true);
-      host.removeEventListener("focusin", reclaim);
-      reclaimOnKey.dispose();
+      window.removeEventListener("pointerdown", onHuman, true);
+      window.removeEventListener("keydown", onHuman, true);
       // This PTY's conversation is over (closed, or restarted into a new one),
       // so its context reading describes nothing any more.
       useAgentContext.getState().clearTab(task.id, tab.cli ?? "claude", tab.id);

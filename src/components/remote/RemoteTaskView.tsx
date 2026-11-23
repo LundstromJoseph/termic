@@ -179,7 +179,7 @@ function Gone({ message, onClose }: { message: string; onClose: () => void }) {
 
 /** Another computer's terminal, where the last window worked in owns the
  *  size (as tmux's "latest"): this one claims it when the terminal is
- *  opened, focused, clicked or typed in, and follows this pane while it
+ *  opened, or on a click or a key in this window, and follows this pane while it
  *  owns it; when that computer takes it back, this draws at its size,
  *  scaled to fit the pane. A terminal cannot be two sizes at once (one
  *  program draws for one width), so the other window scales instead. */
@@ -263,12 +263,16 @@ function RemoteTerminal({ machineId, taskId, tabId }: { machineId: string; taskI
       }
     };
     const sub = term.onData(data => {
-      claim();
       if (isTerminalReply(data)) return;
       void remoteTermInput(machineId, b64encode(data)).catch(() => {});
     });
-    box.addEventListener("pointerdown", claim, true);
-    box.addEventListener("focusin", claim);
+    // Only a person claims the size: a click or a key anywhere in this
+    // window while this terminal is on screen, never the terminal's own
+    // replies (they flow on every redraw: two windows took the size from
+    // each other forever when they counted).
+    const onHuman = () => requestAnimationFrame(() => { if (box.offsetParent) claim(); });
+    window.addEventListener("pointerdown", onHuman, true);
+    window.addEventListener("keydown", onHuman, true);
     // While this window owns the size it follows the pane (debounced: a
     // drag sends one size); otherwise a resize here only rescales.
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -289,8 +293,8 @@ function RemoteTerminal({ machineId, taskId, tabId }: { machineId: string; taskI
       alive = false;
       clearTimeout(timer);
       ro.disconnect();
-      box.removeEventListener("pointerdown", claim, true);
-      box.removeEventListener("focusin", claim);
+      window.removeEventListener("pointerdown", onHuman, true);
+      window.removeEventListener("keydown", onHuman, true);
       sub.dispose();
       if (reopening.current) reopening.current = false;
       else void remoteTermClose(machineId).catch(() => {});

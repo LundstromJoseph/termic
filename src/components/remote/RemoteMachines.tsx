@@ -553,6 +553,9 @@ const RemoteTaskRow = memo(function RemoteTaskRow({ m, task }: { m: MachineView;
         "ml-3 flex cursor-pointer select-none items-center gap-1.5 rounded-md px-1.5 text-[13px] transition-colors",
         below ? "min-h-[var(--task-row-h)] py-1" : "h-[var(--task-row-h)]",
         active ? "bg-[var(--color-sel)] text-[var(--color-fg)]" : "text-[var(--color-fg-dim)] hover:bg-[var(--color-hover)] hover:text-[var(--color-fg)]",
+        // Greyed while its agent is not running, as a local or server task's
+        // row is (the sidebar's `isLoaded`); every row read as started.
+        (task.state === "inactive" || task.state === "unknown") && "opacity-60",
       )}
     >
       <span className={cn("shrink-0", CLI_BRAND_COLOR[icon])}><CliIcon cli={icon} className="h-4 w-4" /></span>
