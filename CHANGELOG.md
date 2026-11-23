@@ -25,6 +25,7 @@ Remote control: your phone, your own servers, and your other computers.
 - Stop a task from here and it stops there too; Reopen starts it again in its last session.
 - Copy and paste cross over: what an agent copies lands on your clipboard here, and Ctrl+V with an image attaches it to the agent there, as a local paste does. On a server, the image is put on the server for the agent.
 - Its terminal takes your keys as a local one does: Shift+Enter adds a line, ⌘⌫ and ⌘←/⌘→ edit the line, and app shortcuts reach the app.
+- Right-click one of its tasks to stop it, archive it or copy its branch name, as on a local task.
 
 ### Also new
 - Settings is reorganised around it: MCP & CLI, Remote control (phones and paired computers) and Servers. Remote is marked experimental, and Settings, Appearance turns the REMOTE section off for anyone who does not use it.
