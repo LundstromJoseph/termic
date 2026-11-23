@@ -155,11 +155,15 @@ session started in the task's folder, which a task sharing the project
 checkout cannot use, so it gets none. Account-relocated config dirs are
 not followed yet: the default home dirs are read.
 
-**The host owns the terminal size.** A client renders at the PTY's
-columns and rows and never resizes it; a resize on the desktop arrives as
-`term_resize`. The one exception is a host whose PTYs have no screen of
-their own (termic-server, which says so with `resize`): there the
-viewing pane sizes the PTY with `term_size` (see Servers). xterm's automatic answers to terminal queries are never
+**The viewer sizes the terminal it watches.** Every host offers `resize`:
+a phone, another computer or a desktop on a server sends `term_size` for
+the pane it draws in, the PTY follows, and `term_resize` confirms it. A
+desktop host keeps its own size in `restore` and puts it back when the
+viewer closes the terminal or disconnects. Before, only a phone could:
+another computer drew the PTY at the host's window size, scrolling both
+ways in a pane of a different shape. A host older than this ignores
+`term_size` from a computer, and the viewer then draws at the size it
+was given. xterm's automatic answers to terminal queries are never
 forwarded from a viewer (the agent already has a terminal answering).
 
 ## Pairing a phone

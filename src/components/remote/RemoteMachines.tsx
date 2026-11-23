@@ -442,21 +442,35 @@ function RemoteProjectRows({ m, project }: { m: MachineView; project: RemoteProj
       {project.segments.map(seg => seg.kind === "task"
         ? <RemoteTaskRow key={seg.task.id} m={m} task={seg.task} />
         : (
-          // The local TaskGroupBlock's look, read-only: the caption in the
-          // group's colour, the members on a rail of it.
-          <div key={`g:${seg.group.id}`} data-testid={`remote-group-${seg.group.id}`} data-color={seg.group.color ?? ""}>
-            <div className="ml-3 flex h-[var(--task-row-h)] select-none items-center gap-1 px-1 text-[13px] font-medium" style={{ color: groupColorCss(seg.group) }}>
-              <span className="mx-0.5 block h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: groupColorCss(seg.group) }} />
-              <span className="truncate">{seg.group.name}</span>
-              <span className="ml-auto shrink-0 pr-1 text-[11px] font-normal tabular-nums text-[var(--color-fg-faint)]">{seg.tasks.length}</span>
-            </div>
-            <div className="ml-6 border-l" style={{ borderColor: groupColorCss(seg.group) }}>
-              <div className="-ml-[calc(var(--spacing)*1.5-1px)]">
-                {seg.tasks.map(task => <RemoteTaskRow key={task.id} m={m} task={task} />)}
-              </div>
-            </div>
-          </div>
+          <RemoteGroupBlock key={`g:${seg.group.id}`} m={m} group={seg.group} tasks={seg.tasks} />
         ))}
+    </div>
+  );
+}
+
+/** A task group on a paired computer: the local block's caption in the
+ *  group's colour and its members on a rail of it, folding open and shut
+ *  like the local one (the fold is this computer's, keyed per machine). */
+function RemoteGroupBlock({ m, group, tasks }: { m: MachineView; group: RemoteGroup; tasks: RemoteTask[] }) {
+  const key = `group:${m.id}:${group.id}`;
+  const folded = useRemote(s => !!s.folded[key]);
+  const toggle = useRemote(s => s.toggleFold);
+  return (
+    <div data-testid={`remote-group-${group.id}`} data-color={group.color ?? ""} data-folded={folded}>
+      <button type="button" aria-expanded={!folded} onClick={() => toggle(key)}
+        className="ml-3 flex h-[var(--task-row-h)] w-[calc(100%-0.75rem)] select-none items-center gap-1 rounded-md px-1 text-left text-[13px] font-medium hover:bg-[var(--color-hover)]"
+        style={{ color: groupColorCss(group) }}>
+        {folded ? <ChevronRight className="h-3.5 w-3.5 shrink-0" /> : <ChevronDown className="h-3.5 w-3.5 shrink-0" />}
+        <span className="truncate">{group.name}</span>
+        <span className="ml-auto shrink-0 pr-1 text-[11px] font-normal tabular-nums text-[var(--color-fg-faint)]">{tasks.length}</span>
+      </button>
+      {!folded && (
+        <div className="ml-6 border-l" style={{ borderColor: groupColorCss(group) }}>
+          <div className="-ml-[calc(var(--spacing)*1.5-1px)]">
+            {tasks.map(task => <RemoteTaskRow key={task.id} m={m} task={task} />)}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

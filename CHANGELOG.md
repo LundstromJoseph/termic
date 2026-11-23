@@ -4,7 +4,7 @@ All notable changes to Termic, newest first. This file is the human-authored
 source of truth: the in-app Update card and the /changelog page on termic.dev
 are generated from it. See the `release` skill for how entries are added.
 
-## [1.25.2] - 2026-11-23
+## [1.25.3] - 2026-11-23
 
 Two new features: a phone app to remote-control Termic, and agents on your own servers.
 
@@ -20,8 +20,14 @@ Two new features: a phone app to remote-control Termic, and agents on your own s
 ### Improvements
 - Sidebar: projects, folders and task groups animate open and shut.
 - Connect a phone says plainly that away from your network the phone needs your own VPN to this computer (your router's VPN or Tailscale), since Termic has no relay.
+- A paired computer's terminal fits your window while you watch it, and goes back to its own size when you leave, as on the phone. It was drawn at the other computer's size and scrolled both ways.
+- Remote is marked experimental, and Settings, Appearance, Remote in the sidebar turns the section off for anyone who does not use it.
+- A paired computer's task groups fold open and shut, its projects read like local ones, and its rows no longer show git line counts.
+- The pair list shows each computer's Termic version, and Termic Beta and dev builds name themselves, so the release and a Beta on one Mac no longer look like the same computer twice.
+- The sidebar's New task button under a project's tasks shows only for a project with none yet; the header's + starts the rest. It is still in Settings, Appearance.
 
 ### Bug fixes
+- Reopen on a paired computer's task starts its stopped agent again in its last session. It used to do nothing.
 - A task started with a prompt (New task with a prompt, a PR review, a race) now comes back in its Claude session after a restart, instead of a fresh one.
 - With two profile windows open, a running task no longer reads as inactive to `termic status` and MCP every few seconds.
 - Windows and Linux: closing the last window while agents run asks before the window closes. Before, the window vanished first, and Cancel left Termic in the tray with no window to show.

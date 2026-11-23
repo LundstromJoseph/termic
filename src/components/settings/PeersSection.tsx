@@ -615,7 +615,9 @@ function NearbyRow({ n, busy, disabled, onRequest, onPair }: {
         <div className="truncate text-[11.5px] text-[var(--color-fg-faint)]">
           {asked
             ? <span className="text-[var(--color-accent)]">{t("peers.nearby.codeFor", { name: n.name })}</span>
-            : !n.proto_ok ? t("peers.versionMismatch") : n.address}
+            // The version beside the address: the release and a Beta on one
+            // Mac are two entries, and this is what tells them apart.
+            : !n.proto_ok ? t("peers.versionMismatch") : [n.version && `Termic ${n.version}`, n.address].filter(Boolean).join(" · ")}
         </div>
       </div>
       {!asked ? (
