@@ -966,6 +966,46 @@ describe("LAN pairing", () => {
       expect(sent(mark).filter(c => c.cmd === "archive")).toEqual([]);
     });
 
+    it("shows only the host profiles ticked in the computer's menu", async () => {
+      await browser.execute(() => window.__termic!.useApp.getState().closeSettings());
+      const work = { id: "work", name: "Work", accent: "#d97757" };
+      const home = { id: "home", name: "Home", accent: "#5e9ed6" };
+      const tasks = baseTasks().map((t, i) => ({ ...t, profile: i % 2 ? home : work }));
+      const homeIds = tasks.filter(t => t.profile === home).map(t => t.id);
+      const workIds = tasks.filter(t => t.profile === work).map(t => t.id);
+      pushTasks!(tasks);
+      await waitVisible(`[data-testid="remote-task-${homeIds[0]}"]`);
+      const openMenu = () => browser.waitUntil(() => browser.execute((id) => {
+        if (document.querySelector('[data-testid="machine-menu-profile-home"]')) return true;
+        const el = document.querySelector(`[data-testid="server-menu-${id}"]`) as HTMLElement | null;
+        if (!el) return false;
+        const opts = { bubbles: true, cancelable: true, pointerType: "mouse", button: 0, isPrimary: true, pointerId: 1 } as PointerEventInit;
+        el.dispatchEvent(new PointerEvent("pointerdown", opts));
+        el.dispatchEvent(new PointerEvent("pointerup", opts));
+        return !!document.querySelector('[data-testid="machine-menu-profile-home"]');
+      }, remote.id), { timeout: 10_000, timeoutMsg: "the computer's menu never opened" });
+      const ticked = (p: string) => browser.execute((q) => document.querySelector(`[data-testid="machine-menu-profile-${q}"] [data-checked]`)?.getAttribute("data-checked"), p);
+
+      // The rows were already there (same ids): wait for the profiles.
+      await browser.waitUntil(() => browser.execute((id) =>
+        !!window.__termic!.useRemote.getState().machines.find((x: { id: string }) => x.id === id)?.tasks.some((t: { profile?: unknown }) => t.profile), remote.id),
+        { timeout: 5000, timeoutMsg: "the tasks never arrived with their profiles" });
+      // Both ticked at first; unticking Home hides its tasks and keeps Work's.
+      await openMenu();
+      expect([await ticked("work"), await ticked("home")]).toEqual(["true", "true"]);
+      await snap("remote-profile-menu.png");
+      await clickPresent('[data-testid="machine-menu-profile-home"]');
+      await waitGone(`[data-testid="remote-task-${homeIds[0]}"]`);
+      await waitVisible(`[data-testid="remote-task-${workIds[0]}"]`);
+
+      // A hidden profile stays in the list, unticked, so it can come back.
+      await openMenu();
+      expect(await ticked("home")).toBe("false");
+      await clickPresent('[data-testid="machine-menu-profile-home"]');
+      await waitVisible(`[data-testid="remote-task-${homeIds[0]}"]`);
+      pushTasks!(baseTasks());
+    });
+
     it("opens a remote task as its terminal, focused, and says where it runs", async () => {
       await clickPresent(`[data-testid="remote-task-${remoteTask.id}"]`);
       await waitVisible('[data-testid="remote-task-view"]');

@@ -9,7 +9,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { memo, useMemo, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
-import { Bell, ChevronDown, ChevronRight, Folder, MoreVertical, GitMerge, GitPullRequest, GitPullRequestClosed, GitPullRequestDraft, Monitor, Pin, Plus, RefreshCw, Server, MonitorSmartphone, Smartphone } from "lucide-react";
+import { Bell, Check, ChevronDown, ChevronRight, Folder, MoreVertical, GitMerge, GitPullRequest, GitPullRequestClosed, GitPullRequestDraft, Monitor, Pin, Plus, RefreshCw, Server, MonitorSmartphone, Smartphone } from "lucide-react";
 import { CliIcon, CLI_BRAND_COLOR, resolveIconId } from "@/icons/cli";
 import { Spinner } from "@/components/ui/Spinner";
 import { Tip } from "@/components/ui/Tooltip";
@@ -35,7 +35,7 @@ import type { ForgeProvider } from "@/lib/types";
 import { openPath, peerUnpair } from "@/lib/ipc";
 import { copyToClipboard } from "@/lib/clipboard";
 import { archiveRemoteTask, stopRemoteAgent } from "@/components/remote/RemoteTaskView";
-import { joinableGroups, layoutRemote, remoteCall, remoteProps, remoteReconnect, remoteSetConnected, remoteTaskRequest, serverRemove, useRemote, type RemoteTaskAction, type MachineView, type RemoteGroup, type RemoteProject, type RemoteTask, openNewTaskOnServer } from "@/lib/remote";
+import { joinableGroups, layoutRemote, profilesOf, visibleTasks, remoteCall, remoteProps, remoteReconnect, remoteSetConnected, remoteTaskRequest, serverRemove, useRemote, type RemoteTaskAction, type MachineView, type RemoteGroup, type RemoteProject, type RemoteTask, openNewTaskOnServer } from "@/lib/remote";
 
 /** A top-level sidebar section header, styled as PROJECTS': a filled bar
  *  with the label, a fold, and its actions on the right. */
@@ -138,6 +138,7 @@ export function RemoteSidebarSection({ projects, renderProject }: { projects: Pr
   );
 }
 
+const NO_PROFILES: string[] = [];
 type MenuItem = (p: { onSelect: () => void; children: ReactNode; testId?: string; danger?: boolean }) => ReactNode;
 
 /** A server's or paired computer's menu (its ⋮ and right-click). */
@@ -149,6 +150,13 @@ function MachineMenuItems({ m, Item, Sep }: { m: MachineView; Item: MenuItem; Se
   const server = m.kind === "server";
   const online = m.state === "online";
   const off = m.state === "disconnected";
+  // A computer's profiles: which of them this sidebar shows.
+  // From the machine as it arrived, not the filtered view the section
+  // passes: a hidden profile must stay in the list to be ticked back on.
+  const allTasks = useRemote(s => s.machines.find(x => x.id === m.id)?.tasks) ?? m.tasks;
+  const profiles = useMemo(() => (server ? [] : profilesOf(allTasks)), [server, allTasks]);
+  const hidden = useRemote(s => s.hiddenProfiles[m.id]) ?? NO_PROFILES;
+  const toggleProfile = useRemote(s => s.toggleProfile);
   const switchTo = (on: boolean) => void remoteSetConnected(m.id, on).catch(e => useUI.getState().pushToast(String(e), "error"));
   const remove = async () => {
     const ok = await useUI.getState().askConfirm({ title: t("servers.removeTitle", { name: m.name }), message: t("servers.removeMessage", { name: m.name }), confirmLabel: t("servers.remove"), destructive: true });
@@ -168,6 +176,22 @@ function MachineMenuItems({ m, Item, Sep }: { m: MachineView; Item: MenuItem; Se
       {off
         ? <Item testId="machine-menu-connect" onSelect={() => switchTo(true)}>{t("sidebar.connect")}</Item>
         : <Item testId="machine-menu-disconnect" onSelect={() => switchTo(false)}>{t("sidebar.disconnect")}</Item>}
+      {profiles.length > 1 && <>
+        <Sep />
+        {profiles.map(p => {
+          const on = !hidden.includes(p.id);
+          return (
+            <Item key={p.id} testId={`machine-menu-profile-${p.id}`} onSelect={() => toggleProfile(m.id, p.id)}>
+              <span className="flex items-center gap-2" data-checked={on}>
+                <span className="flex w-3.5 justify-center">{on && <Check className="h-3.5 w-3.5" />}</span>
+                <span className="inline-block h-2 w-2 rounded-full" style={{ backgroundColor: p.accent }} />
+                {p.name}
+              </span>
+            </Item>
+          );
+        })}
+        <Sep />
+      </>}
       <Item testId="server-menu-settings" onSelect={() => openSettings(server ? "servers" : "remote")}>{server ? t("sidebar.serverSettings") : t("sidebar.pairingSettings")}</Item>
       <Sep />
       {server
@@ -320,8 +344,13 @@ export function StateGlyph({ state, size = 13 }: { state: string; size?: number 
   return null;
 }
 
-const MachineSection = memo(function MachineSection({ m }: { m: MachineView }) {
+const MachineSection = memo(function MachineSection({ m: all }: { m: MachineView }) {
   const { t } = useTranslation("remote");
+  // The profiles this window hides (its menu's checklist) leave its rows,
+  // its bell count and every menu built from its tasks.
+  const hidden = useRemote(s => s.hiddenProfiles[all.id]);
+  const tasks = useMemo(() => visibleTasks(all.tasks, hidden), [all.tasks, hidden]);
+  const m = useMemo(() => (tasks === all.tasks ? all : { ...all, tasks }), [all, tasks]);
   const folded = useRemote(s => !!s.folded[m.id]);
   const toggle = useRemote(s => s.toggleFold);
   const setDialog = useRemote(s => s.setDialog);

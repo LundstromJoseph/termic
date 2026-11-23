@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { addressKind, countdown, isTerminalReply, joinableGroups, layoutRemote, nameFromPrompt, remoteAlerts, remoteProps, remoteTaskRequest, type RemoteTask } from "@/lib/remote";
+import { addressKind, countdown, isTerminalReply, joinableGroups, layoutRemote, nameFromPrompt, profilesOf, remoteAlerts, remoteProps, remoteTaskRequest, visibleTasks, type RemoteTask } from "@/lib/remote";
 
 describe("isTerminalReply", () => {
   it("drops xterm's automatic answers to terminal queries", () => {
@@ -123,5 +123,24 @@ describe("remoteAlerts: what is worth ringing the desktop for", () => {
     expect(remoteAlerts([mach("online", [])], [mach("online", [task("new", "waiting")])])).toEqual([]);
     expect(remoteAlerts([mach("offline", [task("t1", "working")])], [mach("online", [task("t1", "waiting")])])).toEqual([]);
     expect(remoteAlerts([mach("online", [task("t1", "waiting")])], [mach("online", [task("t1", "waiting")])])).toEqual([]);
+  });
+});
+
+describe("a paired computer's profiles", () => {
+  const work = { id: "work", name: "Work", accent: "#ff0000" };
+  const home = { id: "home", name: "Home", accent: "#00ff00" };
+  const tasks = [
+    { id: "a", profile: work }, { id: "b", profile: home }, { id: "c", profile: work }, { id: "d" },
+  ] as unknown as RemoteTask[];
+
+  it("lists each profile once, in the order first seen", () => {
+    expect(profilesOf(tasks).map(p => p.id)).toEqual(["work", "home"]);
+  });
+
+  it("hides the unticked profiles' tasks; a task with no profile always shows", () => {
+    expect(visibleTasks(tasks, ["work"]).map(t => t.id)).toEqual(["b", "d"]);
+    // Nothing hidden: the same array, so memoised rows do not rebuild.
+    expect(visibleTasks(tasks, [])).toBe(tasks);
+    expect(visibleTasks(tasks, undefined)).toBe(tasks);
   });
 });

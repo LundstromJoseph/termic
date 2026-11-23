@@ -85,6 +85,19 @@ export interface RemoteTask {
   project_order?: number;
   order?: number;
   pr?: RemotePr;
+  /** The host profile its project belongs to; absent on a host with none
+   *  (and on termic-server). */
+  profile?: RemoteProfile;
+}
+
+/** A host profile, as its own profile strip draws it. */
+export interface RemoteProfile { id: string; name: string; accent: string }
+
+/** A machine's profiles, each once, in the order first seen. */
+export function profilesOf(tasks: RemoteTask[]): RemoteProfile[] {
+  const out: RemoteProfile[] = [];
+  for (const t of tasks) if (t.profile && !out.some(p => p.id === t.profile!.id)) out.push(t.profile);
+  return out;
 }
 
 export interface MachineView {
@@ -336,9 +349,21 @@ interface RemoteStore {
   alerts: RemoteAlert[];
   openTask(o: OpenRemote | null): void;
   toggleFold(id: string): void;
+  /** Per machine, the host profiles this window leaves out of its sidebar. */
+  hiddenProfiles: Record<string, string[]>;
+  toggleProfile(machine: string, profile: string): void;
 }
 
 const LS_REMOTE_FOLDED = "termic.remoteFolded";
+const LS_REMOTE_HIDDEN_PROFILES = "termic.remoteHiddenProfiles";
+
+function loadHiddenProfiles(): Record<string, string[]> {
+  try {
+    return JSON.parse(localStorage.getItem(LS_REMOTE_HIDDEN_PROFILES) ?? "{}") ?? {};
+  } catch {
+    return {};
+  }
+}
 
 function loadFolds(): Record<string, boolean> {
   try {
@@ -359,6 +384,7 @@ export const useRemote = create<RemoteStore>((set, get) => ({
   setDialog(d) { set(d); },
   open: null,
   folded: loadFolds(),
+  hiddenProfiles: loadHiddenProfiles(),
   alerts: [],
   setMachines(list) {
     if (sameList(get().machines, list)) return;
@@ -380,7 +406,20 @@ export const useRemote = create<RemoteStore>((set, get) => ({
     try { localStorage.setItem(LS_REMOTE_FOLDED, JSON.stringify(folded)); } catch { /* per-viewer convenience */ }
     set({ folded });
   },
+  toggleProfile(machine, profile) {
+    const cur = get().hiddenProfiles[machine] ?? [];
+    const next = cur.includes(profile) ? cur.filter(p => p !== profile) : [...cur, profile];
+    const hiddenProfiles = { ...get().hiddenProfiles, [machine]: next };
+    try { localStorage.setItem(LS_REMOTE_HIDDEN_PROFILES, JSON.stringify(hiddenProfiles)); } catch { /* per-viewer convenience */ }
+    set({ hiddenProfiles });
+  },
 }));
+
+/** A machine with the profiles this window hides left out of its tasks. */
+export function visibleTasks(tasks: RemoteTask[], hidden: string[] | undefined): RemoteTask[] {
+  if (!hidden?.length) return tasks;
+  return tasks.filter(t => !t.profile || !hidden.includes(t.profile.id));
+}
 
 let started = false;
 
