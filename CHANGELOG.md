@@ -4,7 +4,7 @@ All notable changes to Termic, newest first. This file is the human-authored
 source of truth: the in-app Update card and the /changelog page on termic.dev
 are generated from it. See the `release` skill for how entries are added.
 
-## [1.25.3] - 2026-11-23
+## [1.25.4] - 2026-11-23
 
 Two new features: a phone app to remote-control Termic, and agents on your own servers.
 
@@ -20,7 +20,7 @@ Two new features: a phone app to remote-control Termic, and agents on your own s
 ### Improvements
 - Sidebar: projects, folders and task groups animate open and shut.
 - Connect a phone says plainly that away from your network the phone needs your own VPN to this computer (your router's VPN or Tailscale), since Termic has no relay.
-- A paired computer's terminal fits your window while you watch it, and goes back to its own size when you leave, as on the phone. It was drawn at the other computer's size and scrolled both ways.
+- Remote terminals: the last window you work in sets the terminal's size, and the other one shows it scaled to fit. Click, type or focus in either window to take the size back. Before, a paired computer's terminal was drawn at the other computer's size and scrolled both ways.
 - Remote is marked experimental, and Settings, Appearance, Remote in the sidebar turns the section off for anyone who does not use it.
 - A paired computer's task groups fold open and shut, its projects read like local ones, and its rows no longer show git line counts.
 - The pair list shows each computer's Termic version, and Termic Beta and dev builds name themselves, so the release and a Beta on one Mac no longer look like the same computer twice.

@@ -2,6 +2,7 @@
 // the resize/refit dance and the attention/unread heuristics. Stays mounted
 // across tab switches (parent toggles visibility) so we don't reconnect PTYs.
 
+import { listen } from "@tauri-apps/api/event";
 import { ShellRcBanner } from "@/components/secretsUi/ShellRcBanner";
 import { parseRoleShells, roleShellsKey, setShellPty, shellSecretsArg } from "@/lib/shellSecrets";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -3629,11 +3630,43 @@ const captureArmedRef = useRef(false);
     // "locked" (wheel-up dead at the bottom, or bottom unreachable) until
     // new output happens to scroll the buffer. See lib/xtermViewportSync.
     let wasHiddenAtZeroGeometry = false;
+    // Sized from outside (a phone, another computer, `termic attach`): the
+    // last window worked in owns a terminal's size. Meanwhile this pane draws
+    // at that size, scaled to fit, and working in it here (a click, a key, a
+    // focus) takes the size back. Before, the program drew for the other
+    // size into this pane's grid, garbled until this window was resized.
+    let remoteSized = false;
+    const rescale = () => {
+      const el = term.element;
+      if (!el || !el.offsetWidth || !el.offsetHeight) return;
+      const sc = Math.min(host.clientWidth / el.offsetWidth, host.clientHeight / el.offsetHeight, 1.5);
+      el.style.transformOrigin = "top left";
+      el.style.transform = `scale(${sc})`;
+    };
+    const reclaim = () => {
+      if (!remoteSized) return;
+      remoteSized = false;
+      if (term.element) term.element.style.transform = "";
+      try { fit.fit(); } catch {}
+    };
+    const unlistenSized = listen<{ ptyId: string; cols: number; rows: number }>("termic://pty-resized", ({ payload }) => {
+      if (!payload || payload.ptyId !== ptyRef.current) return;
+      const own = fit.proposeDimensions();
+      remoteSized = !(own && own.cols === payload.cols && own.rows === payload.rows);
+      if (term.cols !== payload.cols || term.rows !== payload.rows) term.resize(payload.cols, payload.rows);
+      if (remoteSized) requestAnimationFrame(rescale);
+      else if (term.element) term.element.style.transform = "";
+    });
+    host.addEventListener("pointerdown", reclaim, true);
+    host.addEventListener("focusin", reclaim);
+    const reclaimOnKey = term.onData(reclaim);
     const ro = new ResizeObserver((entries) => {
       for (const e of entries) {
         const r = e.contentRect;
         if (r.width === 0 || r.height === 0) { wasHiddenAtZeroGeometry = true; return; }
       }
+      // Drawn at another window's size: fit the drawing, keep the size.
+      if (remoteSized) { rescale(); return; }
       try { fit.fit(); } catch {}
       if (wasHiddenAtZeroGeometry) {
         wasHiddenAtZeroGeometry = false;
@@ -3645,6 +3678,10 @@ const captureArmedRef = useRef(false);
     return () => {
       cancelled = true;
       ro.disconnect();
+      void unlistenSized.then(u => u());
+      host.removeEventListener("pointerdown", reclaim, true);
+      host.removeEventListener("focusin", reclaim);
+      reclaimOnKey.dispose();
       // This PTY's conversation is over (closed, or restarted into a new one),
       // so its context reading describes nothing any more.
       useAgentContext.getState().clearTab(task.id, tab.cli ?? "claude", tab.id);

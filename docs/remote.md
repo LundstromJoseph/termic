@@ -155,15 +155,19 @@ session started in the task's folder, which a task sharing the project
 checkout cannot use, so it gets none. Account-relocated config dirs are
 not followed yet: the default home dirs are read.
 
-**Each computer keeps its own terminal size.** One program draws for one
-width, so a terminal cannot be two sizes at once. A phone sizes the PTY
-while it watches (`resize`, offered to phones only) and the desktop gets
-its size back after (`restore`). Another computer never resizes it: it
-draws the PTY at the host's size and scales the drawing to fit its pane
-(`RemoteTerminal`). 1.25.3 let computers resize too, and it fought the
-host's own window: neither side redrew until its window changed size.
-A server, whose PTYs have no screen of their own, still follows the
-viewing pane (see Servers). xterm's automatic answers to terminal queries are never
+**The last window worked in owns a terminal's size** (tmux's "latest").
+One program draws for one width, so a terminal is one size at a time.
+Every host offers `resize`: a viewer sends `term_size` when its terminal
+is opened, focused, clicked or typed in, follows its own pane while it
+owns the size, and otherwise draws the PTY's size scaled to fit
+(`RemoteTerminal`). The host's own pane learns of an outside resize from
+`termic://pty-resized` (emitted by the host's `pty_set_size`), draws that
+size scaled meanwhile, and takes its size back on a click, a key or a
+focus in it (`TerminalPane`). A desktop host still restores its size
+when the viewer closes the terminal (`restore`). 1.25.3 resized without
+the scaling: the host's pane garbled and neither side redrew until its
+window changed size. A server, whose PTYs have no screen of their own,
+follows the viewing pane (see Servers). xterm's automatic answers to terminal queries are never
 forwarded from a viewer (the agent already has a terminal answering).
 
 ## Pairing a phone

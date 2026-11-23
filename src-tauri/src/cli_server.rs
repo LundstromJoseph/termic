@@ -4721,7 +4721,13 @@ impl CliHost for TauriHost {
         crate::pty_size_inner(&self.app.state::<crate::PtyManager>(), pty_id)
     }
     fn pty_set_size(&self, pty_id: &str, rows: u16, cols: u16) -> Result<(), String> {
-        crate::pty_resize_inner(&self.app.state::<crate::PtyManager>(), pty_id, rows, cols)
+        crate::pty_resize_inner(&self.app.state::<crate::PtyManager>(), pty_id, rows, cols)?;
+        // Sized from outside this window (a phone, another computer, `termic
+        // attach`): the pane showing this PTY scales its drawing to the new
+        // size until someone works in it here, which takes the size back.
+        use tauri::Emitter;
+        let _ = self.app.emit("termic://pty-resized", serde_json::json!({ "ptyId": pty_id, "cols": cols, "rows": rows }));
+        Ok(())
     }
     fn notify_detach(&self, task_id: &str, reason: &str) {
         crate::notify_task_detach(&self.app.state::<crate::PtyManager>(), task_id, reason);

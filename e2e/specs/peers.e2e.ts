@@ -278,6 +278,9 @@ const filed = [
     project_group: backend, project_order: 1, order: 1 },
 ];
 const hostSaw: any[] = [];
+/** The fake host's sender for the open terminal, to play it taking the
+ *  size back (its own window worked in). */
+let hostSend: (msg: unknown) => void = () => {};
 /** Push a new task snapshot down the live stream, as the host does when a
  *  task's state moves. Set once the desktop subscribes to tasks. */
 let pushTasks: ((tasks: unknown[]) => void) | null = null;
@@ -327,7 +330,7 @@ function serveStream(server: http.Server, remote: Fake, onCall: (req: any) => un
         const send = (msg: unknown) => frame(sealFrame(tx!, sn++, msg));
         hostSaw.push(m);
         if (m.t === "hello") {
-          send({ t: "welcome", v: 1, id: remote.id, name: remote.name, version: FAKE_VERSION, kind: "desktop", caps: ["call", "tasks", "terminal", "keys", "transcript"], grant: "drive" });
+          send({ t: "welcome", v: 1, id: remote.id, name: remote.name, version: FAKE_VERSION, kind: "desktop", caps: ["call", "tasks", "terminal", "keys", "transcript", "resize"], grant: "drive" });
           if ((m.caps ?? []).includes("tasks")) {
             send({ t: "tasks", tasks: baseTasks() });
             pushTasks = (tasks) => send({ t: "tasks", tasks });
@@ -337,7 +340,11 @@ function serveStream(server: http.Server, remote: Fake, onCall: (req: any) => un
         } else if (m.t === "keys" && m.id) {
           send({ t: "ack", id: m.id, ok: m.question === remoteTask.question.id, message: m.question === remoteTask.question.id ? undefined : "stale" });
         } else if (m.t === "term_open") {
+          hostSend = send;
           send({ t: "term_reset", task: m.task, cols: 80, rows: 10, data: Buffer.from("hello from the other machine\r\n").toString("base64") });
+        } else if (m.t === "term_size") {
+          // A real host sizes the PTY and confirms it.
+          send({ t: "term_resize", cols: m.cols, rows: m.rows });
         } else if (m.t === "transcript") {
           send({ t: "transcript", id: m.id, task: m.task, turns: [{ role: "user", text: "fix the login bug" }, { role: "tool", tool: "Bash", text: "npm test" }, { role: "assistant", text: "Found it." }] });
         }
@@ -922,17 +929,35 @@ describe("LAN pairing", () => {
       // The terminal received the other machine's backlog, at its size.
       // Asserted on the event, not on painted rows: xterm paints nothing in
       // the local e2e window (it does in CI), so rows would read empty here.
-      await waitForAttr('[data-testid="remote-terminal"]', "data-last-event", "term_reset");
-      // Drawn at the other machine's size and scaled to fit this pane: no
-      // scrolling, and nothing sent to resize the PTY over there.
-      await browser.waitUntil(async () => (await browser.execute(() => {
+      // (The claim's term_resize may land right behind the reset, so wait
+      // for the open and a size rather than for the reset to be last.)
+      await waitForAttr('[data-testid="remote-terminal"]', "data-opened", "true");
+      await browser.waitUntil(async () => !!(await browser.execute(() => document.querySelector('[data-testid="remote-terminal"]')!.getAttribute("data-size"))),
+        { timeout: 5_000, timeoutMsg: "the backlog never arrived" });
+      // The last window worked in owns the size. Opening it is working in it:
+      // this pane claims its size and draws unscaled once the host confirms.
+      const view = () => browser.execute(() => {
         const h = document.querySelector('[data-testid="remote-terminal"]') as HTMLElement;
-        const f = h.parentElement!;
-        const sc = Number(h.dataset.scale);
-        const r = h.getBoundingClientRect(), fr = f.getBoundingClientRect();
-        return sc > 0 && r.width <= fr.width + 1 && r.height <= fr.height + 1 && f.scrollWidth <= f.clientWidth && f.scrollHeight <= f.clientHeight;
-      })), { timeout: 5_000, timeoutMsg: "the other machine's terminal is not scaled into the pane" });
-      expect(hostSaw.some(m => m.t === "term_size")).toBe(false);
+        const x = h.querySelector(".xterm") as HTMLElement;
+        const r = x.getBoundingClientRect(), b = h.getBoundingClientRect();
+        return { owner: h.dataset.owner, scale: Number(h.dataset.scale), fits: r.width <= b.width + 1 && r.height <= b.height + 1, size: h.dataset.size };
+      });
+      await browser.waitUntil(async () => hostSaw.some(m => m.t === "term_size"), { timeout: 5_000, timeoutMsg: "opening it never claimed the size" });
+      await browser.waitUntil(async () => (await view()).owner === "true", { timeout: 5_000, timeoutMsg: "the claimed size never applied" });
+      expect((await view()).scale).toBe(1);
+      // The other machine's window is worked in: it takes the size back, and
+      // this pane draws that size scaled to fit, without asking again.
+      const asked = hostSaw.filter(m => m.t === "term_size").length;
+      hostSend({ t: "term_resize", cols: 200, rows: 60 });
+      await browser.waitUntil(async () => { const v = await view(); return v.owner === "false" && v.size === "200x60"; },
+        { timeout: 5_000, timeoutMsg: "the host taking the size back did not reach the view" });
+      const scaled = await view();
+      expect(scaled.fits).toBe(true);
+      expect(scaled.scale).toBeLessThan(1);
+      expect(hostSaw.filter(m => m.t === "term_size").length).toBe(asked);
+      // A click here takes it again.
+      await browser.execute(() => document.querySelector('[data-testid="remote-terminal"]')!.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true })));
+      await browser.waitUntil(async () => (await view()).owner === "true", { timeout: 5_000, timeoutMsg: "a click did not take the size back" });
       // The terminal and nothing else: the phone's card, transcript and
       // composer stand in for a keyboard, and this window has one.
       const extras = await browser.execute(() =>

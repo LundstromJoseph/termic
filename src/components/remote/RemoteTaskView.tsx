@@ -142,7 +142,7 @@ export function RemoteTaskView({ machineId, taskId }: { machineId: string; taskI
 
       <div className="relative min-h-0 flex-1">
         <div className="absolute inset-0">
-          {online && <RemoteTerminal key={tabId ?? "default"} machineId={machineId} machineName={machine.name} taskId={task.id} tabId={tabId} ownsSize={false} />}
+          {online && <RemoteTerminal key={tabId ?? "default"} machineId={machineId} taskId={task.id} tabId={tabId} />}
         </div>
       </div>
     </div>
@@ -177,41 +177,25 @@ function Gone({ message, onClose }: { message: string; onClose: () => void }) {
   );
 }
 
-/** `ownsSize`: the host's PTY has no screen of its own (a server), so this
- *  pane sizes it, like a local tab. Otherwise (another computer) its own
- *  window owns the size and this follows it. */
-function RemoteTerminal({ machineId, machineName, taskId, tabId, ownsSize }: { machineId: string; machineName: string; taskId: string; tabId: string | null; ownsSize: boolean }) {
+/** Another computer's terminal, where the last window worked in owns the
+ *  size (as tmux's "latest"): this one claims it when the terminal is
+ *  opened, focused, clicked or typed in, and follows this pane while it
+ *  owns it; when that computer takes it back, this draws at its size,
+ *  scaled to fit the pane. A terminal cannot be two sizes at once (one
+ *  program draws for one width), so the other window scales instead. */
+function RemoteTerminal({ machineId, taskId, tabId }: { machineId: string; taskId: string; tabId: string | null }) {
   const { t } = useTranslation("remote");
   const host = useRef<HTMLDivElement>(null);
   const [closed, setClosed] = useState<string | null>(null);
-  const [size, setSize] = useState<{ cols: number; rows: number } | null>(null);
   const [generation, setGeneration] = useState(0);
-  // Fit another computer's terminal into this pane by scaling its drawing.
-  const frame = useRef<HTMLDivElement>(null);
-  const [scale, setScale] = useState(1);
-  useEffect(() => {
-    if (ownsSize || !frame.current || !host.current) return;
-    const fit = () => {
-      const f = frame.current, h = host.current;
-      if (!f || !h || !h.offsetWidth || !h.offsetHeight) return;
-      // The pane's content box (p-2 = 8px each side); offset sizes ignore
-      // the transform, so they are the terminal's own.
-      const next = Math.min((f.clientWidth - 16) / h.offsetWidth, (f.clientHeight - 16) / h.offsetHeight, 1.5);
-      setScale(s => (Math.abs(s - next) < 0.005 ? s : Math.max(0.3, next)));
-    };
-    const ro = new ResizeObserver(fit);
-    ro.observe(frame.current);
-    ro.observe(host.current);
-    fit();
-    return () => ro.disconnect();
-  }, [ownsSize, size]);
   // Reopen re-runs the effect: its cleanup must not send a close, which
   // could reach the host after the new open and shut it again. The host's
   // open replaces the old terminal by itself.
   const reopening = useRef(false);
 
   useEffect(() => {
-    if (!host.current) return;
+    const box = host.current;
+    if (!box) return;
     const term = new Terminal({
       fontFamily: currentTerminalStack(),
       fontSize: usePrefs.getState().terminalFontSize,
@@ -223,73 +207,96 @@ function RemoteTerminal({ machineId, machineName, taskId, tabId, ownsSize }: { m
       allowProposedApi: true,
       cursorBlink: false,
     });
-    term.open(host.current);
-    // A keyboard is the point of opening it here: typing goes straight in.
-    term.focus();
+    const fit = new FitAddon();
+    term.loadAddon(fit);
+    term.open(box);
     let alive = true;
-    let opened = () => {};
+    // What this pane fits, and whether the PTY is at it (this window owns
+    // the size) or at another window's (draw scaled).
+    const own = () => {
+      const d = fit.proposeDimensions();
+      return d && Number.isFinite(d.cols) && Number.isFinite(d.rows) && d.cols >= 1 && d.rows >= 1 ? { cols: d.cols, rows: d.rows } : null;
+    };
+    const draw = () => {
+      const d = own();
+      const el = term.element;
+      if (!el) return;
+      const mine = !!d && d.cols === term.cols && d.rows === term.rows;
+      box.dataset.owner = String(mine);
+      if (mine || !el.offsetWidth || !el.offsetHeight) { el.style.transform = ""; box.dataset.scale = "1"; return; }
+      const sc = Math.max(0.3, Math.min(box.clientWidth / el.offsetWidth, box.clientHeight / el.offsetHeight, 1.5));
+      el.style.transformOrigin = "top left";
+      el.style.transform = `scale(${sc})`;
+      box.dataset.scale = sc.toFixed(3);
+    };
+    let claimed = false;
+    const claim = () => {
+      const d = own();
+      if (!d) return;
+      claimed = true;
+      if (d.cols === term.cols && d.rows === term.rows) return;
+      void remoteTermSize(machineId, d.cols, d.rows).catch(() => {});
+    };
+    const sized = (cols: number, rows: number) => {
+      box.setAttribute("data-size", `${cols}x${rows}`);
+      if (term.cols !== cols || term.rows !== rows) term.resize(cols, rows);
+      const d = own();
+      // A size that is not ours: the other computer took it back.
+      if (!d || d.cols !== cols || d.rows !== rows) claimed = false;
+      requestAnimationFrame(draw);
+    };
     const onEvent = (e: TermEvent) => {
       // What arrived last, for a reader of the DOM (the e2e suite).
-      host.current?.setAttribute("data-last-event", e.t);
+      box.setAttribute("data-last-event", e.t);
       if (!alive) return;
       if (e.t === "term_reset") {
-        term.resize(e.cols, e.rows);
-        setSize({ cols: e.cols, rows: e.rows });
         term.reset();
+        sized(e.cols, e.rows);
         term.write(b64decodeBytes(e.data));
         setClosed(null);
       } else if (e.t === "term_data") {
         term.write(b64decodeBytes(e.data));
       } else if (e.t === "term_resize") {
-        host.current?.setAttribute("data-size", `${e.cols}x${e.rows}`);
-        term.resize(e.cols, e.rows);
-        setSize({ cols: e.cols, rows: e.rows });
+        sized(e.cols, e.rows);
       } else if (e.t === "term_closed") {
         setClosed(e.reason);
       }
     };
     const sub = term.onData(data => {
+      claim();
       if (isTerminalReply(data)) return;
       void remoteTermInput(machineId, b64encode(data)).catch(() => {});
     });
-    // A server's PTY follows this pane: propose the size that fits, and
-    // draw at it once the server confirms (term_resize), so the grid here
-    // and the PTY there never disagree. Debounced: a drag sends one size.
-    let stopFit = () => {};
-    if (ownsSize) {
-      const fit = new FitAddon();
-      term.loadAddon(fit);
-      let sent = "";
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      const propose = () => {
-        const d = fit.proposeDimensions();
-        if (!d || !Number.isFinite(d.cols) || !Number.isFinite(d.rows) || d.cols < 1 || d.rows < 1) return;
-        const key = `${d.cols}x${d.rows}`;
-        if (key === sent) return;
-        sent = key;
-        void remoteTermSize(machineId, d.cols, d.rows).catch(() => {});
-      };
-      const ro = new ResizeObserver(() => {
-        clearTimeout(timer);
-        timer = setTimeout(propose, 80);
-      });
-      ro.observe(host.current);
-      // The first size goes with the open, before any resize happens.
-      opened = () => { sent = ""; propose(); };
-      stopFit = () => { clearTimeout(timer); ro.disconnect(); };
-    }
+    box.addEventListener("pointerdown", claim, true);
+    box.addEventListener("focusin", claim);
+    // While this window owns the size it follows the pane (debounced: a
+    // drag sends one size); otherwise a resize here only rescales.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const ro = new ResizeObserver(() => {
+      clearTimeout(timer);
+      timer = setTimeout(() => (claimed ? claim() : draw()), 80);
+    });
+    ro.observe(box);
     void remoteTermOpen(machineId, taskId, tabId, onEvent)
-      .then(() => { host.current?.setAttribute("data-opened", "true"); opened(); })
+      .then(() => {
+        box.setAttribute("data-opened", "true");
+        // Opening it is working in it: typing goes straight in, at this size.
+        term.focus();
+        claim();
+      })
       .catch(err => setClosed(String(err)));
     return () => {
       alive = false;
-      stopFit();
+      clearTimeout(timer);
+      ro.disconnect();
+      box.removeEventListener("pointerdown", claim, true);
+      box.removeEventListener("focusin", claim);
       sub.dispose();
       if (reopening.current) reopening.current = false;
       else void remoteTermClose(machineId).catch(() => {});
       term.dispose();
     };
-  }, [machineId, taskId, tabId, generation, ownsSize]);
+  }, [machineId, taskId, tabId, generation]);
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -299,14 +306,8 @@ function RemoteTerminal({ machineId, machineName, taskId, tabId, ownsSize }: { m
           <Button size="sm" variant="secondary" onClick={() => { reopening.current = true; setClosed(null); setGeneration(g => g + 1); }}>{t("task.reopen")}</Button>
         </div>
       )}
-      {/* Another computer's terminal keeps ITS size (one program draws for
-          one width, and resizing it from here reflowed that computer's own
-          window and never cleanly gave it back): this pane scales the
-          drawing to fit instead, so each computer sees it at its own size. */}
-      <div ref={frame} className="min-h-0 flex-1 overflow-hidden p-2">
-        <div ref={host} data-testid="remote-terminal" data-owns-size={ownsSize} data-scale={ownsSize ? 1 : scale}
-          className={ownsSize ? "h-full w-full" : "inline-block origin-top-left"}
-          style={ownsSize ? undefined : { transform: `scale(${scale})` }} />
+      <div className="min-h-0 flex-1 overflow-hidden p-2">
+        <div ref={host} data-testid="remote-terminal" className="h-full w-full overflow-hidden" />
       </div>
     </div>
   );

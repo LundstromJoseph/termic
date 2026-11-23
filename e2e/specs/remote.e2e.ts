@@ -260,6 +260,34 @@ describe("Phones and servers", () => {
     await waitVisible('[data-testid="remote-section"]');
   });
 
+  it("lets the last window worked in own a terminal's size; this pane scales meanwhile", async () => {
+    const task = await openTask("size-owner");
+    await waitForAgentPty(task);
+    const tab = await browser.execute((t) => (window.__termic!.useApp.getState().tabs[t] ?? []).find((x: any) => x.ptyId)!.id as string, task);
+    const pane = () => browser.execute((id) => {
+      const h = document.querySelector(`[data-terminal-host="${id}"]`) as HTMLElement;
+      const x = h.querySelector(".xterm") as HTMLElement;
+      return { transform: x.style.transform };
+    }, tab);
+    expect((await pane()).transform).toBe("");
+    // A viewer elsewhere works in it: the PTY takes its size and this pane
+    // draws that size scaled, instead of garbling into its own grid.
+    const p = await phone(link, phoneId, "My iPhone");
+    p.send({ t: "term_open", task: "size-owner" });
+    await browser.waitUntil(async () => p.seen.some(m => m.t === "term_reset"), { timeout: 20_000, timeoutMsg: "the terminal never opened" });
+    p.send({ t: "term_size", cols: 40, rows: 12 });
+    await browser.waitUntil(async () => (await pane()).transform.startsWith("scale("),
+      { timeout: 10_000, timeoutMsg: "this pane did not scale to the viewer's size" });
+    // Worked in here again: it takes its own size back, unscaled.
+    await browser.execute((id) => document.querySelector(`[data-terminal-host="${id}"]`)!.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true })), tab);
+    await browser.waitUntil(async () => (await pane()).transform === "",
+      { timeout: 10_000, timeoutMsg: "a click here did not take the size back" });
+    p.close();
+    await cliRpc({ cmd: "archive", task: "size-owner", force: true });
+    await browser.execute(() => window.__termic!.useApp.getState().openSettings("remote"));
+    await waitVisible('[data-testid="remote-section"]');
+  });
+
   it("unpairs a phone after a confirmation, cutting its live connection", async () => {
     const p = await phone(link, phoneId, "My iPhone");
     await waitForAttr(`[data-testid="phone-row-${phoneId}"]`, "data-connected", "true");
