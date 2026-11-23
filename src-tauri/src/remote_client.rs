@@ -619,7 +619,15 @@ fn connect(l: &Link, endpoint: &Endpoint) -> Result<Connection, String> {
 pub(crate) fn connect_peer(node: &crate::peers::Node, peer_id: &str, wants_tasks: bool) -> Result<(Connection, TcpStream), String> {
     let ep = node.peer_endpoint(peer_id)?;
     let mut last = String::from("no known address");
-    for addr in ep.addrs.iter() {
+    // The first address that answers goes first: a Mac also advertises
+    // virtual bridges (OrbStack, VPNs) nobody else can reach, and trying
+    // them in turn cost a full CONNECT_TIMEOUT each before the LAN address.
+    let mut order = ep.addrs.clone();
+    if let Some(first) = first_reachable(&ep.addrs) {
+        order.retain(|a| *a != first);
+        order.insert(0, first);
+    }
+    for addr in order.iter() {
         match connect_addr(*addr, &ep, wants_tasks) {
             Ok(c) => return Ok(c),
             Err(e) => last = e,
@@ -632,6 +640,24 @@ pub(crate) fn connect_peer(node: &crate::peers::Node, peer_id: &str, wants_tasks
         }
     }
     Err(last)
+}
+
+/// The first of `addrs` to accept a TCP connection, all tried at once.
+fn first_reachable(addrs: &[SocketAddr]) -> Option<SocketAddr> {
+    if addrs.len() < 2 {
+        return addrs.first().copied();
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    for a in addrs.iter().copied() {
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            if TcpStream::connect_timeout(&a, CONNECT_TIMEOUT).is_ok() {
+                let _ = tx.send(a);
+            }
+        });
+    }
+    drop(tx);
+    rx.recv_timeout(CONNECT_TIMEOUT + Duration::from_millis(500)).ok()
 }
 
 fn connect_addr(addr: SocketAddr, ep: &crate::peers::PeerEndpoint, wants_tasks: bool) -> Result<(Connection, TcpStream), String> {
@@ -1747,6 +1773,17 @@ pub(crate) async fn server_install(app: tauri::AppHandle, ssh: String) -> Result
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_address_that_answers_wins_over_one_that_does_not() {
+        let open = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let good = open.local_addr().unwrap();
+        // 10.255.255.1 is routable and silent: a connect there waits it out.
+        let dead: std::net::SocketAddr = "10.255.255.1:9".parse().unwrap();
+        let t0 = std::time::Instant::now();
+        assert_eq!(super::first_reachable(&[dead, good]), Some(good));
+        assert!(t0.elapsed() < super::CONNECT_TIMEOUT, "it waited for the dead address");
+    }
+
 
     #[test]
     fn a_posix_script_survives_any_login_shell_quoting() {
