@@ -1,6 +1,11 @@
 {
   "versions": [
     {
+      "version": "2.0.0",
+      "date": "2026-11-23",
+      "summary": "Remote control: your phone, your own servers, and your other computers."
+    },
+    {
       "version": "1.25.7",
       "date": "2026-11-23",
       "summary": "Two new features: a phone app to remote-control Termic, and agents on your own servers."
