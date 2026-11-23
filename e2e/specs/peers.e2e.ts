@@ -835,6 +835,24 @@ describe("LAN pairing", () => {
       expect(m.prText).toContain("42");
       expect(m.props).toBe("ABC-1 · review");
       await snap("remote-sidebar-filed.png");
+      // The sidebar's row settings reach a paired computer's rows too: the
+      // PR badge's icon / number / none, and the branch name.
+      const row = () => browser.execute(() => {
+        const r = document.querySelector('[data-testid="remote-task-rt-3"]')!;
+        const b = r.querySelector('[data-testid="remote-pr-badge"]');
+        return { badge: !!b, icon: !!b?.querySelector("svg"), number: (b?.textContent ?? "").includes("42") };
+      });
+      const prefs = (f: string, v: string) => browser.execute((fn, val) => (window.__termic!.usePrefs.getState() as any)[fn](val), f, v);
+      await prefs("setTaskPrBadge", "icon");
+      await browser.waitUntil(async () => { const x = await row(); return x.icon && !x.number; }, { timeout: 3_000, timeoutMsg: "Icon only did not reach the remote row" });
+      await prefs("setTaskPrBadge", "none");
+      await browser.waitUntil(async () => !(await row()).badge, { timeout: 3_000, timeoutMsg: "None did not hide the remote PR badge" });
+      await prefs("setTaskPrBadge", "number");
+      await prefs("setTaskBranchName", "right");
+      await browser.waitUntil(async () => !!(await browser.execute(() =>
+        document.querySelector('[data-testid="remote-task-rt-1"] [data-testid="task-branch"]')?.getAttribute("data-branch") === "fix/login")),
+      { timeout: 3_000, timeoutMsg: "the branch setting did not reach the remote row" });
+      await prefs("setTaskBranchName", "none");
     });
 
     it("rings the desktop when a paired computer's task starts needing you, and when it finishes", async () => {

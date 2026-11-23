@@ -14,7 +14,9 @@ import { CliIcon, CLI_BRAND_COLOR, resolveIconId } from "@/icons/cli";
 import { Spinner } from "@/components/ui/Spinner";
 import { Tip } from "@/components/ui/Tooltip";
 import { Button } from "@/components/ui/Button";
-import { usePrefs } from "@/store/prefs";
+import { usePrefs, taskLocationIconShown } from "@/store/prefs";
+import { TaskLocationIcon } from "@/components/TaskLocationIcon";
+import { TaskBranchText } from "@/components/TaskBranchText";
 import { useApp } from "@/store/app";
 import { cn } from "@/lib/utils";
 import { ACCENTS, accentCss } from "@/lib/accents";
@@ -477,7 +479,7 @@ function RemoteGroupBlock({ m, group, tasks }: { m: MachineView; group: RemoteGr
 
 /** The task's PR as the host last read it: the local badge's icon and
  *  colour rules (prBadgeAppearance), without its live checks. */
-function RemotePrBadge({ task }: { task: RemoteTask }) {
+function RemotePrBadge({ task, showIcon, showNumber }: { task: RemoteTask; showIcon: boolean; showNumber: boolean }) {
   const pr = task.pr;
   if (!pr) return null;
   const state = (["open", "draft", "merged", "closed"].includes(pr.state ?? "") ? pr.state : null) as PrBadgeState;
@@ -495,8 +497,8 @@ function RemotePrBadge({ task }: { task: RemoteTask }) {
         className="flex shrink-0 items-center gap-0.5 rounded p-px hover:bg-[var(--color-bg-3)]"
         style={{ color }}
       >
-        <Icon className="h-3 w-3" />
-        <span className={cn("text-[11px] tabular-nums leading-none", struck && "tc-pr-struck")}>{prRef(provider, pr.number)}</span>
+        {showIcon && <Icon className="h-3 w-3" />}
+        {showNumber && <span className={cn("text-[11px] tabular-nums leading-none", struck && "tc-pr-struck")}>{prRef(provider, pr.number)}</span>}
       </button>
     </Tip>
   );
@@ -520,6 +522,12 @@ const RemoteTaskRow = memo(function RemoteTaskRow({ m, task }: { m: MachineView;
   const [renaming, setRenaming] = useState<string | null>(null);
   const icon = resolveIconId(task.agent, []);
   const props = remoteProps(task);
+  // The sidebar's own row settings, as a local task row reads them.
+  const showLocation = usePrefs(s => taskLocationIconShown(s.taskLocationIcon, task.is_main_checkout));
+  const prMode = usePrefs(s => s.taskPrBadge);
+  const branchMode = usePrefs(s => s.taskBranchName);
+  const branch = branchMode !== "none" && task.branch && task.branch !== "HEAD" && task.branch !== task.name ? task.branch : null;
+  const below = branchMode === "below" && !!branch;
   // The menu acts on the other machine, so only where it lets this one.
   const canAct = m.state === "online" && m.grant !== "reply";
   // A server has no pins or task groups (termic-server answers neither
@@ -542,7 +550,8 @@ const RemoteTaskRow = memo(function RemoteTaskRow({ m, task }: { m: MachineView;
       onClick={() => openTask({ machine, task: task.id })}
       onKeyDown={e => { if (e.key === "Enter") openTask({ machine, task: task.id }); }}
       className={cn(
-        "ml-3 flex h-[var(--task-row-h)] cursor-pointer select-none items-center gap-1.5 rounded-md px-1.5 text-[13px] transition-colors",
+        "ml-3 flex cursor-pointer select-none items-center gap-1.5 rounded-md px-1.5 text-[13px] transition-colors",
+        below ? "min-h-[var(--task-row-h)] py-1" : "h-[var(--task-row-h)]",
         active ? "bg-[var(--color-sel)] text-[var(--color-fg)]" : "text-[var(--color-fg-dim)] hover:bg-[var(--color-hover)] hover:text-[var(--color-fg)]",
       )}
     >
@@ -563,14 +572,21 @@ const RemoteTaskRow = memo(function RemoteTaskRow({ m, task }: { m: MachineView;
           autoComplete="off" autoCorrect="off" autoCapitalize="off" spellCheck={false}
           className="m-0 min-w-0 flex-1 rounded-sm border-0 bg-[var(--color-bg)] p-0 font-medium text-inherit outline outline-1 outline-offset-2 outline-[var(--color-accent)]"
         />
+      ) : below ? (
+        <span className="flex min-w-0 flex-col">
+          <span className="truncate font-medium">{task.name}</span>
+          <TaskBranchText branch={branch!} placement="below" />
+        </span>
       ) : (
         <span className="min-w-0 truncate font-medium">{task.name}</span>
       )}
+      {showLocation && <TaskLocationIcon isMainCheckout={task.is_main_checkout} branch={task.branch} size="h-3.5 w-3.5" />}
+      {branchMode === "inline" && branch && <TaskBranchText branch={branch} placement="inline" />}
       {/* Tab labels after the name, as the local row draws them. */}
       {props && <span data-testid="remote-task-props" className="min-w-0 shrink-[3] truncate text-[11px] text-[var(--color-fg-dim)]">{props}</span>}
-      <span className="flex-1" />
+      {branchMode === "right" && branch ? <TaskBranchText branch={branch} placement="right" /> : <span className="flex-1" />}
       {task.pinned && <Pin data-testid="remote-task-pinned" aria-hidden className="h-3 w-3 shrink-0 text-[var(--color-fg-faint)]" />}
-      <RemotePrBadge task={task} />
+      {prMode !== "none" && <RemotePrBadge task={task} showIcon={prMode !== "number"} showNumber={prMode !== "icon"} />}
       <span className="flex w-4 shrink-0 justify-center"><StateGlyph state={task.state} /></span>
     </div>
   );
