@@ -269,8 +269,11 @@ group (the first accent no group in that project uses) or removes it
 from its group. Each is the host's own verb over `call`
 (`remoteTaskRequest`: `rename`, `pin`, `group --join/--color/--leave`),
 so the host applies it exactly as its sidebar would and the next
-`tasks` snapshot carries the result. A server's row offers Rename alone:
-termic-server has no pins or task groups. `pin` is a CLI verb for this
+`tasks` snapshot carries the result. It also has the local row's Copy
+branch name, Stop task (while its agent runs: `stopRemoteAgent`) and
+Archive task (behind the same confirm as the task view's button:
+`archiveRemoteTask`). A server's row in this list skips pins and groups:
+termic-server has neither. `pin` is a CLI verb for this
 (`termic pin [TASK] [--off]`, MCP `task_pin`, protocol v26).
 
 **Needs-you alerts.** When a snapshot shows a known task on an online

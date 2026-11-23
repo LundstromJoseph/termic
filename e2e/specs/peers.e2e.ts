@@ -33,6 +33,7 @@ const FAKE_VERSION = (JSON.parse(readFileSync(path.resolve(path.dirname(fileURLT
 import {
   waitForText,
   cliBinary, clickMenuItem, clickPresent, requireTermicApi, setInputValue, snap, typeIntoRemoteTerminal, waitForAppShell, waitForAttr, waitGone, waitVisible,
+  openTask,
 } from "../helpers.js";
 
 const PREFIX = "/termic-peer/v1";
@@ -950,6 +951,19 @@ describe("LAN pairing", () => {
       await press('[data-testid="remote-task-rename-rt-4"]', "Escape");
       await waitGone('[data-testid="remote-task-rename-rt-4"]');
       expect(sent(mark).filter(c => c.cmd === "rename")).toEqual([]);
+
+      // The local row's Stop and Archive, run on that machine. Stop only
+      // while its agent runs; Archive asks first, and a cancel sends nothing.
+      mark = calls.length;
+      await menu("rt-2");
+      await clickMenuItem("Stop task");
+      await waitSent(mark, { cmd: "stop", task: "rt-2" });
+      mark = calls.length;
+      await menu("rt-2");
+      await clickMenuItem("Archive task");
+      await clickPresent('[data-testid="confirm-cancel"]');
+      await waitGone('[data-testid="confirm-cancel"]');
+      expect(sent(mark).filter(c => c.cmd === "archive")).toEqual([]);
     });
 
     it("opens a remote task as its terminal, focused, and says where it runs", async () => {
@@ -1012,6 +1026,22 @@ describe("LAN pairing", () => {
       await clickPresent('[data-testid="remote-task-close"]');
       await waitGone('[data-testid="remote-task-view"]');
       // Back to where the cases after this one work.
+      await browser.execute(() => window.__termic!.useApp.getState().openSettings("remote"));
+      await waitVisible('[data-testid="peers-section"]');
+    });
+
+    it("clicking the local task that was active underneath leaves the remote one", async () => {
+      await browser.execute(() => window.__termic!.useApp.getState().closeSettings());
+      // A local task, active underneath (the seeded fixture repo's checkout).
+      const local = await openTask("peers-local");
+      await waitVisible(`[data-sidebar-task-id="${local}"]`);
+      expect(local).toBeTruthy();
+      await clickPresent(`[data-testid="remote-task-${remoteTask.id}"]`);
+      await waitVisible('[data-testid="remote-task-view"]');
+      // The same task, so the active task does not change: the click alone
+      // must close the remote view (it used to need a different task).
+      await clickPresent(`[data-sidebar-task-id="${local}"]`);
+      await waitGone('[data-testid="remote-task-view"]');
       await browser.execute(() => window.__termic!.useApp.getState().openSettings("remote"));
       await waitVisible('[data-testid="peers-section"]');
     });

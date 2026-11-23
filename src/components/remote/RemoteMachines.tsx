@@ -33,6 +33,8 @@ import { prBadgeAppearance, type PrBadgeState } from "@/lib/prBadgeAppearance";
 import { prNounShort, prRef } from "@/lib/forge";
 import type { ForgeProvider } from "@/lib/types";
 import { openPath, peerUnpair } from "@/lib/ipc";
+import { copyToClipboard } from "@/lib/clipboard";
+import { archiveRemoteTask, stopRemoteAgent } from "@/components/remote/RemoteTaskView";
 import { joinableGroups, layoutRemote, remoteCall, remoteProps, remoteReconnect, remoteSetConnected, remoteTaskRequest, serverRemove, useRemote, type RemoteTaskAction, type MachineView, type RemoteGroup, type RemoteProject, type RemoteTask, openNewTaskOnServer } from "@/lib/remote";
 
 /** A top-level sidebar section header, styled as PROJECTS': a filled bar
@@ -632,6 +634,18 @@ const RemoteTaskRow = memo(function RemoteTaskRow({ m, task }: { m: MachineView;
         </ContextMenuSub>
         {task.group && <ContextMenuItem onSelect={() => void act(m, task, { kind: "leave" })}>{t("menu.leaveGroup")}</ContextMenuItem>}
         </>}
+        {/* The local row's remaining items, run on that machine. */}
+        {task.branch && task.branch !== "HEAD" && <>
+          <ContextMenuSeparator />
+          <ContextMenuItem onSelect={() => copyToClipboard(task.branch!, "branch")}>{t("sidebar:copyBranch")}</ContextMenuItem>
+        </>}
+        <ContextMenuSeparator />
+        {task.state !== "inactive" && task.state !== "unknown" && (
+          <ContextMenuItem onSelect={() => void stopRemoteAgent(m.id, task.id, m.name)}>{t("sidebar:stopTask")}</ContextMenuItem>
+        )}
+        <ContextMenuItem destructive onSelect={() => void archiveRemoteTask(m.name, m.id, task, () => {
+          if (useRemote.getState().open?.task === task.id) useRemote.getState().openTask(null);
+        })}>{t("sidebar:archiveTask")}</ContextMenuItem>
       </ContextMenuContent>
     </ContextMenuRoot>
   );

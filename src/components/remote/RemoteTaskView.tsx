@@ -98,7 +98,7 @@ export function RemoteTaskView({ machineId, taskId }: { machineId: string; taskI
             // A server project's task is a desktop task too: its archive
             // (the same confirm as the sidebar's) runs the archive script,
             // archives on the box and clears it as the active task here.
-            void archive(machine.name, machineId, task, close, t);
+            void archiveRemoteTask(machine.name, machineId, task, close);
           }}>
             <Archive className="h-3.5 w-3.5" />
             {t("task.archive")}
@@ -155,7 +155,10 @@ export function RemoteTaskView({ machineId, taskId }: { machineId: string; taskI
   );
 }
 
-async function archive(machineName: string, machineId: string, task: RemoteTask, close: () => void, t: (k: string, o?: Record<string, unknown>) => string) {
+/** Archive a task on another computer, behind the sidebar's confirm. The
+ *  task view's button and the remote row's menu both call it. */
+export async function archiveRemoteTask(machineName: string, machineId: string, task: RemoteTask, close: () => void) {
+  const t = (k: string, o?: Record<string, unknown>) => i18n.t(`remote:${k}`, o);
   const ok = await useUI.getState().askConfirm({
     title: t("task.archiveTitle", { task: task.name, machine: machineName }),
     message: t("task.archiveMessage", { machine: machineName }),

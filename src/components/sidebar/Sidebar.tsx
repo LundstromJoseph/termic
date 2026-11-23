@@ -3359,6 +3359,10 @@ function TaskRow({ w, compact, dragging = false, dragTy = 0, onDragPointerDown, 
           // The click that trails a drop is not a selection.
           if (clickSuppressed?.current) { clickSuppressed.current = false; return; }
           setActive(w.id);
+          // Leave a paired computer's task open over the main area. Its own
+          // close rule (RemoteGlobal) fires on a CHANGE of active task, so
+          // clicking the task that was already active underneath did nothing.
+          if (useRemote.getState().open) useRemote.getState().openTask(null);
           if (terminalTabs.length === 0) {
             // No terminals yet — wake the task through the store's
             // restore/seed path. MUST be ensureDefaultTab, not an inline
@@ -3796,13 +3800,15 @@ function TaskRow({ w, compact, dragging = false, dragTy = 0, onDragPointerDown, 
                   THIS task over the CLI, so two agents can hand each other
                   work. See lib/agentBriefing for why the block steers both
                   sides off `--wait` and onto prompting each other. */}
-              {!serverId && <DropdownItem
+              {/* A server task too: the CLI drives it like a local one. */}
+              <DropdownItem
                 className="items-center [&>svg]:mt-0"
+                data-testid={`task-copy-briefing-${w.id}`}
                 onSelect={() => { void copyAgentBriefing(w, project?.name); }}
               >
                 <Waypoints className="h-4 w-4" />
                 <span>{t("copyBriefing")}</span>
-              </DropdownItem>}
+              </DropdownItem>
               {/* Schedule (GH #300): this task becomes a schedule's parent, or
                   edits the one it already is. Only for an agent that can say
                   it finished, or a run could never end. Disabled on a Docker
