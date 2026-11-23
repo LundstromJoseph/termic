@@ -18,7 +18,7 @@ const STOP = '[data-testid="caffeinate-stop"]';
 const ERROR = '[data-testid="caffeinate-error"]';
 const failureFile = path.join(dataDir, "e2e-caffeinate-fail");
 const visibleRun = !!process.env.TERMIC_E2E_VISIBLE && process.env.TERMIC_E2E_VISIBLE !== "0";
-const originalFooterOrder = ["caffeinate-trigger", "theme-picker", "sidebar-report-bug", "sidebar-contact", "sidebar-shortcuts", "open-activity", "sidebar-settings"];
+const originalFooterOrder = ["caffeinate-trigger", "theme-picker", "sidebar-report-bug", "sidebar-contact", "sidebar-shortcuts", "open-activity", "sidebar-footer-remote", "sidebar-settings"];
 const footerOrder = () => browser.execute(() => [...document.querySelectorAll('[data-testid="sidebar-footer"] button')].map(el => el.getAttribute("data-testid")));
 const text = (selector: string) => browser.execute(s => document.querySelector(s)?.textContent ?? "", selector);
 const mode = () => browser.execute(s => document.querySelector(s)?.getAttribute("data-mode"), TRIGGER);

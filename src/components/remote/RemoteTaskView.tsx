@@ -317,7 +317,25 @@ export function ServerCloseDialog() {
       <p data-testid="server-close-dialog" className="text-[13.5px] leading-relaxed text-[var(--color-fg-dim)]">
         {t("task.closeBody", { machine: req.machine })}
       </p>
-      <div className="mt-4 flex justify-end gap-2">
+      {/* A keyboard dialog (it opens from Cmd+W): the focused choice is ringed
+          from the start, not only after a Tab (the app ring is
+          :focus-visible, which an autofocus does not trigger), and the
+          arrows move between the choices. Tab is the buttons' own. */}
+      <div
+        className="mt-4 flex justify-end gap-2 [&>button:focus]:outline-2 [&>button:focus]:outline-offset-2 [&>button:focus]:outline-[var(--color-accent-soft)]"
+        onKeyDown={e => {
+          const buttons = Array.from(e.currentTarget.querySelectorAll("button"));
+          const i = buttons.indexOf(document.activeElement as HTMLButtonElement);
+          if (i < 0) return;
+          // Enter presses the FOCUSED choice. Pressed here explicitly: left to
+          // the button, the e2e's Enter never closed the dialog (something
+          // outside the row takes the keydown; not pinned down which).
+          if (e.key === "Enter") { e.preventDefault(); e.stopPropagation(); buttons[i].click(); return; }
+          if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+          e.preventDefault();
+          buttons[(i + (e.key === "ArrowRight" ? 1 : buttons.length - 1)) % buttons.length].focus();
+        }}
+      >
         <Button variant="ghost" type="button" data-testid="server-close-cancel" onClick={() => req.resolve("cancel")}>{t("common:cancel")}</Button>
         <Button variant="ghost" type="button" data-testid="server-close-stop" onClick={() => req.resolve("stop")}
           className="text-[var(--color-err)] hover:bg-[var(--color-err)]/12">{t("task.stopAgent")}</Button>

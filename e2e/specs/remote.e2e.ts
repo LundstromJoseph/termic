@@ -12,10 +12,11 @@
 // ssh (e2e/fixtures/fake-ssh.sh) serves from a real termic-server built
 // into the debug target. A REAL box is reached over the user's own ssh
 // when TERMIC_E2E_TEST_BOX names one.
+import { fileURLToPath } from "node:url";
 import crypto from "node:crypto";
 import { execFileSync } from "node:child_process";
 import os from "node:os";
-import { chmodSync, existsSync, lstatSync, readFileSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, readFileSync, mkdirSync, mkdtempSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { cliRpc, clickMenuItem, clickPresent, clickWhenVisible, requireTermicApi, setInputValue, snap, typeIntoAgent, typeIntoRemoteTerminal, waitForAgentPty, waitForAppShell, waitTabInFront, waitForAttr, waitGone, waitVisible } from "../helpers.js";
 
@@ -486,7 +487,7 @@ const codexHere = (() => { try { execFileSync("/bin/sh", ["-lc", "command -v cod
 describeLocal("A server's tasks in the sidebar (local termic-server)", function () {
   this.timeout(120_000);
   const HOST = "termic-e2e-local";
-  const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..", "..");
+  const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
   const box = localBox!;
   const repo = path.join(box, "repo");
   const bin = path.join(process.env.TERMIC_E2E_SERVER_DIR ?? path.join(repoRoot, "src-tauri", "target", "debug"), "termic-server");
@@ -929,7 +930,22 @@ describeLocal("A server's tasks in the sidebar (local termic-server)", function 
     await pressCmd("w");
     await waitVisible('[data-testid="server-close-dialog"]');
     await snap("remote-server-close-ask.png");
-    await clickPresent('[data-testid="server-close-cancel"]');
+    // Keyboard: Close view is focused AND ringed from the start, the arrows
+    // move the focus (and the ring) between the choices, Enter picks one.
+    const focused = () => browser.execute(() => {
+      const el = document.activeElement as HTMLElement | null;
+      return { id: el?.getAttribute("data-testid") ?? "", ring: el ? getComputedStyle(el).outlineStyle !== "none" && getComputedStyle(el).outlineWidth !== "0px" : false };
+    });
+    expect(await focused()).toEqual({ id: "server-close-view", ring: true });
+    await browser.keys("ArrowLeft");
+    expect(await focused()).toEqual({ id: "server-close-stop", ring: true });
+    await browser.keys("ArrowLeft");
+    expect((await focused()).id).toBe("server-close-cancel");
+    await browser.keys("ArrowLeft");
+    expect((await focused()).id).toBe("server-close-view");
+    await browser.keys("ArrowRight");
+    expect((await focused()).id).toBe("server-close-cancel");
+    await browser.keys("Enter");
     await waitGone('[data-testid="server-close-dialog"]');
     expect(await browser.execute((id) => window.__termic!.useApp.getState().activeTaskId === id, task)).toBe(true);
     await pressCmd("w");
@@ -1253,7 +1269,7 @@ const describeUpgrade = process.platform !== "win32" && localBox && !process.env
 describeUpgrade("A server's termic-server stays current", function () {
   this.timeout(180_000);
   const HOST = "termic-e2e-local";
-  const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..", "..");
+  const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
   const box = localBox!;
   const repo = path.join(box, "repo");
   const bin = path.join(process.env.TERMIC_E2E_SERVER_DIR ?? path.join(repoRoot, "src-tauri", "target", "debug"), "termic-server");
@@ -1269,8 +1285,13 @@ describeUpgrade("A server's termic-server stays current", function () {
   const stageOld = (version = "0-old") => {
     try { server("stop"); } catch { /* not running */ }
     mkdirSync(path.dirname(installed), { recursive: true });
-    writeFileSync(installed, `#!/bin/sh\nTERMIC_SERVER_FAKE_VERSION=${version} exec "${bin}" "$@"\n`);
-    chmodSync(installed, 0o755);
+    // Beside it, then renamed over: the daemon just stopped may not have
+    // exited yet, and Linux refuses to open a running binary for writing
+    // (ETXTBSY). A rename does not touch the running one.
+    const tmp = `${installed}.stage`;
+    writeFileSync(tmp, `#!/bin/sh\nTERMIC_SERVER_FAKE_VERSION=${version} exec "${bin}" "$@"\n`);
+    chmodSync(tmp, 0o755);
+    renameSync(tmp, installed);
   };
   /** Off and on again: a fresh connection, which is when the upgrade runs. */
   const reconnect = async () => {
@@ -1473,8 +1494,13 @@ describeUpgrade("A server's termic-server stays current", function () {
     await browser.execute((sid) => window.__termic!.invoke("server_restart", { machine: sid }), serverId);
     await browser.waitUntil(async () => { const p = await agentPty(); return !!p && p !== before; },
       { timeout: 60_000, timeoutMsg: "the agent was not started again after the restart" });
-    await typeIntoAgent(id, "again\r");
-    await browser.waitUntil(async () => String((await cliRpc({ cmd: "logs", task: id }))?.data?.data ?? "").includes("box says: again"),
-      { timeout: 30_000, timeoutMsg: "the restarted agent never answered" });
+    // The new terminal shows before the restarted agent reads its input, so
+    // a line typed at once can be lost: type again until it answers.
+    let typed = 0;
+    await browser.waitUntil(async () => {
+      if (String((await cliRpc({ cmd: "logs", task: id }))?.data?.data ?? "").includes("box says: again")) return true;
+      if (Date.now() - typed > 5_000) { typed = Date.now(); await typeIntoAgent(id, "again\r"); }
+      return false;
+    }, { timeout: 45_000, interval: 500, timeoutMsg: "the restarted agent never answered" });
   });
 });

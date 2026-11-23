@@ -16,6 +16,7 @@
 // Order matters: a WRONG CODE cools the address down for 2 seconds, and every
 // request here comes from 127.0.0.1, so that case runs after the last
 // pairing the fake starts against the app.
+import { fileURLToPath } from "node:url";
 import crypto from "node:crypto";
 import http from "node:http";
 import path from "node:path";
@@ -28,7 +29,7 @@ import { readFileSync } from "node:fs";
 // The fake machine runs this release: paired computers are judged by a
 // version floor (termic_remote::compat::REQUIRES_DESKTOP), so a made-up
 // version would read as too old.
-const FAKE_VERSION = (JSON.parse(readFileSync(path.resolve(path.dirname(new URL(import.meta.url).pathname), "..", "..", "package.json"), "utf8")) as { version: string }).version;
+const FAKE_VERSION = (JSON.parse(readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "package.json"), "utf8")) as { version: string }).version;
 import {
   waitForText,
   cliBinary, clickMenuItem, clickPresent, requireTermicApi, setInputValue, snap, typeIntoRemoteTerminal, waitForAppShell, waitForAttr, waitGone, waitVisible,

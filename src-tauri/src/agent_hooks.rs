@@ -7281,9 +7281,10 @@ mod server_tests {
         let t = Target::Server { agent: "claude".into(), server: "box 1".into(), home: "/home/u/".into(), cwd: "/home/u/repo".into() };
         assert_eq!(command_prefix(&t).unwrap(), "/home/u/.claude/termic-hooks/");
         let dir = config_dir(&t).unwrap();
-        assert!(dir.to_string_lossy().contains("termic/server-hooks"), "{}", dir.display());
+        // By component, not by string: the separator is `\\` on Windows.
+        let tail = std::path::Path::new("termic").join("server-hooks").join("box_1").join("claude");
+        assert!(dir.ends_with(&tail), "{}", dir.display());
         assert!(!dir.starts_with("/tmp"), "never a shared temp dir");
-        assert!(dir.ends_with("box_1/claude"));
     }
 
     #[test]

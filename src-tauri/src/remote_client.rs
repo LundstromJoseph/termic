@@ -1753,8 +1753,11 @@ mod tests {
         let script = "echo 'a b'; t=~/x";
         let wrapped = super::posix(script);
         assert_eq!(wrapped, "sh -c 'echo '\\''a b'\\''; t=~/x'");
-        // What sh makes of it is the script itself.
+        // What sh makes of it is the script itself (no /bin/sh on Windows,
+        // where the string above is still what goes to the box).
+        #[cfg(unix)]
         let out = std::process::Command::new("/bin/sh").args(["-c", &format!("printf %s {}", &wrapped[6..])]).output().unwrap();
+        #[cfg(unix)]
         assert_eq!(String::from_utf8(out.stdout).unwrap(), script);
     }
     use super::*;
