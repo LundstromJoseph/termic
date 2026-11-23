@@ -441,11 +441,35 @@ fn resolve_pty(s: &Session, task: &str, tab: Option<&str>) -> Result<(String, St
 }
 
 fn open_term(s: &Arc<Session>, task: &str, tab: Option<&str>) {
+    open_term_or_wake(s, task, tab, true);
+}
+
+/// `wake`: when the task's agent is not running, start it in its last
+/// session (the webview's `wake_agent`, what a click on the task does here)
+/// and open its terminal then, once. Without it a paired computer saw
+/// "not running" and its Reopen asked the same question again. Off a
+/// thread: the start can take seconds and this connection's other
+/// messages must keep flowing meanwhile.
+fn open_term_or_wake(s: &Arc<Session>, task: &str, tab: Option<&str>, wake: bool) {
     let (task_id, pty_id) = match resolve_pty(s, task, tab) {
         Ok(x) => x,
         Err(e) => {
             close_term(s);
-            send(s, ServerMsg::TermClosed { reason: e });
+            let (projects, tasks) = s.host.projects_tasks();
+            let found = crate::cli_server::resolve_by_name(&projects, &tasks, task, None).ok().map(|t| t.id.clone());
+            match found {
+                Some(id) if wake && tab.is_none() => {
+                    let (s2, task, id) = (s.clone(), task.to_string(), id);
+                    std::thread::spawn(move || {
+                        let woke = s2.host.rpc("wake_agent", serde_json::json!({ "taskId": id }), std::time::Duration::from_secs(30));
+                        match woke {
+                            Ok(_) => open_term_or_wake(&s2, &task, None, false),
+                            Err(err) => send(&s2, ServerMsg::TermClosed { reason: err }),
+                        }
+                    });
+                }
+                _ => send(s, ServerMsg::TermClosed { reason: e }),
+            }
             return;
         }
     };

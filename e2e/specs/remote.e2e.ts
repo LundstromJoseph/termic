@@ -18,7 +18,7 @@ import { execFileSync } from "node:child_process";
 import os from "node:os";
 import { chmodSync, existsSync, lstatSync, readFileSync, mkdirSync, mkdtempSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { cliRpc, clickMenuItem, clickPresent, clickWhenVisible, requireTermicApi, setInputValue, snap, typeIntoAgent, typeIntoRemoteTerminal, waitForAgentPty, waitForAppShell, waitTabInFront, waitForAttr, waitGone, waitVisible } from "../helpers.js";
+import { cliRpc, clickMenuItem, clickPresent, clickWhenVisible, openTask, requireTermicApi, setInputValue, snap, typeIntoAgent, typeIntoRemoteTerminal, waitForAgentPty, waitForAppShell, waitTabInFront, waitForAttr, waitGone, waitVisible } from "../helpers.js";
 
 const nonce = (n: number) => { const b = Buffer.alloc(12); b.writeBigUInt64BE(BigInt(n), 4); return b; };
 const key = (pair: Buffer, salt: Buffer, dir: string, host: string, client: string) =>
@@ -42,10 +42,11 @@ function parseLink(link: string) {
  *  with a promise that settles when the app closes the connection. */
 function phone(link: string, id: string, name: string) {
   const l = parseLink(link);
-  return new Promise<{ welcome: any; closed: Promise<number>; close(): void }>((resolve, reject) => {
+  return new Promise<{ welcome: any; closed: Promise<number>; close(): void; send(m: object): void; seen: any[] }>((resolve, reject) => {
     const ws = new WebSocket(`ws://${l.hosts[0]}/termic-peer/v1/stream`);
     ws.binaryType = "arraybuffer";
-    let tx: Buffer | null = null, rx: Buffer | null = null, rn = 0, welcomed = false;
+    let tx: Buffer | null = null, rx: Buffer | null = null, rn = 0, tn = 1, welcomed = false;
+    const seen: any[] = [];
     let onClose: (c: number) => void = () => {};
     const closed = new Promise<number>(r => (onClose = r));
     ws.onmessage = (ev) => {
@@ -60,7 +61,11 @@ function phone(link: string, id: string, name: string) {
         return;
       }
       const m = open(rx!, rn++, f);
-      if (!welcomed && m.t === "welcome") { welcomed = true; resolve({ welcome: m, closed, close: () => ws.close() }); }
+      seen.push(m);
+      if (!welcomed && m.t === "welcome") {
+        welcomed = true;
+        resolve({ welcome: m, closed, close: () => ws.close(), send: (x) => ws.send(seal(tx!, tn++, x)), seen });
+      }
     };
     ws.onclose = (ev) => { onClose(ev.code); if (!welcomed) reject(new Error(`closed ${ev.code}`)); };
     ws.onerror = () => {};
@@ -230,6 +235,29 @@ describe("Phones and servers", () => {
   it("lets no second phone in with a code already used", async () => {
     await expect(phone(link, crypto.randomBytes(16).toString("hex"), "Intruder")).rejects.toThrow("closed 4001");
     expect((await status()).phones.length).toBe(1);
+  });
+
+  it("starts a stopped agent when a paired client opens its terminal", async () => {
+    // What a paired computer's Reopen relies on: the host used to answer
+    // "not running", and asking again changed nothing.
+    const task = await openTask("phone-wake");
+    await waitForAgentPty(task);
+    await browser.execute((t) => window.__termic!.useApp.getState().stopTask(t), task);
+    await browser.waitUntil(() => browser.execute((t) =>
+      !(window.__termic!.useApp.getState().tabs[t] ?? []).some((x: any) => x.ptyId), task),
+    { timeout: 10_000, timeoutMsg: "the agent did not stop" });
+    const p = await phone(link, phoneId, "My iPhone");
+    p.send({ t: "term_open", task: "phone-wake" });
+    await browser.waitUntil(async () => p.seen.some(m => m.t === "term_reset"),
+      { timeout: 30_000, timeoutMsg: `the terminal never opened: ${JSON.stringify(p.seen.filter(m => m.t === "term_closed"))}` });
+    expect(await browser.execute((t) =>
+      (window.__termic!.useApp.getState().tabs[t] ?? []).some((x: any) => x.ptyId), task)).toBe(true);
+    p.close();
+    // Leave things as the cases after this expect: no extra task, and the
+    // Remote control page open.
+    await cliRpc({ cmd: "archive", task: "phone-wake", force: true });
+    await browser.execute(() => window.__termic!.useApp.getState().openSettings("remote"));
+    await waitVisible('[data-testid="remote-section"]');
   });
 
   it("unpairs a phone after a confirmation, cutting its live connection", async () => {

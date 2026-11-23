@@ -186,6 +186,10 @@ function RemoteTerminal({ machineId, machineName, taskId, tabId, ownsSize }: { m
   const [closed, setClosed] = useState<string | null>(null);
   const [size, setSize] = useState<{ cols: number; rows: number } | null>(null);
   const [generation, setGeneration] = useState(0);
+  // Reopen re-runs the effect: its cleanup must not send a close, which
+  // could reach the host after the new open and shut it again. The host's
+  // open replaces the old terminal by itself.
+  const reopening = useRef(false);
 
   useEffect(() => {
     if (!host.current) return;
@@ -262,7 +266,8 @@ function RemoteTerminal({ machineId, machineName, taskId, tabId, ownsSize }: { m
       alive = false;
       stopFit();
       sub.dispose();
-      void remoteTermClose(machineId).catch(() => {});
+      if (reopening.current) reopening.current = false;
+      else void remoteTermClose(machineId).catch(() => {});
       term.dispose();
     };
   }, [machineId, taskId, tabId, generation, ownsSize]);
@@ -272,7 +277,7 @@ function RemoteTerminal({ machineId, machineName, taskId, tabId, ownsSize }: { m
       {closed && (
         <div className="flex shrink-0 items-center gap-2 border-b border-[var(--color-border-soft)] px-3 py-1.5 text-[12.5px] text-[var(--color-fg-dim)]">
           {t("task.terminalClosed", { reason: closed })}
-          <Button size="sm" variant="secondary" onClick={() => setGeneration(g => g + 1)}>{t("task.reopen")}</Button>
+          <Button size="sm" variant="secondary" onClick={() => { reopening.current = true; setClosed(null); setGeneration(g => g + 1); }}>{t("task.reopen")}</Button>
         </div>
       )}
       {size && !ownsSize && (

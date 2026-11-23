@@ -790,6 +790,31 @@ export async function sendPromptHandler(raw: unknown): Promise<{ mode: string; c
   return { mode: "spawned", capable: workDoneCapable(spawnCli) };
 }
 
+// ─────────────────────────── wake ────────────────────────────────────
+
+/** Start a task's stopped agent in its last session, with no prompt: what
+ *  a paired computer needs when it opens that agent's terminal (the host
+ *  answered "not running" and Reopen could only ask again). The respawn
+ *  steps `send --resume` takes, minus the injection; a task with no
+ *  session gets its default tab's own decision (a fresh agent). */
+async function wakeAgentHandler(params: unknown): Promise<{ running: boolean }> {
+  const taskId = (params as { taskId?: unknown })?.taskId;
+  if (typeof taskId !== "string" || !taskId) throw new Error("wake_agent requires a taskId");
+  const task = useApp.getState().tasks.find(t => t.id === taskId);
+  if (!task || task.archived) throw new Error("no such task");
+  const agentTabs = sendableAgentTabs(taskId);
+  const running = agentTabs.find(t => t.ptyId);
+  if (running) return { running: true };
+  const exited = agentTabs.find(t => t.is_default && !t.ptyId) ?? agentTabs.find(t => !t.ptyId);
+  useApp.getState().mountTasks([taskId]);
+  if (exited) {
+    useApp.getState().patchTab(taskId, exited.id, { respawnKick: (exited.respawnKick ?? 0) + 1 });
+  } else {
+    useApp.getState().ensureDefaultTab(taskId, task.cli);
+  }
+  return { running: await waitForAgentPty(taskId, exited?.id) };
+}
+
 // ─────────────────────────── archive ─────────────────────────────────
 
 /** The GUI's archive flow minus its confirm dialog (the CLI confirms on
@@ -1488,6 +1513,7 @@ const handlers: Record<string, Handler> = {
   list_agents: listAgentsHandler,
   list_prompts: listPromptsHandler,
   send_prompt: sendPromptHandler,
+  wake_agent: wakeAgentHandler,
   archive_task: archiveTaskHandler,
   rename_task: renameTaskHandler,
   pin_task: pinTaskHandler,

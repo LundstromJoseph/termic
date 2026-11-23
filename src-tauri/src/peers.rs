@@ -863,9 +863,17 @@ impl Node {
     }
 
     fn advert(&self, port: u16) -> mdns::Advert {
+        // Termic, Termic Beta and a dev build on one Mac are separate machines
+        // to pair with, under one computer name: all but the release say which
+        // they are, or the pair list shows the same name twice and a user
+        // pairs with the wrong one.
+        let name = match FLAVOR.get().copied().flatten() {
+            Some(f) => format!("{} ({f})", self.self_name()),
+            None => self.self_name(),
+        };
         mdns::Advert {
             id: self.self_id(),
-            name: self.self_name(),
+            name,
             version: self.version.clone(),
             proto: proto::PROTOCOL_VERSION,
             pv: PV,
@@ -2820,7 +2828,18 @@ pub(crate) fn node() -> Option<Arc<Node>> {
     node_slot().lock().unwrap().clone()
 }
 
+/// "Beta" (its own bundle identifier) or "Dev" (a debug build, which shares
+/// the release's identifier); None for the release.
+static FLAVOR: std::sync::OnceLock<Option<&'static str>> = std::sync::OnceLock::new();
+
 fn ensure_node(app: &tauri::AppHandle) -> Option<Arc<Node>> {
+    let _ = FLAVOR.set(if app.config().identifier.ends_with(".beta") {
+        Some("Beta")
+    } else if cfg!(debug_assertions) {
+        Some("Dev")
+    } else {
+        None
+    });
     let mut slot = node_slot().lock().unwrap();
     if slot.is_none() {
         let dir = crate::global_dir().ok()?;

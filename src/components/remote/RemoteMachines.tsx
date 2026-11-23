@@ -9,7 +9,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { memo, useMemo, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
-import { Bell, ChevronDown, ChevronRight, Folder, MoreVertical, GitMerge, GitPullRequest, GitPullRequestClosed, GitPullRequestDraft, Monitor, Pin, Plus, RefreshCw, Server, Globe, Smartphone } from "lucide-react";
+import { Bell, ChevronDown, ChevronRight, Folder, MoreVertical, GitMerge, GitPullRequest, GitPullRequestClosed, GitPullRequestDraft, Monitor, Pin, Plus, RefreshCw, Server, MonitorSmartphone, Smartphone } from "lucide-react";
 import { CliIcon, CLI_BRAND_COLOR, resolveIconId } from "@/icons/cli";
 import { Spinner } from "@/components/ui/Spinner";
 import { Tip } from "@/components/ui/Tooltip";
@@ -83,7 +83,9 @@ function RemoteAddMenu({ children }: { children: ReactNode }) {
       <Tip content={t("sidebar.addRemote")}>
         <DropdownTrigger asChild>{children}</DropdownTrigger>
       </Tip>
-      <DropdownMenu>
+      {/* Focus does not go back to the trigger on close: it would open the
+          trigger's tooltip over the spot the menu just left. */}
+      <DropdownMenu onCloseAutoFocus={e => e.preventDefault()}>
         <DropdownItem data-testid="sidebar-connect-phone" onSelect={() => setDialog({ phoneDialog: true })}><Smartphone className="h-4 w-4" />{t("phones.connect")}</DropdownItem>
         <DropdownItem data-testid="sidebar-pair-computer" onSelect={() => openSettings("remote")}><Monitor className="h-4 w-4" />{t("sidebar.pairComputer")}</DropdownItem>
         <DropdownItem data-testid="sidebar-add-server" onSelect={() => setDialog({ serverDialog: true })}><Server className="h-4 w-4" />{t("sidebar.addServer")}</DropdownItem>
@@ -99,7 +101,7 @@ export function RemoteFooterButton({ className }: { className: string }) {
   if (useHasRemoteRows() || !shown) return null;
   return (
     <RemoteAddMenu>
-      <Button size="icon" variant="icon" data-testid="sidebar-footer-remote" aria-label={t("sidebar.addRemote")}><Globe className={className} /></Button>
+      <Button size="icon" variant="icon" data-testid="sidebar-footer-remote" aria-label={t("sidebar.addRemote")}><MonitorSmartphone className={className} /></Button>
     </RemoteAddMenu>
   );
 }
@@ -116,7 +118,7 @@ export function RemoteSidebarSection({ projects, renderProject }: { projects: Pr
   if (!shown || (servers.length === 0 && computers.length === 0)) return null;
   return (
     <div data-testid="remote-sidebar-section" className="mt-3">
-      <SidebarSectionHeader testId="remote-section-header" icon={<Globe className="h-4 w-4 shrink-0" />} label={t("sidebar.remoteHeader")} badge={ts("rail.badgeExp")}
+      <SidebarSectionHeader testId="remote-section-header" icon={<MonitorSmartphone className="h-4 w-4 shrink-0" />} label={t("sidebar.remoteHeader")} badge={ts("rail.badgeExp")}
         folded={folded} onToggle={() => toggle("section:remote")}>
         <RemoteAddMenu>
           <button type="button" data-testid="sidebar-add-remote" aria-label={t("sidebar.addRemote")} className={headerBtn}><Plus className="h-3.5 w-3.5" /></button>
@@ -434,7 +436,9 @@ function RemoteFolder({ m, folder, projects }: { m: MachineView; folder: RemoteG
 function RemoteProjectRows({ m, project }: { m: MachineView; project: RemoteProject }) {
   return (
     <div data-testid={`remote-project-${project.name}`}>
-      <div className="flex h-7 items-center px-2 text-[12px] font-medium text-[var(--color-fg-dim)]">{project.name}</div>
+      {/* The local project header's type: the same uppercase, weight and
+          tracking, so a paired computer's projects read like this one's. */}
+      <div className="flex h-7 items-center px-2 text-[12px] font-semibold uppercase tracking-[0.06em] text-[var(--color-fg-dim)]"><span className="truncate">{project.name}</span></div>
       {project.segments.map(seg => seg.kind === "task"
         ? <RemoteTaskRow key={seg.task.id} m={m} task={seg.task} />
         : (
