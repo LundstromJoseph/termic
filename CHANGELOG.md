@@ -4,7 +4,7 @@ All notable changes to Termic, newest first. This file is the human-authored
 source of truth: the in-app Update card and the /changelog page on termic.dev
 are generated from it. See the `release` skill for how entries are added.
 
-## [1.25.0] - 2026-11-23
+## [1.25.1] - 2026-11-23
 
 Two new features: a phone app to remote-control Termic, and agents on your own servers.
 

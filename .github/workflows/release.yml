@@ -299,10 +299,17 @@ jobs:
           security import "$RUNNER_TEMP/cert.p12" -k "$kc" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
           rm -f "$RUNNER_TEMP/cert.p12"
           security set-key-partition-list -S apple-tool:,apple: -s -k "$pw" "$kc" >/dev/null
+          # codesign finds an identity only in a keychain on the search list,
+          # `--keychain` or not ("no identity found" in v1.25.0's run), so the
+          # temporary one joins the list, as Tauri's own signing step does,
+          # and the list is put back after, for that later step.
+          orig=$(security list-keychains -d user | xargs)
+          security list-keychains -d user -s "$kc" $orig
           for f in src-tauri/resources/termic-server/termic-server-*-apple-darwin; do
             codesign --force --options runtime --timestamp --keychain "$kc" --sign "$APPLE_SIGNING_IDENTITY" "$f"
             codesign --verify --strict --verbose=2 "$f"
           done
+          security list-keychains -d user -s $orig
           security delete-keychain "$kc"
       - name: Build, sign & notarize (universal)
         # Retried up to 3 times, but ONLY when the failure looks like Apple's
