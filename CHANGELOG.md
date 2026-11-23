@@ -26,11 +26,14 @@ Remote control: your phone, your own servers, and your other computers.
 - Copy and paste cross over: what an agent copies lands on your clipboard here, and Ctrl+V with an image attaches it to the agent there, as a local paste does. On a server, the image is put on the server for the agent.
 - Its terminal takes your keys as a local one does: Shift+Enter adds a line, ⌘⌫ and ⌘←/⌘→ edit the line, and app shortcuts reach the app.
 - Right-click one of its tasks to stop it, archive it or copy its branch name, as on a local task.
+- A computer with several profiles lists them in its menu: untick one to leave its tasks out of your sidebar.
 
 ### Also new
 - Settings is reorganised around it: MCP & CLI, Remote control (phones and paired computers) and Servers. Remote is marked experimental, and Settings, Appearance turns the REMOTE section off for anyone who does not use it.
 - `termic pin` (MCP `task_pin`) pins or unpins a task.
+- Caffeinate: the mug is filled while it keeps your computer awake, and "Turn back on when Termic restarts" brings it back after a quit or an update.
 - Sidebar: projects, folders and task groups animate open and shut. The New task button under a project's tasks shows only for a project with none yet.
+- The sidebar scrolls without a visible scrollbar.
 - No more "Message queue finished" notice, and archiving from a merged PR's notice no longer adds a second "Archived" one.
 
 ### Bug fixes
