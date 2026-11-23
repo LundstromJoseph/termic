@@ -793,6 +793,15 @@ describeLocal("A server's tasks in the sidebar (local termic-server)", function 
     await waitGone(row());
     await clickPresent(`[data-testid="server-block-${serverId}"] button[aria-expanded]`);
     await waitVisible(row());
+    // Switched back on from folded, it opens: no point turning on what
+    // stays closed.
+    await clickPresent(`[data-testid="server-block-${serverId}"] button[aria-expanded]`);
+    await waitGone(row());
+    await clickPresent(`[data-testid="machine-switch-${serverId}"]`);
+    await waitForAttr(`[data-testid="server-block-${serverId}"]`, "data-state", "disconnected", 10_000);
+    await clickPresent(`[data-testid="machine-switch-${serverId}"]`);
+    await waitForAttr(`[data-testid="server-block-${serverId}"]`, "data-state", "online", 30_000);
+    await waitVisible(row(), 20_000);
   });
 
   // A server task is an ordinary desktop task whose terminals run on the

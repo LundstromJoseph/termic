@@ -321,7 +321,9 @@ describe("merged-PR lifecycle (issue #21)", () => {
     // archive entry point (branch-delete checkbox and all), not a bare
     // archiveAndRefresh - "ask" mode means the user gets a real say.
     toasts[0].actions[0].onClick();
-    expect(confirmAndArchive).toHaveBeenCalledWith(expect.objectContaining({ id: "ws1" }));
+    // Quiet: the notice the user clicked already said what happens, so no
+    // second "Archived" toast after it.
+    expect(confirmAndArchive).toHaveBeenCalledWith(expect.objectContaining({ id: "ws1" }), { quiet: true });
   });
 
   it("fires a desktop notification alongside the toast, gated on the pref", async () => {

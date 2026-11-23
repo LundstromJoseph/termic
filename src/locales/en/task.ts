@@ -286,7 +286,6 @@ export default {
   // boot overlay.
   terminal: {
     scheduledSent: "Scheduled message sent (due {{late}} ago)",
-    queueFinished: "Message queue finished",
     pathGone: "That path no longer exists",
     menuCopy: "Copy",
     menuPaste: "Paste",

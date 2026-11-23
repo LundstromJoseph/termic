@@ -853,10 +853,9 @@ const captureArmedRef = useRef(false);
     if (idx < 0) {
       if (!cur.queueActive) return false;
       // No ordinary item is left, so the loop is over. Future scheduled
-      // items do not keep it running (they never needed it), but they do
-      // mean the queue is not "finished", so no toast while any remain.
+      // items do not keep it running (they never needed it). No toast: the
+      // agent finishing its turn already says so.
       patchTab(task.id, tab.id, { queueActive: false });
-      if (!q.length) useUI.getState().pushToast(i18n.t("task:terminal.queueFinished"));
       return false;
     }
     const head = q[idx];

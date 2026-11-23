@@ -1168,7 +1168,7 @@ function maybeHandleMerged(taskId: string, prev: PrLookup | null | undefined, ne
     tone: "pr-merged",
     notice: "prMergedAsk",
     sticky: true,
-    action: { label: i18n.t("backend:pr.archiveAction"), icon: Archive, onClick: () => { void confirmAndArchive(task); } },
+    action: { label: i18n.t("backend:pr.archiveAction"), icon: Archive, onClick: () => { void confirmAndArchive(task, { quiet: true }); } },
   });
   notifyMerge(i18n.t("backend:pr.mergedAskNotify", { label, name: task.name }));
 }

@@ -281,7 +281,6 @@ export default {
   // TerminalPane：提示、退出横幅、YOLO 重启确认和启动遮罩。
   terminal: {
     scheduledSent: "定时消息已发送（原定 {{late}} 前）",
-    queueFinished: "消息队列已完成",
     pathGone: "该路径已不存在",
     menuCopy: "复制",
     menuPaste: "粘贴",

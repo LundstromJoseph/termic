@@ -186,7 +186,12 @@ function MachineSwitch({ m }: { m: MachineView }) {
       <button
         type="button" role="switch" aria-checked={on} aria-label={label}
         data-testid={`machine-switch-${m.id}`}
-        onClick={(e) => { e.stopPropagation(); void remoteSetConnected(m.id, !on).catch(err => useUI.getState().pushToast(String(err), "error")); }}
+        onClick={(e) => {
+          e.stopPropagation();
+          // Switched on: show what it brings back, unfolded.
+          if (!on && useRemote.getState().folded[m.id]) useRemote.getState().toggleFold(m.id);
+          void remoteSetConnected(m.id, !on).catch(err => useUI.getState().pushToast(String(err), "error"));
+        }}
         className="relative mx-1 inline-block h-4 w-7 shrink-0 rounded-full p-0"
         // Off is a grey track, not bg-3: on a hovered row bg-3 vanished and
         // only the knob showed.
