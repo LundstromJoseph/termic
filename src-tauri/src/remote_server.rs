@@ -140,11 +140,13 @@ fn run(node: Arc<Node>, client: StreamClient, mut reader: MsgReader, mut writer:
     let mut caps_list = vec![caps::CALL.to_string()];
     if client.drives() {
         caps_list.extend([caps::TASKS, caps::TERMINAL, caps::KEYS, caps::TRANSCRIPT].map(String::from));
-        // The viewer sizes the terminal to its own screen while it watches,
-        // a phone or another computer alike, and this one gets its size back
-        // when it leaves (`restore`). Drawing another computer's terminal at
-        // this window's size, scrolling both ways, was no way to work in it.
-        caps_list.push(caps::RESIZE.to_string());
+        // Only a phone sizes a terminal. Another computer scales this one's
+        // drawing to its pane instead: letting it resize the PTY (1.25.3)
+        // reflowed this computer's own window, and neither side redrew until
+        // its window changed size.
+        if client.kind == ClientKind::Phone {
+            caps_list.push(caps::RESIZE.to_string());
+        }
     }
     let welcome = ServerMsg::Welcome {
         v: wire::VERSION,
@@ -264,7 +266,7 @@ fn handle(s: &Arc<Session>, msg: ClientMsg) {
         // open (readable text, no zoom); close_term gives the desktop its
         // size back. Only a client that drives, and only within sane bounds.
         ClientMsg::TermSize { cols, rows } => {
-            if !s.client.drives() {
+            if !s.client.drives() || s.client.kind != ClientKind::Phone {
                 return;
             }
             let (cols, rows) = (cols.clamp(20, 400), rows.clamp(5, 200));

@@ -155,15 +155,15 @@ session started in the task's folder, which a task sharing the project
 checkout cannot use, so it gets none. Account-relocated config dirs are
 not followed yet: the default home dirs are read.
 
-**The viewer sizes the terminal it watches.** Every host offers `resize`:
-a phone, another computer or a desktop on a server sends `term_size` for
-the pane it draws in, the PTY follows, and `term_resize` confirms it. A
-desktop host keeps its own size in `restore` and puts it back when the
-viewer closes the terminal or disconnects. Before, only a phone could:
-another computer drew the PTY at the host's window size, scrolling both
-ways in a pane of a different shape. A host older than this ignores
-`term_size` from a computer, and the viewer then draws at the size it
-was given. xterm's automatic answers to terminal queries are never
+**Each computer keeps its own terminal size.** One program draws for one
+width, so a terminal cannot be two sizes at once. A phone sizes the PTY
+while it watches (`resize`, offered to phones only) and the desktop gets
+its size back after (`restore`). Another computer never resizes it: it
+draws the PTY at the host's size and scales the drawing to fit its pane
+(`RemoteTerminal`). 1.25.3 let computers resize too, and it fought the
+host's own window: neither side redrew until its window changed size.
+A server, whose PTYs have no screen of their own, still follows the
+viewing pane (see Servers). xterm's automatic answers to terminal queries are never
 forwarded from a viewer (the agent already has a terminal answering).
 
 ## Pairing a phone

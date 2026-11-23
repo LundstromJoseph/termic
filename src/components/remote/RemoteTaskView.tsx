@@ -142,7 +142,7 @@ export function RemoteTaskView({ machineId, taskId }: { machineId: string; taskI
 
       <div className="relative min-h-0 flex-1">
         <div className="absolute inset-0">
-          {online && <RemoteTerminal key={tabId ?? "default"} machineId={machineId} machineName={machine.name} taskId={task.id} tabId={tabId} ownsSize={machine.caps.includes("resize")} />}
+          {online && <RemoteTerminal key={tabId ?? "default"} machineId={machineId} machineName={machine.name} taskId={task.id} tabId={tabId} ownsSize={false} />}
         </div>
       </div>
     </div>
@@ -186,6 +186,25 @@ function RemoteTerminal({ machineId, machineName, taskId, tabId, ownsSize }: { m
   const [closed, setClosed] = useState<string | null>(null);
   const [size, setSize] = useState<{ cols: number; rows: number } | null>(null);
   const [generation, setGeneration] = useState(0);
+  // Fit another computer's terminal into this pane by scaling its drawing.
+  const frame = useRef<HTMLDivElement>(null);
+  const [scale, setScale] = useState(1);
+  useEffect(() => {
+    if (ownsSize || !frame.current || !host.current) return;
+    const fit = () => {
+      const f = frame.current, h = host.current;
+      if (!f || !h || !h.offsetWidth || !h.offsetHeight) return;
+      // The pane's content box (p-2 = 8px each side); offset sizes ignore
+      // the transform, so they are the terminal's own.
+      const next = Math.min((f.clientWidth - 16) / h.offsetWidth, (f.clientHeight - 16) / h.offsetHeight, 1.5);
+      setScale(s => (Math.abs(s - next) < 0.005 ? s : Math.max(0.3, next)));
+    };
+    const ro = new ResizeObserver(fit);
+    ro.observe(frame.current);
+    ro.observe(host.current);
+    fit();
+    return () => ro.disconnect();
+  }, [ownsSize, size]);
   // Reopen re-runs the effect: its cleanup must not send a close, which
   // could reach the host after the new open and shut it again. The host's
   // open replaces the old terminal by itself.
@@ -280,13 +299,14 @@ function RemoteTerminal({ machineId, machineName, taskId, tabId, ownsSize }: { m
           <Button size="sm" variant="secondary" onClick={() => { reopening.current = true; setClosed(null); setGeneration(g => g + 1); }}>{t("task.reopen")}</Button>
         </div>
       )}
-      {size && !ownsSize && (
-        <div className="shrink-0 px-3 pt-1 text-[11px] text-[var(--color-fg-faint)]">{t("task.sizeNote", { cols: size.cols, machine: machineName })}</div>
-      )}
-      {/* Another computer's PTY size wins: a narrower pane scrolls, it never
-          reflows. A server's fills the pane. */}
-      <div className={cn("min-h-0 flex-1 p-2", ownsSize ? "overflow-hidden" : "overflow-auto")}>
-        <div ref={host} data-testid="remote-terminal" data-owns-size={ownsSize} className={ownsSize ? "h-full w-full" : "inline-block"} />
+      {/* Another computer's terminal keeps ITS size (one program draws for
+          one width, and resizing it from here reflowed that computer's own
+          window and never cleanly gave it back): this pane scales the
+          drawing to fit instead, so each computer sees it at its own size. */}
+      <div ref={frame} className="min-h-0 flex-1 overflow-hidden p-2">
+        <div ref={host} data-testid="remote-terminal" data-owns-size={ownsSize} data-scale={ownsSize ? 1 : scale}
+          className={ownsSize ? "h-full w-full" : "inline-block origin-top-left"}
+          style={ownsSize ? undefined : { transform: `scale(${scale})` }} />
       </div>
     </div>
   );

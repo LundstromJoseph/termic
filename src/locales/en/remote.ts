@@ -160,7 +160,6 @@ export default {
     tabNotRunning: "Not running on that computer",
     tabLocalOnly: "Opens only on that computer",
     offline: "{{machine}} is offline.",
-    sizeNote: "Terminal is {{cols}} columns on {{machine}}",
     gone: "This task is no longer on {{machine}}.",
   },
   alert: {

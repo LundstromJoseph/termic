@@ -159,7 +159,6 @@ export default {
     tabLocalOnly: "只能在那台电脑上打开",
     reopen: "重新打开",
     offline: "{{machine}} 离线。",
-    sizeNote: "{{machine}} 上的终端宽 {{cols}} 列",
     gone: "这个任务已不在 {{machine}} 上。",
   },
   alert: {

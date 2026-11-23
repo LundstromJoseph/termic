@@ -923,11 +923,16 @@ describe("LAN pairing", () => {
       // Asserted on the event, not on painted rows: xterm paints nothing in
       // the local e2e window (it does in CI), so rows would read empty here.
       await waitForAttr('[data-testid="remote-terminal"]', "data-last-event", "term_reset");
-      // The stamp lands in the event handler, the size note on the next
-      // render: wait for the note rather than read it once.
-      await browser.waitUntil(
-        async () => ((await browser.execute(() => document.querySelector('[data-testid="remote-task-view"]')!.textContent)) ?? "").includes("80 columns"),
-        { timeout: 5_000, timeoutMsg: "the terminal's size note never showed" });
+      // Drawn at the other machine's size and scaled to fit this pane: no
+      // scrolling, and nothing sent to resize the PTY over there.
+      await browser.waitUntil(async () => (await browser.execute(() => {
+        const h = document.querySelector('[data-testid="remote-terminal"]') as HTMLElement;
+        const f = h.parentElement!;
+        const sc = Number(h.dataset.scale);
+        const r = h.getBoundingClientRect(), fr = f.getBoundingClientRect();
+        return sc > 0 && r.width <= fr.width + 1 && r.height <= fr.height + 1 && f.scrollWidth <= f.clientWidth && f.scrollHeight <= f.clientHeight;
+      })), { timeout: 5_000, timeoutMsg: "the other machine's terminal is not scaled into the pane" });
+      expect(hostSaw.some(m => m.t === "term_size")).toBe(false);
       // The terminal and nothing else: the phone's card, transcript and
       // composer stand in for a keyboard, and this window has one.
       const extras = await browser.execute(() =>
