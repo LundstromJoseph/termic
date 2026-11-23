@@ -101,6 +101,8 @@ describe("caffeinate", () => {
     await clickWhenVisible(APPLY);
     await browser.waitUntil(active);
     expect(await mode()).toBe("duration");
+    // The mug fills while it keeps the computer awake.
+    expect(await browser.execute(s => document.querySelector(`${s} svg`)?.getAttribute("fill"), TRIGGER)).toBe("currentColor");
     await waitVisible('[data-testid="caffeinate-current"]');
     expect(await text(STATUS)).toContain("Keeping awake");
     await browser.waitUntil(async () => await browser.execute(s => document.activeElement === document.querySelector(s), STATUS));
@@ -112,6 +114,28 @@ describe("caffeinate", () => {
     await browser.execute(s => document.querySelector<HTMLElement>(s)!.focus(), STOP);
     await stop();
     await browser.waitUntil(async () => await browser.execute(s => document.activeElement === document.querySelector(s), STATUS));
+    // Outlined again once off.
+    expect(await browser.execute(s => document.querySelector(`${s} svg`)?.getAttribute("fill"), TRIGGER)).toBe("none");
+  });
+
+  it("remembers 'Turn back on when Termic restarts', and forgets the request once it is turned off", async () => {
+    await open();
+    const box = '[data-testid="caffeinate-restore-on-launch"]';
+    await waitVisible(box);
+    const ls = (k: string) => browser.execute(key => localStorage.getItem(key), k);
+    expect(await browser.execute(q => (document.querySelector(q) as HTMLInputElement).checked, box)).toBe(false);
+    await clickWhenVisible(box);
+    expect(await ls("caffeinateRestore")).toBe("1");
+    // Starting one records it for the next launch; stopping it clears that.
+    await clickWhenVisible('[data-testid="caffeinate-choice-duration"]');
+    await setInputValue('[data-testid="caffeinate-hours"]', "2");
+    await clickWhenVisible(APPLY);
+    await browser.waitUntil(active);
+    expect(JSON.parse((await ls("caffeinateLast")) ?? "null")?.request?.mode).toBe("duration");
+    await stop();
+    expect(await ls("caffeinateLast")).toBeNull();
+    await clickWhenVisible(box);
+    expect(await ls("caffeinateRestore")).toBe("0");
   });
 
   it("offers 16 and 24 hours, explains pending changes, and restores the accepted choice", async () => {
