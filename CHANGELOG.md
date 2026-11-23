@@ -4,6 +4,27 @@ All notable changes to Termic, newest first. This file is the human-authored
 source of truth: the in-app Update card and the /changelog page on termic.dev
 are generated from it. See the `release` skill for how entries are added.
 
+## [1.25.0] - 2026-11-23
+
+Two new features: a phone app to remote-control Termic, and agents on your own servers.
+
+### Features
+- Servers: run agents on a Linux or Mac machine you reach with ssh, so they keep working while your laptop sleeps. Settings, Servers, Add a server checks the connection and installs termic-server there over your own ssh: no sudo, no internet needed on the machine, no credentials stored ([#82](https://github.com/simion/termic/issues/82)).
+- A server's projects are ordinary projects: the same sidebar, New task, tabs, file tree, editor, diff, git panel and run, setup and archive scripts, all on the server. Add a repo already there, clone one by URL, or add a plain folder. Agent hooks are installed there too, so a server agent rings when it needs you, like a local one.
+- Several computers on one server see the same projects and tasks, with the same names, pins and groups.
+- Termic Remote, the phone app ([iPhone](https://testflight.apple.com/join/SqxhPr6a), [Android](https://play.google.com/store/apps/details?id=dev.termic.remote)): pair it by QR code in Settings, Remote control. Answer an agent's question with one tap, read the conversation (Claude Code, Codex, Antigravity), send prompts, use any agent's live terminal, and start new tasks with the same options as here. It talks straight to your computer, on your Wi-Fi or over your own Tailscale; there is no relay ([#165](https://github.com/simion/termic/issues/165)).
+- A paired computer's tasks show in the sidebar under REMOTE, filed in its own groups and folders, and you can rename, pin and move them from here.
+- Settings: Agent access is now three pages, MCP & CLI, Remote control (phones and paired computers) and Servers.
+- `termic pin` (MCP `task_pin`) pins or unpins a task.
+
+### Improvements
+- Sidebar: projects, folders and task groups animate open and shut.
+
+### Bug fixes
+- A task started with a prompt (New task with a prompt, a PR review, a race) now comes back in its Claude session after a restart, instead of a fresh one.
+- With two profile windows open, a running task no longer reads as inactive to `termic status` and MCP every few seconds.
+- Windows and Linux: closing the last window while agents run asks before the window closes. Before, the window vanished first, and Cancel left Termic in the tray with no window to show.
+
 ## [1.24.6] - 2026-11-20
 
 Monokai theme, window titles that name your task, idle tasks free their build folders.
