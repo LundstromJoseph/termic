@@ -3829,10 +3829,12 @@ describe("extra named ports settings", () => {
     );
     await waitVisible('[data-testid="extra-named-ports-input"]');
     await typePorts("API_PORT\nDB_PORT");
-    // The field autosaves (500ms debounce) into projects.json.
+    // The field autosaves (500ms debounce) into projects.json. 20s, not 8:
+    // the Windows runner once missed 8s on 1.25.4's commit and passed on a
+    // rerun, with nothing in the save path changed.
     await browser.waitUntil(
       async () => JSON.stringify(await stored()) === JSON.stringify(["API_PORT", "DB_PORT"]),
-      { timeout: 8_000, timeoutMsg: "typed port names never autosaved to the project" },
+      { timeout: 20_000, timeoutMsg: "typed port names never autosaved to the project" },
     );
     await snap("extra-named-ports.png");
   });
