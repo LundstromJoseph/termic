@@ -167,20 +167,26 @@ clipboard, so the image is copied into a temp file there
 (`server_paste_image`, over `exec`) and that path is pasted, the Docker
 route.
 
-**The last window worked in owns a terminal's size** (tmux's "latest").
-One program draws for one width, so a terminal is one size at a time.
-Every host offers `resize`: a viewer sends `term_size` when its terminal
-is opened, or on a human click or key anywhere in its window while the
-terminal is on screen (never the terminal's own focus reports and query
-replies, which ping-ponged two windows), follows its own pane while it
-owns the size, and otherwise draws the PTY's size scaled to fit
-(`RemoteTerminal`). The host's own pane learns of an outside resize from
-`termic://pty-resized` (emitted by the host's `pty_set_size`), draws that
-size scaled meanwhile, and takes its size back on a click or a key in
-its window (`TerminalPane`). A desktop host still restores its size
-when the viewer closes the terminal (`restore`). 1.25.3 resized without
-the scaling: the host's pane garbled and neither side redrew until its
-window changed size. A server, whose PTYs have no screen of their own,
+**One screen draws a terminal at a time; the last to take it owns its
+size** (tmux's "latest"). One program draws for one width, so a terminal
+is one size at a time. Every host offers `resize`: a viewer sends
+`term_size` when its terminal is opened, follows its own pane while it
+owns the size, and, once another screen takes it, hides its terminal
+(`display: none`, so it stops drawing) behind "This terminal is in use on
+another screen" with **Continue here**, the only thing that sends
+`term_size` again (`RemoteTerminal`; the phone's `TerminalView` does the
+same). The host's own pane learns of an outside resize from
+`termic://pty-resized` (emitted by the host's `pty_set_size`) and shows
+the same overlay (`TerminalPane`). A desktop host still restores its
+size when the viewer closes the terminal (`restore`).
+
+History, because each step was a real bug: 1.25.3 resized with nothing
+on the host, which garbled until its window changed size; 2.0.0 drew the
+other size scaled and took the size back on any click or key in the
+window, so two focused screens traded it on every touch and each trade
+blanked and redrew the phone's terminal (the phone also re-asked on its
+own after a size change). 2.0.1 makes taking it back a button.
+A server, whose PTYs have no screen of their own,
 follows the viewing pane (see Servers). xterm's automatic answers to terminal queries are never
 forwarded from a viewer (the agent already has a terminal answering).
 

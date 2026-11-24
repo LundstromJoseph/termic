@@ -146,6 +146,8 @@ export default {
     startAgent: "启动智能体",
     stopFailed: "无法停止 {{machine}} 上的智能体:{{error}}",
     copyPath: "复制服务器上的路径",
+    elsewhere: "此终端正在另一个屏幕上使用。",
+    continueHere: "在此继续",
     newOnServer: "新建",
     terminal: "终端",
     on: "位于 {{machine}}",

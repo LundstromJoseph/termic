@@ -197,6 +197,9 @@ function RemoteTerminal({ machineId, taskId, tabId, agent }: { machineId: string
   const host = useRef<HTMLDivElement>(null);
   const [closed, setClosed] = useState<string | null>(null);
   const [generation, setGeneration] = useState(0);
+  /** Another screen owns this terminal's size: the overlay is up. */
+  const [elsewhere, setElsewhere] = useState(false);
+  const continueHere = useRef<(() => void) | null>(null);
   // Reopen re-runs the effect: its cleanup must not send a close, which
   // could reach the host after the new open and shut it again. The host's
   // open replaces the old terminal by itself.
@@ -231,23 +234,31 @@ function RemoteTerminal({ machineId, taskId, tabId, agent }: { machineId: string
       const d = fit.proposeDimensions();
       return d && Number.isFinite(d.cols) && Number.isFinite(d.rows) && d.cols >= 1 && d.rows >= 1 ? { cols: d.cols, rows: d.rows } : null;
     };
+    // At another screen's size: the terminal is hidden (display:none, so it
+    // stops drawing) behind an overlay whose Continue here takes the size
+    // back. Not while opening: the first screen arrives at the other size a
+    // moment before this pane's claim lands, and would flash the overlay.
+    let opening = true;
     const draw = () => {
       const d = own();
       const el = term.element;
       if (!el) return;
       const mine = !!d && d.cols === term.cols && d.rows === term.rows;
+      if (mine) opening = false;
       box.dataset.owner = String(mine);
-      if (mine || !el.offsetWidth || !el.offsetHeight) { el.style.transform = ""; box.dataset.scale = "1"; return; }
-      const sc = Math.max(0.3, Math.min(box.clientWidth / el.offsetWidth, box.clientHeight / el.offsetHeight, 1.5));
-      el.style.transformOrigin = "top left";
-      el.style.transform = `scale(${sc})`;
-      box.dataset.scale = sc.toFixed(3);
+      const away = !mine && !opening;
+      el.style.display = away ? "none" : "";
+      setElsewhere(away);
     };
     let claimed = false;
     const claim = () => {
       const d = own();
       if (!d) return;
       claimed = true;
+      if (term.element?.style.display === "none") {
+        term.element.style.display = "";
+        setElsewhere(false);
+      }
       if (d.cols === term.cols && d.rows === term.rows) return;
       void remoteTermSize(machineId, d.cols, d.rows).catch(() => {});
     };
@@ -305,19 +316,16 @@ function RemoteTerminal({ machineId, taskId, tabId, agent }: { machineId: string
       if (isTerminalReply(data)) return;
       void remoteTermInput(machineId, b64encode(data)).catch(() => {});
     });
-    // Only a person claims the size: a click or a key anywhere in this
-    // window while this terminal is on screen, never the terminal's own
-    // replies (they flow on every redraw: two windows took the size from
-    // each other forever when they counted).
-    const onHuman = () => requestAnimationFrame(() => { if (box.offsetParent) claim(); });
-    window.addEventListener("pointerdown", onHuman, true);
-    window.addEventListener("keydown", onHuman, true);
+    // Only Continue here (the overlay) takes the size back once another
+    // screen has it: a click anywhere did before, and two focused screens
+    // traded the size on every touch.
+    continueHere.current = () => { claim(); term.focus(); };
     // While this window owns the size it follows the pane (debounced: a
     // drag sends one size); otherwise a resize here only rescales.
     let timer: ReturnType<typeof setTimeout> | undefined;
     const ro = new ResizeObserver(() => {
       clearTimeout(timer);
-      timer = setTimeout(() => (claimed ? claim() : draw()), 80);
+      timer = setTimeout(() => (claimed && !opening ? claim() : draw()), 80);
     });
     ro.observe(box);
     void remoteTermOpen(machineId, taskId, tabId, onEvent)
@@ -326,14 +334,18 @@ function RemoteTerminal({ machineId, taskId, tabId, agent }: { machineId: string
         // Opening it is working in it: typing goes straight in, at this size.
         term.focus();
         claim();
+        // Already at this size (no resize will come back): open is done.
+        const d = own();
+        if (d && d.cols === term.cols && d.rows === term.rows) opening = false;
+        // A claim that never lands (an older computer) still ends opening.
+        setTimeout(() => { opening = false; draw(); }, 1500);
       })
       .catch(err => setClosed(String(err)));
     return () => {
       alive = false;
       clearTimeout(timer);
       ro.disconnect();
-      window.removeEventListener("pointerdown", onHuman, true);
-      window.removeEventListener("keydown", onHuman, true);
+      continueHere.current = null;
       sub.dispose();
       disposeCopyOnSelect();
       if (reopening.current) reopening.current = false;
@@ -350,8 +362,14 @@ function RemoteTerminal({ machineId, taskId, tabId, agent }: { machineId: string
           <Button size="sm" variant="secondary" onClick={() => { reopening.current = true; setClosed(null); setGeneration(g => g + 1); }}>{t("task.reopen")}</Button>
         </div>
       )}
-      <div className="min-h-0 flex-1 overflow-hidden p-2">
+      <div className="relative min-h-0 flex-1 overflow-hidden p-2">
         <div ref={host} data-testid="remote-terminal" className="h-full w-full overflow-hidden" />
+        {elsewhere && (
+          <div data-testid="terminal-elsewhere" className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-[var(--color-bg)] text-[13px] text-[var(--color-fg-dim)]">
+            <p>{t("task.elsewhere")}</p>
+            <Button size="sm" data-testid="terminal-continue-here" onClick={() => continueHere.current?.()}>{t("task.continueHere")}</Button>
+          </div>
+        )}
       </div>
     </div>
   );

@@ -297,6 +297,8 @@ export default {
     resumeFailedRemember: " Install agent hooks so Termic remembers the one you pick.",
     resumeFailedSaid: " {{agent}} said: \"{{why}}\"",
     moreAgentsTip: "More agents than fit here. Widen the window, or switch tabs to see them.",
+    elsewhere: "This terminal is in use on another screen.",
+    continueHere: "Continue here",
     yoloRestartTitle: "Restart {{agent}} to {{action}} YOLO?",
     yoloEnable: "enable",
     yoloDisable: "disable",

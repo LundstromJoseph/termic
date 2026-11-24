@@ -147,6 +147,8 @@ export default {
     startAgent: "Start agent",
     stopFailed: "Could not stop the agent on {{machine}}: {{error}}",
     copyPath: "Copy path on the server",
+    elsewhere: "This terminal is in use on another screen.",
+    continueHere: "Continue here",
     newOnServer: "New",
     terminal: "Terminal",
     on: "On {{machine}}",

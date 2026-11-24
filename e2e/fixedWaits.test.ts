@@ -76,6 +76,12 @@ const ALLOWED: Record<string, { count: number; why: string }> = {
       + "Written at each call site, never inside a helper, so this count is the "
       + "real number of waits",
   },
+  "peers.e2e.ts": {
+    count: 1,
+    why: "negative: a click on a paired terminal another screen sized must NOT "
+      + "claim the size back (only Continue here does); nothing fires for a "
+      + "term_size that is never sent",
+  },
   "remote.e2e.ts": {
     count: 5,
     why: "negatives: a resync of the box must not undo a pin and a name the "

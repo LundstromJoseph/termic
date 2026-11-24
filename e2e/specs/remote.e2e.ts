@@ -260,34 +260,36 @@ describe("Phones and servers", () => {
     await waitVisible('[data-testid="remote-section"]');
   });
 
-  it("lets the last window worked in own a terminal's size; this pane scales meanwhile", async () => {
+  it("hides a terminal another screen took, behind Continue here; only that takes it back", async () => {
     const task = await openTask("size-owner");
     await waitForAgentPty(task);
     const tab = await browser.execute((t) => (window.__termic!.useApp.getState().tabs[t] ?? []).find((x: any) => x.ptyId)!.id as string, task);
     const pane = () => browser.execute((id) => {
       const h = document.querySelector(`[data-terminal-host="${id}"]`) as HTMLElement;
       const x = h.querySelector(".xterm") as HTMLElement;
-      return { transform: x.style.transform };
+      const o = h.querySelector('[data-testid="terminal-elsewhere"]') as HTMLElement | null;
+      return { hidden: x.style.display === "none", overlay: !!o && !o.classList.contains("hidden") };
     }, tab);
-    expect((await pane()).transform).toBe("");
-    // A viewer elsewhere works in it: the PTY takes its size and this pane
-    // draws that size scaled, instead of garbling into its own grid.
+    expect(await pane()).toEqual({ hidden: false, overlay: false });
+    // A viewer elsewhere takes it: the PTY takes its size, and this pane
+    // stops drawing (one terminal draws at a time) behind the overlay.
     const p = await phone(link, phoneId, "My iPhone");
     p.send({ t: "term_open", task: "size-owner" });
     await browser.waitUntil(async () => p.seen.some(m => m.t === "term_reset"), { timeout: 20_000, timeoutMsg: "the terminal never opened" });
     p.send({ t: "term_size", cols: 40, rows: 12 });
-    await browser.waitUntil(async () => (await pane()).transform.startsWith("scale("),
-      { timeout: 10_000, timeoutMsg: "this pane did not scale to the viewer's size" });
-    // The terminal's own traffic does not count: a focus (programmatic, as
-    // a redraw's focus report rides on) leaves it scaled. Counting it made
-    // two windows on one task take the size from each other forever.
+    await browser.waitUntil(async () => { const v = await pane(); return v.hidden && v.overlay; },
+      { timeout: 10_000, timeoutMsg: "this pane did not hide behind the overlay" });
+    await snap("terminal-elsewhere.png");
+    // A click or a focus anywhere else does not take it back: two focused
+    // screens traded the size on every touch when it did.
+    await browser.execute((id) => document.querySelector(`[data-terminal-host="${id}"]`)!.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true })), tab);
     await browser.execute((id) => (document.querySelector(`[data-terminal-host="${id}"] textarea`) as HTMLTextAreaElement | null)?.focus(), tab);
     await browser.pause(400);
-    expect((await pane()).transform.startsWith("scale(")).toBe(true);
-    // Worked in here again: it takes its own size back, unscaled.
-    await browser.execute((id) => document.querySelector(`[data-terminal-host="${id}"]`)!.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true })), tab);
-    await browser.waitUntil(async () => (await pane()).transform === "",
-      { timeout: 10_000, timeoutMsg: "a click here did not take the size back" });
+    expect(await pane()).toEqual({ hidden: true, overlay: true });
+    // Continue here does, and the terminal is back.
+    await browser.execute((id) => (document.querySelector(`[data-terminal-host="${id}"] [data-testid="terminal-continue-here"]`) as HTMLElement).click(), tab);
+    await browser.waitUntil(async () => { const v = await pane(); return !v.hidden && !v.overlay; },
+      { timeout: 10_000, timeoutMsg: "Continue here did not take the size back" });
     p.close();
     await cliRpc({ cmd: "archive", task: "size-owner", force: true });
     await browser.execute(() => window.__termic!.useApp.getState().openSettings("remote"));

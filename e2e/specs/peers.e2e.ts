@@ -1019,30 +1019,31 @@ describe("LAN pairing", () => {
       await waitForAttr('[data-testid="remote-terminal"]', "data-opened", "true");
       await browser.waitUntil(async () => !!(await browser.execute(() => document.querySelector('[data-testid="remote-terminal"]')!.getAttribute("data-size"))),
         { timeout: 5_000, timeoutMsg: "the backlog never arrived" });
-      // The last window worked in owns the size. Opening it is working in it:
-      // this pane claims its size and draws unscaled once the host confirms.
+      // The last screen to take it owns the size. Opening it is taking it:
+      // this pane claims its size, with no overlay.
       const view = () => browser.execute(() => {
         const h = document.querySelector('[data-testid="remote-terminal"]') as HTMLElement;
         const x = h.querySelector(".xterm") as HTMLElement;
-        const r = x.getBoundingClientRect(), b = h.getBoundingClientRect();
-        return { owner: h.dataset.owner, scale: Number(h.dataset.scale), fits: r.width <= b.width + 1 && r.height <= b.height + 1, size: h.dataset.size };
+        return { owner: h.dataset.owner, hidden: x.style.display === "none", overlay: !!document.querySelector('[data-testid="terminal-elsewhere"]'), size: h.dataset.size };
       });
       await browser.waitUntil(async () => hostSaw.some(m => m.t === "term_size"), { timeout: 5_000, timeoutMsg: "opening it never claimed the size" });
       await browser.waitUntil(async () => (await view()).owner === "true", { timeout: 5_000, timeoutMsg: "the claimed size never applied" });
-      expect((await view()).scale).toBe(1);
-      // The other machine's window is worked in: it takes the size back, and
-      // this pane draws that size scaled to fit, without asking again.
+      expect((await view()).overlay).toBe(false);
+      // The other machine takes it back: this pane hides behind the overlay
+      // without asking again, and a click elsewhere does not take it.
       const asked = hostSaw.filter(m => m.t === "term_size").length;
       hostSend({ t: "term_resize", cols: 200, rows: 60 });
-      await browser.waitUntil(async () => { const v = await view(); return v.owner === "false" && v.size === "200x60"; },
-        { timeout: 5_000, timeoutMsg: "the host taking the size back did not reach the view" });
-      const scaled = await view();
-      expect(scaled.fits).toBe(true);
-      expect(scaled.scale).toBeLessThan(1);
-      expect(hostSaw.filter(m => m.t === "term_size").length).toBe(asked);
-      // A click here takes it again.
+      await browser.waitUntil(async () => { const v = await view(); return v.owner === "false" && v.size === "200x60" && v.hidden && v.overlay; },
+        { timeout: 5_000, timeoutMsg: "the host taking the size back did not raise the overlay" });
       await browser.execute(() => document.querySelector('[data-testid="remote-terminal"]')!.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true })));
-      await browser.waitUntil(async () => (await view()).owner === "true", { timeout: 5_000, timeoutMsg: "a click did not take the size back" });
+      // Negative: a click must NOT claim the size, and nothing fires for a
+      // term_size that is never sent; 300 ms outlasts the rAF + IPC it took.
+      await browser.pause(300);
+      expect(hostSaw.filter(m => m.t === "term_size").length).toBe(asked);
+      await snap("remote-terminal-elsewhere.png");
+      // Continue here takes it again.
+      await clickPresent('[data-testid="terminal-continue-here"]');
+      await browser.waitUntil(async () => { const v = await view(); return v.owner === "true" && !v.hidden && !v.overlay; }, { timeout: 5_000, timeoutMsg: "Continue here did not take the size back" });
       // The terminal and nothing else: the phone's card, transcript and
       // composer stand in for a keyboard, and this window has one.
       const extras = await browser.execute(() =>

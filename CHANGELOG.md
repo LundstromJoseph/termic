@@ -4,7 +4,7 @@ All notable changes to Termic, newest first. This file is the human-authored
 source of truth: the in-app Update card and the /changelog page on termic.dev
 are generated from it. See the `release` skill for how entries are added.
 
-## [2.0.0] - 2026-11-23
+## [2.0.1] - 2026-11-24
 
 Remote control: your phone, your own servers, and your other computers.
 
@@ -21,7 +21,7 @@ Remote control: your phone, your own servers, and your other computers.
 
 ### Paired computers
 - Pair two computers running Termic and agents on either can start and drive tasks on the other. A paired computer's tasks show in your sidebar under REMOTE, filed as it files them, following your sidebar settings.
-- Open one of its tasks and work in its terminal from here. The last window you work in sets the terminal's size; the other shows it scaled to fit.
+- Open one of its tasks and work in its terminal from here. One screen shows a terminal at a time: the others say it is in use elsewhere, with Continue here to take it back.
 - Stop a task from here and it stops there too; Reopen starts it again in its last session.
 - Copy and paste cross over: what an agent copies lands on your clipboard here, and Ctrl+V with an image attaches it to the agent there, as a local paste does. On a server, the image is put on the server for the agent.
 - Its terminal takes your keys as a local one does: Shift+Enter adds a line, ⌘⌫ and ⌘←/⌘→ edit the line, and app shortcuts reach the app.
@@ -37,6 +37,7 @@ Remote control: your phone, your own servers, and your other computers.
 - No more "Message queue finished" notice, and archiving from a merged PR's notice no longer adds a second "Archived" one.
 
 ### Bug fixes
+- A terminal open on two screens at once (a phone and a Mac, or two Macs) no longer blanks and redraws over and over.
 - Connecting to a paired computer no longer waits on addresses it cannot reach (a Mac's virtual network bridges): an Ubuntu machine pairing with a Mac waited seconds per address.
 - A task started with a prompt (New task with a prompt, a PR review, a race) comes back in its Claude session after a restart, instead of a fresh one.
 - With two profile windows open, a running task no longer reads as inactive to `termic status` and MCP.

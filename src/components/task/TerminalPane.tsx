@@ -3513,47 +3513,53 @@ const captureArmedRef = useRef(false);
     // new output happens to scroll the buffer. See lib/xtermViewportSync.
     let wasHiddenAtZeroGeometry = false;
     // Sized from outside (a phone, another computer, `termic attach`): the
-    // last window worked in owns a terminal's size. Meanwhile this pane draws
-    // at that size, scaled to fit, and a click or a key in this window takes
-    // the size back. Before, the program drew for the other
-    // size into this pane's grid, garbled until this window was resized.
+    // last screen to take a terminal owns its size. Meanwhile this pane hides
+    // its terminal (display:none, so the renderer pauses) behind an overlay,
+    // and only its Continue here takes the size back. Before, it drew the
+    // other size scaled down, and any click in the window took the size
+    // back: two focused screens on one task traded it on every touch, and
+    // each trade blanked and redrew the phone's terminal.
     let remoteSized = false;
-    const rescale = () => {
-      const el = term.element;
-      if (!el || !el.offsetWidth || !el.offsetHeight) return;
-      const sc = Math.min(host.clientWidth / el.offsetWidth, host.clientHeight / el.offsetHeight, 1.5);
-      el.style.transformOrigin = "top left";
-      el.style.transform = `scale(${sc})`;
+    const overlay = document.createElement("div");
+    overlay.dataset.testid = "terminal-elsewhere";
+    overlay.className = "absolute inset-0 z-10 hidden flex-col items-center justify-center gap-3 bg-[var(--color-bg)] text-[13px] text-[var(--color-fg-dim)]";
+    const overlayText = document.createElement("p");
+    overlayText.textContent = i18n.t("task:terminal.elsewhere");
+    const overlayBtn = document.createElement("button");
+    overlayBtn.type = "button";
+    overlayBtn.dataset.testid = "terminal-continue-here";
+    overlayBtn.className = "rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-[13px] font-medium text-[var(--color-accent-fg)] hover:opacity-90";
+    overlayBtn.textContent = i18n.t("task:terminal.continueHere");
+    overlay.append(overlayText, overlayBtn);
+    host.appendChild(overlay);
+    const showElsewhere = (on: boolean) => {
+      overlay.classList.toggle("hidden", !on);
+      overlay.classList.toggle("flex", on);
+      if (term.element) term.element.style.display = on ? "none" : "";
     };
     const reclaim = () => {
       if (!remoteSized) return;
       remoteSized = false;
-      if (term.element) term.element.style.transform = "";
+      showElsewhere(false);
       try { fit.fit(); } catch {}
+      term.refresh(0, term.rows - 1);
+      term.focus();
     };
+    overlayBtn.addEventListener("click", reclaim);
     const unlistenSized = listen<{ ptyId: string; cols: number; rows: number }>("termic://pty-resized", ({ payload }) => {
       if (!payload || payload.ptyId !== ptyRef.current) return;
       const own = fit.proposeDimensions();
       remoteSized = !(own && own.cols === payload.cols && own.rows === payload.rows);
       if (term.cols !== payload.cols || term.rows !== payload.rows) term.resize(payload.cols, payload.rows);
-      if (remoteSized) requestAnimationFrame(rescale);
-      else if (term.element) term.element.style.transform = "";
+      showElsewhere(remoteSized);
     });
-    // Only a person takes the size back: a click or a key anywhere in this
-    // window (the sidebar included) while this terminal is on screen. Never
-    // the terminal's own traffic: focus reports and query replies flow on
-    // every redraw, and counting them made two windows on one task take the
-    // size from each other forever.
-    const onHuman = () => requestAnimationFrame(() => { if (host.offsetParent) reclaim(); });
-    window.addEventListener("pointerdown", onHuman, true);
-    window.addEventListener("keydown", onHuman, true);
     const ro = new ResizeObserver((entries) => {
       for (const e of entries) {
         const r = e.contentRect;
         if (r.width === 0 || r.height === 0) { wasHiddenAtZeroGeometry = true; return; }
       }
-      // Drawn at another window's size: fit the drawing, keep the size.
-      if (remoteSized) { rescale(); return; }
+      // Another screen owns the size: keep it, the overlay is up.
+      if (remoteSized) return;
       try { fit.fit(); } catch {}
       if (wasHiddenAtZeroGeometry) {
         wasHiddenAtZeroGeometry = false;
@@ -3566,8 +3572,7 @@ const captureArmedRef = useRef(false);
       cancelled = true;
       ro.disconnect();
       void unlistenSized.then(u => u());
-      window.removeEventListener("pointerdown", onHuman, true);
-      window.removeEventListener("keydown", onHuman, true);
+      overlay.remove();
       // This PTY's conversation is over (closed, or restarted into a new one),
       // so its context reading describes nothing any more.
       useAgentContext.getState().clearTab(task.id, tab.cli ?? "claude", tab.id);

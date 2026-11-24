@@ -292,6 +292,8 @@ export default {
     resumeFailedRemember: " 安装智能体钩子，Termic 才能记住你选的会话。",
     resumeFailedSaid: " {{agent}} 说：“{{why}}”",
     moreAgentsTip: "这里放不下了。加宽窗口，或切换标签页查看其余智能体。",
+    elsewhere: "此终端正在另一个屏幕上使用。",
+    continueHere: "在此继续",
     yoloRestartTitle: "重启 {{agent}} 以{{action}} YOLO？",
     yoloEnable: "启用",
     yoloDisable: "禁用",
