@@ -3896,6 +3896,15 @@ impl PtyFeed {
             .taps
             .retain(|tx| tx.try_send(PtyTapMsg::Data(data.to_vec())).is_ok());
     }
+    /// An empty chunk to every tap, outside the ring: wakes each forwarder
+    /// so it re-reads the PTY's size now. A forwarder learns of a resize
+    /// only per chunk, and an idle agent prints none, so a phone watching
+    /// a terminal the desktop took back was never told (no overlay; a
+    /// stale screen until the agent next printed).
+    fn nudge(&self) {
+        let mut inner = self.inner.lock();
+        inner.taps.retain(|tx| tx.try_send(PtyTapMsg::Data(Vec::new())).is_ok());
+    }
     fn send_detach(&self, reason: &str) {
         let mut inner = self.inner.lock();
         inner
@@ -4160,6 +4169,9 @@ pub(crate) fn pty_resize_inner(
         slot.master
             .resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
             .map_err(|e| e.to_string())?;
+        if let Some(feed) = &slot.feed {
+            feed.nudge();
+        }
     }
     Ok(())
 }
@@ -33990,6 +34002,22 @@ mod tests {
         let t0 = Instant::now();
         wait_for_attach(&buf, &attached, &done, Duration::from_secs(30));
         assert!(t0.elapsed() < Duration::from_secs(1), "took {:?}", t0.elapsed());
+    }
+
+    #[test]
+    fn a_resize_nudge_wakes_every_tap_and_adds_nothing_to_the_backlog() {
+        // A phone watching a terminal must hear of a resize while the agent
+        // is idle: the nudge is the wake-up its forwarder checks the size on.
+        let feed = PtyFeed::new();
+        feed.push(b"screen");
+        let (_, _, rx, _tx) = feed.subscribe();
+        feed.nudge();
+        match rx.recv_timeout(std::time::Duration::from_secs(1)) {
+            Ok(PtyTapMsg::Data(d)) => assert!(d.is_empty(), "a nudge carries no bytes"),
+            other => panic!("expected a nudge, got {:?}", other.is_ok()),
+        }
+        let (backlog, _, _, _) = feed.subscribe();
+        assert_eq!(backlog, b"screen", "a nudge is not output");
     }
 
     #[test]

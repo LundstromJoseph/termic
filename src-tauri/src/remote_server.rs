@@ -527,7 +527,10 @@ fn forward_term(s: &Session, rx: mpsc::Receiver<crate::PtyTapMsg>, pty_id: Strin
                         send(s, ServerMsg::TermResize { cols: now.1, rows: now.0 });
                     }
                 }
-                s.out.term(bytes);
+                // Empty: a resize nudge (PtyFeed::nudge), not output.
+                if !bytes.is_empty() {
+                    s.out.term(bytes);
+                }
             }
             Ok(crate::PtyTapMsg::Detach(reason)) => {
                 if reason != CLOSE_TAP {

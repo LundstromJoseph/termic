@@ -4,7 +4,7 @@ All notable changes to Termic, newest first. This file is the human-authored
 source of truth: the in-app Update card and the /changelog page on termic.dev
 are generated from it. See the `release` skill for how entries are added.
 
-## [2.0.1] - 2026-11-24
+## [2.0.2] - 2026-11-24
 
 Remote control: your phone, your own servers, and your other computers.
 
@@ -38,6 +38,7 @@ Remote control: your phone, your own servers, and your other computers.
 
 ### Bug fixes
 - A terminal open on two screens at once (a phone and a Mac, or two Macs) no longer blanks and redraws over and over.
+- A phone watching a terminal hears at once when a Mac takes it back, even while the agent is idle.
 - Connecting to a paired computer no longer waits on addresses it cannot reach (a Mac's virtual network bridges): an Ubuntu machine pairing with a Mac waited seconds per address.
 - A task started with a prompt (New task with a prompt, a PR review, a race) comes back in its Claude session after a restart, instead of a fresh one.
 - With two profile windows open, a running task no longer reads as inactive to `termic status` and MCP.

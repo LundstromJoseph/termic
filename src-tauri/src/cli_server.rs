@@ -537,6 +537,8 @@ fn run_attach_session(
     // place, its usual cause is a tap force-dropped for falling behind.
     let reason = loop {
         match attachment.rx.recv() {
+            // Empty: a resize nudge (PtyFeed::nudge), not output.
+            Ok(crate::PtyTapMsg::Data(bytes)) if bytes.is_empty() => {}
             Ok(crate::PtyTapMsg::Data(bytes)) => {
                 if proto::write_msg(&mut writer, &proto::AttachFrame::out(&bytes)).is_err() {
                     // Client socket gone; the input thread sees EOF too.

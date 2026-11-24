@@ -177,7 +177,13 @@ another screen" with **Continue here**, the only thing that sends
 `term_size` again (`RemoteTerminal`; the phone's `TerminalView` does the
 same). The host's own pane learns of an outside resize from
 `termic://pty-resized` (emitted by the host's `pty_set_size`) and shows
-the same overlay (`TerminalPane`). A desktop host still restores its
+the same overlay (`TerminalPane`). A viewer learns of a resize from
+`term_resize`, which the host's forwarder sends when it sees a new PTY
+size; it looks per output chunk, so every resize also sends the PTY's
+watchers an empty chunk (`PtyFeed::nudge`). Without it, a phone watching
+an idle agent was never told the desktop took the terminal back
+(checked on the phone app against the e2e desktop: with the nudge off,
+the phone's overlay never appears). A desktop host still restores its
 size when the viewer closes the terminal (`restore`).
 
 History, because each step was a real bug: 1.25.3 resized with nothing
