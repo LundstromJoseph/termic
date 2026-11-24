@@ -3522,7 +3522,7 @@ const captureArmedRef = useRef(false);
     let remoteSized = false;
     const overlay = document.createElement("div");
     overlay.dataset.testid = "terminal-elsewhere";
-    overlay.className = "absolute inset-0 z-10 hidden flex-col items-center justify-center gap-3 bg-[var(--color-bg)] text-[13px] text-[var(--color-fg-dim)]";
+    overlay.className = "absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-[var(--color-bg)] text-[13px] text-[var(--color-fg-dim)]";
     const overlayText = document.createElement("p");
     overlayText.textContent = i18n.t("task:terminal.elsewhere");
     const overlayBtn = document.createElement("button");
@@ -3531,10 +3531,11 @@ const captureArmedRef = useRef(false);
     overlayBtn.className = "rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-[13px] font-medium text-[var(--color-accent-fg)] hover:opacity-90";
     overlayBtn.textContent = i18n.t("task:terminal.continueHere");
     overlay.append(overlayText, overlayBtn);
-    host.appendChild(overlay);
+    // In the DOM only while shown: a hidden button in every pane is noise
+    // (and was picked up by anything listing a tab's buttons).
     const showElsewhere = (on: boolean) => {
-      overlay.classList.toggle("hidden", !on);
-      overlay.classList.toggle("flex", on);
+      if (on && !overlay.isConnected) host.appendChild(overlay);
+      else if (!on) overlay.remove();
       if (term.element) term.element.style.display = on ? "none" : "";
     };
     const reclaim = () => {

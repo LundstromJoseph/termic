@@ -268,7 +268,7 @@ describe("Phones and servers", () => {
       const h = document.querySelector(`[data-terminal-host="${id}"]`) as HTMLElement;
       const x = h.querySelector(".xterm") as HTMLElement;
       const o = h.querySelector('[data-testid="terminal-elsewhere"]') as HTMLElement | null;
-      return { hidden: x.style.display === "none", overlay: !!o && !o.classList.contains("hidden") };
+      return { hidden: x.style.display === "none", overlay: !!o };
     }, tab);
     expect(await pane()).toEqual({ hidden: false, overlay: false });
     // A viewer elsewhere takes it: the PTY takes its size, and this pane
