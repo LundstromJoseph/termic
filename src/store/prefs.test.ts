@@ -1151,8 +1151,9 @@ describe("newTaskButtonShown", () => {
     expect(newTaskButtonShown("auto", 5, 2)).toBe(true);
     expect(newTaskButtonShown("auto", 5, 3)).toBe(false);
     expect(newTaskButtonShown("always", 5, 9)).toBe(true);
-    expect(parseNewTaskButton("bogus")).toBe("empty");
-    expect(parseNewTaskButton("")).toBe("empty");
+    expect(parseNewTaskButton("bogus")).toBe("always");
+    expect(parseNewTaskButton("")).toBe("always");
+    expect(parseNewTaskButton("empty")).toBe("empty");
     expect(parseNewTaskButton("auto")).toBe("auto");
   });
 });

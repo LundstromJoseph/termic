@@ -1189,11 +1189,10 @@ export function parseScheduledNav(raw: string): ScheduledNavMode {
 export type { LauncherVisibility } from "@/lib/launcherUsage";
 export type NewTaskButtonMode = "empty" | "auto" | "always";
 export function parseNewTaskButton(raw: string): NewTaskButtonMode {
-  // Default "empty": the header's `+` is how a task starts; the button under
-  // a project's tasks only where there are none yet. "auto" (also under every
-  // project while there are two or fewer) left a `+` row under each project,
-  // server projects included, as spacing nobody asked for.
-  return raw === "auto" || raw === "always" ? raw : "empty";
+  // Default "always": the button under a project's tasks is the visible way
+  // to start one (the header's `+` is hover-only beside it). "empty" (only
+  // where a project has none yet) is the opt-out in Settings.
+  return raw === "auto" || raw === "empty" ? raw : "always";
 }
 /** Whether a project draws the "New task" button under its tasks. */
 export function newTaskButtonShown(mode: NewTaskButtonMode, taskCount: number, projectCount: number): boolean {
