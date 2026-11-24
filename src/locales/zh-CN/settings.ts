@@ -561,6 +561,12 @@ export default {
       hint: "原生的 {{scale}}%。像浏览器缩放一样缩放整个应用（侧边栏、标签页、文件与 git 面板、终端）。\n快捷键：{{cmd}} +、{{cmd}} -、{{cmd}} 0。",
     },
     sidebarHeading: "侧边栏",
+    sidebarGroups: {
+      nav: "导航",
+      status: "状态",
+      projects: "项目与任务",
+      remote: "远程",
+    },
     expand: {
       label: "任务展开方式",
       hint: "任务的智能体列表在侧边栏中的展开方式。",

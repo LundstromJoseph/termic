@@ -562,6 +562,12 @@ export default {
       hint: "{{scale}}% of native. Scales the whole app (sidebar, tabs, files and git panels, terminals) like browser zoom.\nShortcuts: {{cmd}} +, {{cmd}} -, {{cmd}} 0.",
     },
     sidebarHeading: "Sidebar",
+    sidebarGroups: {
+      nav: "Navigation",
+      status: "Status",
+      projects: "Projects and tasks",
+      remote: "Remote",
+    },
     expand: {
       label: "Task expand behavior",
       hint: "How a task's agent list reveals itself in the sidebar.",
