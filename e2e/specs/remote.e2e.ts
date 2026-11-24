@@ -283,6 +283,8 @@ describe("Phones and servers", () => {
     // It says who has it, not just "another screen".
     expect(await browser.execute((id) => document.querySelector(`[data-terminal-host="${id}"] [data-testid="terminal-elsewhere"]`)!.textContent, tab))
       .toContain("My iPhone");
+    expect(await browser.execute((id) => (document.querySelector(`[data-terminal-host="${id}"] [data-testid="terminal-elsewhere-icon"]`) as HTMLElement).dataset.kind, tab))
+      .toBe("phone");
     // A click or a focus anywhere else does not take it back: two focused
     // screens traded the size on every touch when it did.
     await browser.execute((id) => document.querySelector(`[data-terminal-host="${id}"]`)!.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true })), tab);

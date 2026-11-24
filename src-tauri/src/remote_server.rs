@@ -273,7 +273,8 @@ fn handle(s: &Arc<Session>, msg: ClientMsg) {
                 if t.restore.is_none() {
                     t.restore = s.host.pty_size(&t.pty_id);
                 }
-                if s.host.pty_set_size(&t.pty_id, rows, cols, Some(&s.client.name)).is_ok() {
+                let kind = if s.client.kind == ClientKind::Phone { "phone" } else { "computer" };
+                if s.host.pty_set_size(&t.pty_id, rows, cols, Some((kind, &s.client.name))).is_ok() {
                     // Say so now: the forwarder notices a new size only on the
                     // next output, and an idle agent prints none.
                     send(s, ServerMsg::TermResize { cols, rows });

@@ -22,7 +22,7 @@ import { create } from "zustand";
 import { useTranslation } from "react-i18next";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
-import { Archive, Monitor, Play, Server, SquareTerminal, X } from "lucide-react";
+import { Archive, Monitor, Play, Server, SquareTerminal, X, MonitorSmartphone } from "lucide-react";
 import { useApp } from "@/store/app";
 import { CliIcon, CLI_BRAND_COLOR, resolveIconId } from "@/icons/cli";
 import { Button } from "@/components/ui/Button";
@@ -366,7 +366,8 @@ function RemoteTerminal({ machineId, taskId, tabId, agent }: { machineId: string
         <div ref={host} data-testid="remote-terminal" className="h-full w-full overflow-hidden" />
         {elsewhere && (
           <div data-testid="terminal-elsewhere" className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-[var(--color-bg)] text-[13px] text-[var(--color-fg-dim)]">
-            <p>{t("task.elsewhere")}</p>
+            <MonitorSmartphone data-testid="terminal-elsewhere-icon" className="h-10 w-10 text-[var(--color-fg-faint)]" strokeWidth={1.5} />
+            <p className="text-[14px] text-[var(--color-fg)]">{t("task.elsewhere")}</p>
             <Button size="sm" data-testid="terminal-continue-here" onClick={() => continueHere.current?.()}>{t("task.continueHere")}</Button>
           </div>
         )}

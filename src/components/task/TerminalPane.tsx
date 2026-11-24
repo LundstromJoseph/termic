@@ -101,6 +101,15 @@ const SETUP_AUTO_CLOSE_S = 5;
  *  this long after the resize, or after RECLAIM_MAX_MS whatever happens. */
 const RECLAIM_QUIET_MS = 200;
 const RECLAIM_MAX_MS = 1_000;
+/** The in-use overlay's icon by what took the terminal (lucide's smartphone,
+ *  monitor, square-terminal and monitor-smartphone, as path data: the
+ *  overlay is built outside React). */
+const ELSEWHERE_ICONS: Record<string, string> = {
+  phone: '<rect width="14" height="20" x="5" y="2" rx="2" ry="2"/><path d="M12 18h.01"/>',
+  computer: '<rect width="20" height="14" x="2" y="3" rx="2"/><line x1="8" x2="16" y1="21" y2="21"/><line x1="12" x2="12" y1="17" y2="21"/>',
+  cli: '<path d="m7 11 2-2-2-2"/><path d="M11 13h4"/><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/>',
+  "": '<path d="M18 8V6a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h8"/><path d="M10 19v-3.96 3.15"/><path d="M7 19h5"/><rect width="6" height="10" x="16" y="12" rx="2"/>',
+};
 
 // How long after an interrupt keystroke the TITLE may end a turn. Wide enough
 // for the agent to tear down and repaint (claude took 40-110ms, measured on
@@ -3527,14 +3536,24 @@ const captureArmedRef = useRef(false);
     const overlay = document.createElement("div");
     overlay.dataset.testid = "terminal-elsewhere";
     overlay.className = "absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-[var(--color-bg)] text-[13px] text-[var(--color-fg-dim)]";
+    // What has it, drawn big above the words: a phone, a computer, or the CLI.
+    const overlayIcon = document.createElement("div");
+    overlayIcon.dataset.testid = "terminal-elsewhere-icon";
+    overlayIcon.className = "text-[var(--color-fg-faint)]";
+    const setOverlayIcon = (kind: string | null | undefined) => {
+      overlayIcon.dataset.kind = kind ?? "";
+      overlayIcon.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">${ELSEWHERE_ICONS[kind ?? ""] ?? ELSEWHERE_ICONS[""]}</svg>`;
+    };
+    setOverlayIcon(null);
     const overlayText = document.createElement("p");
+    overlayText.className = "text-[14px] text-[var(--color-fg)]";
     overlayText.textContent = i18n.t("task:terminal.elsewhere");
     const overlayBtn = document.createElement("button");
     overlayBtn.type = "button";
     overlayBtn.dataset.testid = "terminal-continue-here";
     overlayBtn.className = "rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-[13px] font-medium text-[var(--color-accent-fg)] hover:opacity-90";
     overlayBtn.textContent = i18n.t("task:terminal.continueHere");
-    overlay.append(overlayText, overlayBtn);
+    overlay.append(overlayIcon, overlayText, overlayBtn);
     // In the DOM only while shown: a hidden button in every pane is noise
     // (and was picked up by anything listing a tab's buttons).
     const showElsewhere = (on: boolean) => {
@@ -3576,10 +3595,11 @@ const captureArmedRef = useRef(false);
       reclaimTimers.push(setTimeout(lift, RECLAIM_MAX_MS));
     };
     overlayBtn.addEventListener("click", reclaim);
-    const unlistenSized = listen<{ ptyId: string; cols: number; rows: number; by?: string | null }>("termic://pty-resized", ({ payload }) => {
+    const unlistenSized = listen<{ ptyId: string; cols: number; rows: number; by?: string | null; byKind?: string | null }>("termic://pty-resized", ({ payload }) => {
       if (!payload || payload.ptyId !== ptyRef.current) return;
       const own = fit.proposeDimensions();
       remoteSized = !(own && own.cols === payload.cols && own.rows === payload.rows);
+      setOverlayIcon(payload.byKind);
       overlayText.textContent = payload.by
         ? i18n.t("task:terminal.elsewhereOn", { name: payload.by })
         : i18n.t("task:terminal.elsewhere");
