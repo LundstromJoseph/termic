@@ -20,7 +20,17 @@ pub fn parse_claude_jsonl(jsonl: &str) -> Vec<Turn> {
     let mut out: Vec<Turn> = Vec::new();
     // Prompts typed while Claude works wait in its queue (enqueue, then a
     // remove once Claude reads them): still waiting at the end = "queued".
+    // The operations alone drift: a dequeue names nothing, a remove's text
+    // can differ from its enqueue, and popAll empties it. So a prompt also
+    // leaves the queue when it shows up as sent, and a finished turn
+    // empties it (Claude drains its queue when a turn ends). Without these,
+    // a long session left consumed prompts on the phone as Queued for good.
     let mut queue: Vec<(String, Option<String>)> = Vec::new();
+    let sent = |queue: &mut Vec<(String, Option<String>)>, text: &str| {
+        if let Some(i) = queue.iter().position(|(q, _)| q == text.trim()) {
+            queue.remove(i);
+        }
+    };
     for line in jsonl.lines() {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
         if v.get("type").and_then(|t| t.as_str()) == Some("queue-operation") {
@@ -29,6 +39,7 @@ pub fn parse_claude_jsonl(jsonl: &str) -> Vec<Turn> {
                 Some("enqueue") if !text.is_empty() => {
                     queue.push((text, v.get("timestamp").and_then(|t| t.as_str()).map(str::to_string)))
                 }
+                Some("popAll") => queue.clear(),
                 // A dequeue names nothing: it takes the oldest.
                 Some("dequeue") | Some("remove") => {
                     let i = if text.is_empty() { Some(0) } else { queue.iter().position(|(q, _)| *q == text) };
@@ -54,6 +65,7 @@ pub fn parse_claude_jsonl(jsonl: &str) -> Vec<Turn> {
                 && a.and_then(|a| a.get("commandMode")).and_then(|m| m.as_str()) == Some("prompt");
             if let Some(text) = a.and_then(|a| a.get("prompt")).and_then(|p| p.as_str()).filter(|_| queued) {
                 let text = text.trim();
+                sent(&mut queue, text);
                 if !text.is_empty() {
                     out.push(Turn { role: "user".into(), text: text.into(), tool: None, ts });
                 }
@@ -62,6 +74,9 @@ pub fn parse_claude_jsonl(jsonl: &str) -> Vec<Turn> {
         }
         if kind != "user" && kind != "assistant" {
             continue;
+        }
+        if kind == "assistant" && v.pointer("/message/stop_reason").and_then(|r| r.as_str()) == Some("end_turn") {
+            queue.clear();
         }
         let Some(content) = v.pointer("/message/content") else { continue };
         let mut push = |role: &str, text: String, tool: Option<String>| {
@@ -77,6 +92,9 @@ pub fn parse_claude_jsonl(jsonl: &str) -> Vec<Turn> {
                 if kind == "user" && injected(text) {
                     continue;
                 }
+                if kind == "user" {
+                    sent(&mut queue, text);
+                }
                 push(kind, text.clone(), None);
             }
             serde_json::Value::Array(blocks) => {
@@ -86,6 +104,9 @@ pub fn parse_claude_jsonl(jsonl: &str) -> Vec<Turn> {
                             let text = b.get("text").and_then(|t| t.as_str()).unwrap_or("").to_string();
                             if kind == "user" && injected(&text) {
                                 continue;
+                            }
+                            if kind == "user" {
+                                sent(&mut queue, &text);
                             }
                             push(kind, text, None);
                         }
@@ -469,6 +490,45 @@ mod tests {
         .join("\n");
         let got: Vec<(String, String)> = parse_claude_jsonl(&jsonl).into_iter().skip(1).map(|t| (t.role, t.text)).collect();
         assert_eq!(got, vec![("user".into(), "now say PING".into()), ("assistant".into(), "PING".into())]);
+    }
+
+    /// The ways the queue operations alone drifted in long sessions, each
+    /// leaving a consumed prompt on the phone as Queued for good.
+    #[test]
+    fn a_consumed_prompt_never_stays_queued() {
+        let queued = |lines: &[&str]| -> Vec<String> {
+            parse_claude_jsonl(&lines.join("\n")).into_iter().filter(|t| t.role == "queued").map(|t| t.text).collect()
+        };
+        // A stale entry ahead of it: the nameless dequeue took the stale one.
+        assert!(queued(&[
+            r#"{"type":"queue-operation","operation":"enqueue","content":"stale"}"#,
+            r#"{"type":"queue-operation","operation":"remove","content":"stale, reworded"}"#,
+            r#"{"type":"queue-operation","operation":"enqueue","content":"fix the alignment"}"#,
+            r#"{"type":"queue-operation","operation":"dequeue"}"#,
+            r#"{"type":"user","message":{"content":[{"type":"text","text":"fix the alignment"}]}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"done"}],"stop_reason":"end_turn"}}"#,
+        ]).is_empty());
+        // popAll empties it.
+        assert!(queued(&[
+            r#"{"type":"queue-operation","operation":"enqueue","content":"a"}"#,
+            r#"{"type":"queue-operation","operation":"enqueue","content":"b"}"#,
+            r#"{"type":"queue-operation","operation":"popAll"}"#,
+        ]).is_empty());
+        // Sent (it shows up as a user line) even with no matching remove.
+        assert!(queued(&[
+            r#"{"type":"queue-operation","operation":"enqueue","content":"check the flag"}"#,
+            r#"{"type":"user","message":{"content":"check the flag"}}"#,
+        ]).is_empty());
+        // A finished turn: Claude drains its queue then, whatever was logged.
+        assert!(queued(&[
+            r#"{"type":"queue-operation","operation":"enqueue","content":"scheduled check"}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn"}}"#,
+        ]).is_empty());
+        // ...but one typed after the turn ended is still waiting.
+        assert_eq!(queued(&[
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn"}}"#,
+            r#"{"type":"queue-operation","operation":"enqueue","content":"next"}"#,
+        ]), vec!["next".to_string()]);
     }
 
     #[test]
