@@ -430,6 +430,24 @@ describe("merged-PR lifecycle (issue #21)", () => {
     expect(useUI.getState().toasts).toHaveLength(1);
   });
 
+  it("another profile's task: no toast here, and still unhandled for its own window", async () => {
+    seedApp("ask", { project_id: "p-other" }); // its project lives in another profile's window
+    vi.mocked(ipc.taskPrStatus).mockResolvedValue(lookupWith("open", 4242));
+    await usePr.getState().refresh("ws1", { force: true });
+    vi.mocked(ipc.taskPrStatus).mockResolvedValue(lookupWith("merged", 4242));
+    await usePr.getState().refresh("ws1", { force: true });
+    expect(useUI.getState().toasts).toHaveLength(0);
+    expect(ipc.notify).not.toHaveBeenCalled();
+    // The window it belongs to (the project is there) still announces it.
+    useApp.setState({ projects: [{ id: "p-other", name: "theirs" } as Project] });
+    usePr.setState({ byTask: {} });
+    vi.mocked(ipc.taskPrStatus).mockResolvedValue(lookupWith("open", 4242));
+    await usePr.getState().refresh("ws1", { force: true });
+    vi.mocked(ipc.taskPrStatus).mockResolvedValue(lookupWith("merged", 4242));
+    await usePr.getState().refresh("ws1", { force: true });
+    expect(useUI.getState().toasts).toHaveLength(1);
+  });
+
   it("first poll merged WITHOUT prior identity → silent (ancient branch)", async () => {
     seedApp(undefined, { id: "ws-ancient" });
     vi.mocked(ipc.taskPrStatus).mockResolvedValue(lookupWith("merged"));

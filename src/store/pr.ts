@@ -1115,6 +1115,12 @@ function maybeHandleMerged(taskId: string, prev: PrLookup | null | undefined, ne
   const app = useApp.getState();
   const task = app.tasks.find(w => w.id === taskId);
   if (!task || task.archived) return;
+  // Every window holds every profile's tasks; its projects are its own. A
+  // task of another profile is that window's to announce, so leave it
+  // unhandled here (the merge key is shared, and marking it would silence
+  // the window it belongs to).
+  const project = app.projects.find(p => p.id === task.project_id);
+  if (!project) return;
   const knewPr = prev?.pr != null || task.pr_number != null;
   const wasMerged = prev?.pr?.state === "merged";
   if (!knewPr || wasMerged) {
@@ -1125,8 +1131,7 @@ function maybeHandleMerged(taskId: string, prev: PrLookup | null | undefined, ne
   }
   rememberMergeHandled(taskId, next.pr.provider, next.pr.number);
 
-  const project = app.projects.find(p => p.id === task.project_id);
-  const mode = project?.on_pr_merge ?? "ask";
+  const mode = project.on_pr_merge ?? "ask";
   const label = prLabelShort(next.pr.provider, next.pr.number);
   if (mode === "off") return;
   // Same opt-in desktop notification as the comment watcher and every
