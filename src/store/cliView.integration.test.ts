@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 //
-// `termic view` (v30) driven through the REAL `viewFileHandler` against the
+// `termic view` (v32) driven through the REAL `viewFileHandler` against the
 // REAL store, ipc mocked. What matters is where the file lands (edit tab
 // inside the task, read-only external tab outside it), that it stays in the
 // background unless asked, and that nothing reaches an unmounted strip.

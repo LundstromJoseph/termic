@@ -248,6 +248,29 @@ pub fn group_text(d: &GroupData) -> String {
     lines.join("\n")
 }
 
+/// `run`: one line per configured script.
+pub fn run_text(d: &termic_proto::RunData) -> String {
+    if d.targets.is_empty() {
+        return format!("{} has no {} script configured", d.task, d.which);
+    }
+    d.targets
+        .iter()
+        .map(|t| {
+            let who = if t.member.is_empty() { d.task.clone() } else { format!("{} ({})", d.task, t.member) };
+            let state = match t.outcome.as_deref() {
+                Some("already_running") => "already running",
+                Some("not_running") => "was not running",
+                Some(o) => o,
+                None if t.running => "running",
+                None => "not running",
+            };
+            let tab = t.tab_id.as_deref().map(|id| format!(", tab {id}")).unwrap_or_default();
+            format!("{who}: {} {state}{tab}: {}", d.which, t.script)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// One line saying how a watched run ended.
 pub fn outcome_text(r: &WaitResult) -> String {
     match r.outcome {
@@ -1098,6 +1121,7 @@ mod tests {
             diff: Some(DiffStat { files_changed: 3, insertions: 10, deletions: 2, untracked: 1 }),
             group: None,
             spawned_by: None,
+            org: None,
         }
     }
 
@@ -1389,6 +1413,9 @@ api      longer-task-name  codex   -        -             b2";
             default_agent: "claude".into(),
             project_type: "multi".into(),
             members: vec![member("api", "/src/api", false, "origin/main"), member("handbook", "/src/docs", true, "")],
+            profile: None,
+            server: None,
+            non_git: false,
         }
     }
 
@@ -1402,6 +1429,9 @@ api      longer-task-name  codex   -        -             b2";
             default_agent: "claude".into(),
             project_type: "single".into(),
             members: Vec::new(),
+            profile: None,
+            server: None,
+            non_git: false,
         };
         let mut empty = shop();
         empty.name = "bare".into();
@@ -1702,6 +1732,9 @@ created web/fix-auth
             default_agent: "claude".into(),
             project_type: "single".into(),
             members: Vec::new(),
+            profile: None,
+            server: None,
+            non_git: false,
         };
         assert_eq!(project_add_text(&p), "added project web at /repo/web");
         let out = project_list_text(&[p]);

@@ -53,9 +53,10 @@ export default {
     commentsNotifyOther: "{{noun}} {{ref}} 上有 {{count}} 条新评论，已排入队列等待智能体",
     commentsNoAgentOne: "{{provider}} {{ref}} 上有 {{count}} 条新评论。没有正在运行的智能体可以接手。",
     commentsNoAgentOther: "{{provider}} {{ref}} 上有 {{count}} 条新评论。没有正在运行的智能体可以接手。",
-    mergedAutoToast: "{{label}} 已合并。正在归档「{{name}}」",
     mergedAutoNotify: "{{label}} 已合并，正在归档",
-    mergedAskToast: "{{label}} 已合并。归档「{{name}}」？",
+    mergedTitle: "{{label}} 已合并",
+    mergedAskBody: "归档「{{name}}」？",
+    mergedAutoBody: "正在归档「{{name}}」",
     mergedAskNotify: "{{label}} 已合并。归档「{{name}}」？",
     archiveAction: "归档",
   },
@@ -132,6 +133,12 @@ export default {
     notRunning: "该智能体已不再运行。",
     sentTo: "已将「{{title}}」发送给 {{label}}。",
     startFailed: "无法启动智能体来运行「{{title}}」。",
+  },
+
+  buildDirs: {
+    freedToast_one: "已从 {{count}} 个闲置任务释放 {{size}}",
+    freedToast_other: "已从 {{count}} 个闲置任务释放 {{size}}",
+    restoreToast: "{{name}} 的构建目录已于 {{date}} 清理。如有缺失，请重新安装依赖。",
   },
 
   runTabs: {

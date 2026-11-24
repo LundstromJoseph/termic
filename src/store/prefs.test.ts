@@ -322,6 +322,26 @@ describe("prefs: terminalRenderer", () => {
   });
 });
 
+describe("prefs: terminalRenderer reset", () => {
+  beforeEach(() => {
+    vi.stubGlobal("localStorage", fakeLocalStorage());
+    vi.resetModules();
+  });
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  it("reset forgets an explicit pick and returns to webgl", async () => {
+    localStorage.setItem("terminalRenderer", "canvas");
+    localStorage.setItem("terminalGpuEnabled", "0");
+    const { usePrefs } = await import("./prefs");
+    expect(usePrefs.getState().terminalRenderer).toBe("canvas");
+    usePrefs.getState().resetAppearance();
+    expect(usePrefs.getState().terminalRenderer).toBe("webgl");
+    expect(usePrefs.getState().terminalGpuEnabled).toBe(true);
+    expect(localStorage.getItem("terminalRenderer")).toBeNull();
+    expect(localStorage.getItem("terminalGpuEnabled")).toBeNull();
+  });
+});
+
 describe("prefs: editorThemeIdDark / editorThemeIdLight", () => {
   beforeEach(() => {
     vi.stubGlobal("localStorage", fakeLocalStorage());
@@ -383,7 +403,7 @@ describe("prefs: currentMinimumContrastRatio", () => {
 
   it("returns 1 (off) for dark-family themes", async () => {
     const { usePrefs, currentMinimumContrastRatio } = await import("./prefs");
-    for (const mode of ["dark", "claude", "solarized", "cobalt", "matrix", "rosepine"] as const) {
+    for (const mode of ["dark", "claude", "solarized", "cobalt", "matrix", "rosepine", "monokai"] as const) {
       usePrefs.getState().setThemeMode(mode);
       expect(currentMinimumContrastRatio()).toBe(1);
     }
@@ -1131,7 +1151,10 @@ describe("newTaskButtonShown", () => {
     expect(newTaskButtonShown("auto", 5, 2)).toBe(true);
     expect(newTaskButtonShown("auto", 5, 3)).toBe(false);
     expect(newTaskButtonShown("always", 5, 9)).toBe(true);
-    expect(parseNewTaskButton("bogus")).toBe("auto");
+    expect(parseNewTaskButton("bogus")).toBe("always");
+    expect(parseNewTaskButton("")).toBe("always");
+    expect(parseNewTaskButton("empty")).toBe("empty");
+    expect(parseNewTaskButton("auto")).toBe("auto");
   });
 });
 

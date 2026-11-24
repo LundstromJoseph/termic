@@ -2,7 +2,7 @@ import { execSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { archiveTask, FILE_MANAGER_NAME, waitForAgentReady, clickByText, clickMenuItem, clickWhenVisible, cliRpc, dismissOverlays, ensureActiveTask, openTask, pointerDrag, readClipboard, requireTermicApi, runCli, snap, waitForAgentPty, waitForAppShell, waitForText, waitForTextGone, waitForWorkBadge, waitGone, waitVisible, setInputValue, clickPresent, rmTree, textOf, newTaskSection, settledSnap } from "../helpers";
+import { archiveTask, spawnArgvLog, FILE_MANAGER_NAME, waitForAgentReady, clickByText, clickMenuItem, clickWhenVisible, cliRpc, dismissOverlays, ensureActiveTask, openTask, pointerDrag, readClipboard, requireTermicApi, runCli, snap, waitForAgentPty, waitForAppShell, waitForText, waitForTextGone, waitForWorkBadge, waitGone, waitVisible, setInputValue, clickPresent, rmTree, textOf, newTaskSection, settledSnap } from "../helpers";
 import { dataDir } from "../../wdio.conf.js";
 
 // Click a button by its exact text inside the NewTaskDialog specifically
@@ -253,13 +253,7 @@ describe("create task wizard", () => {
 
 /** Argv of every spawn a task has made, oldest first (the fixture logs it:
  *  terminal output is a canvas, so this is the only way to read it). */
-const spawnArgv = (id: string): string[] => {
-  const log = path.join(dataDir, "e2e-agent-argv.log");
-  if (!existsSync(log)) return [];
-  return readFileSync(log, "utf8").split("\n")
-    .filter((l) => l.startsWith(id + "\t"))
-    .map((l) => l.slice(id.length + 1));
-};
+const spawnArgv = spawnArgvLog;
 
 const firstSpawnArgv = async (id: string) => {
   await browser.waitUntil(async () => spawnArgv(id).length > 0, {
@@ -274,6 +268,22 @@ const firstSpawnArgv = async (id: string) => {
 // and flags a warning in a pane you have not opened, explanations live behind
 // (i) while warnings stay on screen, a disabled Create says what is missing
 // and goes there from any section, and Cmd+Enter creates.
+/** Where the picker column sits: beside the fields from a 1100px viewport
+ *  (`min-[1100px]:` in NewTaskDialog), stacked under them below it. CI
+ *  windows can be narrower than a desktop's, so the spec checks the layout
+ *  the viewport calls for instead of assuming the wide one. */
+async function pickerPlacement(): Promise<string> {
+  return browser.execute(() => {
+    const r = (sel: string) => document.querySelector(sel)!.getBoundingClientRect();
+    const fields = r('[data-testid="new-task-fields"]');
+    const picker = r('[data-testid="new-task-picker"]');
+    const beside = picker.x >= fields.x + fields.width && Math.abs(picker.y - fields.y) <= 1;
+    const below = picker.y >= fields.y + fields.height - 1;
+    const wide = window.innerWidth >= 1100;
+    return (wide ? beside : below) ? "beside or below, by width" : `wrong for a ${window.innerWidth}px viewport: beside=${beside} below=${below}`;
+  });
+}
+
 describe("new task dialog: side rail", () => {
   const NAME = '[data-testid="new-task-name"]';
   const created: string[] = [];
@@ -333,6 +343,19 @@ describe("new task dialog: side rail", () => {
     await requireTermicApi();
     projectId = await browser.execute(() =>
       window.__termic!.useApp.getState().projects.find((p: any) => p.name === "fixture-repo").id);
+    // No secrets roles: another spec (secrets-settings) can leave one in the
+    // shared profile, and a role adds a Secrets section to the rail.
+    await browser.execute(async () => {
+      const t = window.__termic!;
+      const s = await t.ipc.settingsLoad();
+      if ((s as any).roles?.length) await t.ipc.settingsSave({ ...s, roles: [] } as any);
+      // The secrets store reloads when Settings closes (store/secrets.ts).
+      t.useApp.getState().openSettings("general");
+      t.useApp.getState().closeSettings();
+      await t.useApp.getState().loadAll();
+    });
+    await browser.waitUntil(() => browser.execute(() => ((window.__termic as any).useSecrets.getState().roles as unknown[]).length === 0),
+      { timeout: 10_000, timeoutMsg: "the secrets store never dropped the cleared roles" });
     await open();
     // Focus starts on Name, not on the first (i): a focused (i) shows its
     // tooltip, which would then swallow the first Escape.
@@ -542,14 +565,12 @@ describe("new task dialog: side rail", () => {
     const LIST = '[data-testid="new-task-picker"] [data-testid="import-column"] [data-testid="import-list"]';
     await waitVisible(LIST);
     await settledSnap("new-task-c-import-worktree.png");
-    const side = await browser.execute(() => {
-      const r = (sel: string) => document.querySelector(sel)!.getBoundingClientRect();
-      const fields = r('[data-testid="new-task-fields"]');
-      const picker = r('[data-testid="new-task-picker"]');
-      return { right: picker.x >= fields.x + fields.width, top: Math.abs(picker.y - fields.y) <= 1, wide: picker.width > 200 };
-    });
-    expect(side).toEqual({ right: true, top: true, wide: true });
-    expect(await textOf('[data-testid="new-task-picker"]')).toMatch(/^Existing worktree/);
+    expect(await pickerPlacement()).toBe("beside or below, by width");
+    expect((await browser.execute(() =>
+      document.querySelector('[data-testid="new-task-picker"]')!.getBoundingClientRect().width)) > 200).toBe(true);
+    // Waited for, like the Branches heading: the column grows in from zero.
+    await browser.waitUntil(async () => /^Existing worktree/.test(await textOf('[data-testid="new-task-picker"]')),
+      { timeout: 10_000, timeoutMsg: "the import column never showed its Existing worktree heading" });
 
     // a pick fills Name and unblocks Create. The seeded `sbcheck` worktree
     // is only picked, never imported: other specs need it unopened.
@@ -721,14 +742,12 @@ describe("new task dialog: side rail", () => {
     const LIST = '[data-testid="new-task-pane-task"] [data-testid="branch-column"] [data-testid="checkout-branch-list"]';
     await waitVisible(LIST);
     // Beside, not under: the same split as an issue or a PR.
-    const side = await browser.execute(() => {
-      const r = (sel: string) => document.querySelector(sel)!.getBoundingClientRect();
-      const fields = r('[data-testid="new-task-fields"]');
-      const picker = r('[data-testid="new-task-picker"]');
-      return { right: picker.x >= fields.x + fields.width, top: Math.abs(picker.y - fields.y) <= 1 };
-    });
-    expect(side).toEqual({ right: true, top: true });
-    expect(await textOf('[data-testid="new-task-picker"]')).toMatch(/^Branches/);
+    expect(await pickerPlacement()).toBe("beside or below, by width");
+    // A condition, not a single read: in the wide layout the column grows in
+    // from flex-grow 0 (termic-column-grow), and Linux CI once read its
+    // heading as "" while the list inside was already up.
+    await browser.waitUntil(async () => /^Branches/.test(await textOf('[data-testid="new-task-picker"]')),
+      { timeout: 10_000, timeoutMsg: "the branch column never showed its Branches heading" });
 
     // main is the one branch every seed has.
     await clickWhenVisible(`${LIST} [data-branch-ref="main"]`);
@@ -4850,5 +4869,30 @@ describe("open the task folder in another app", () => {
       { timeout: 8_000, timeoutMsg: "the pick never reverted to the file manager" },
     );
     expect(opens()).toEqual([]);
+  });
+});
+
+describe("renaming a task", () => {
+  it("keeps its agent running: a rename never respawns the terminal", async () => {
+    await waitForAppShell();
+    await requireTermicApi();
+    const id = await openTask("rename-keeps-agent");
+    try {
+      await waitForAgentReady(id);
+      const before = await browser.execute((t) => (window.__termic!.useApp.getState().tabs[t] ?? [])[0]?.ptyId as string | undefined, id);
+      expect(before).toBeTruthy();
+      // As an agent renames its own task (`termic rename`): mid-session.
+      expect((await cliRpc({ cmd: "rename", task: id, name: "renamed-keeps-agent" })).ok).toBe(true);
+      await browser.waitUntil(() => browser.execute((t) => window.__termic!.useApp.getState().tasks.find((x: any) => x.id === t)?.name === "renamed-keeps-agent", id),
+        { timeout: 10_000, timeoutMsg: "the rename never reached the store" });
+      // A negative: a respawn would replace the PTY within a frame or two of
+      // the store update. Nothing fires for one that never happens.
+      await browser.pause(1500);
+      const after = await browser.execute((t) => (window.__termic!.useApp.getState().tabs[t] ?? [])[0]?.ptyId as string | undefined, id);
+      expect(after).toBe(before);
+      expect(await browser.execute((p) => window.__termic!.invoke("pty_alive", { id: p }), after)).toBe(true);
+    } finally {
+      await archiveTask(id);
+    }
   });
 });

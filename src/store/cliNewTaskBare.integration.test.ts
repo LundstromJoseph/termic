@@ -13,7 +13,7 @@ vi.mock("@/lib/ipc", () => ({
   tasksList: vi.fn().mockResolvedValue([]),
   projectGitBranches: vi.fn().mockResolvedValue([]),
 }));
-vi.mock("@/lib/runTabs", () => ({ launchSetupTab: vi.fn().mockResolvedValue(false) }));
+vi.mock("@/lib/runTabs", () => ({ launchSetupTab: vi.fn().mockResolvedValue(false), runScriptRpc: vi.fn() }));
 vi.mock("@/lib/agentDelivery", () => ({
   waitForAgentPty: vi.fn().mockResolvedValue(false),
   agentTabFor: vi.fn(),

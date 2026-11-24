@@ -39,6 +39,7 @@ import {
   taskImportWorktree,
   taskOpenRepo,
   taskRename,
+  taskSetPinned,
   taskSetAccount,
   taskSetYolo,
   tasksList,
@@ -62,7 +63,7 @@ import {
   agentDisplayName, cliSupportsResumeById, isTerminalCli, isTerminalEntry, visibleCliIds,
   workDoneCapable,
 } from "@/lib/agents";
-import { launchSetupTab } from "@/lib/runTabs";
+import { launchSetupTab, runScriptRpc } from "@/lib/runTabs";
 import {
   derivedBranch,
   readNewTaskMode,
@@ -661,7 +662,15 @@ export async function sendPromptHandler(raw: unknown): Promise<{ mode: string; c
   // The cli whose capability gates --wait: the actual respawn target's
   // when an exited tab exists (its cli may differ from the persisted
   // default), the persisted default's otherwise.
-  const exited = p.resume
+  // Whether any earlier session exists. With none, a fresh agent and a
+  // restarted default tab are the same thing (no context either way), so
+  // --fresh restarts the task's own tab instead of adding a second agent
+  // beside it (a phone's message to a stopped task did that).
+  const hasSession =
+    !!task.has_resumable_history
+    || (task.persisted_tabs ?? []).some(pt => pt.session_id);
+  const freshInPlace = p.fresh && !hasSession;
+  const exited = p.resume || freshInPlace
     ? (agentTabs.find(t => t.is_default && !t.ptyId) ?? agentTabs.find(t => !t.ptyId))
     : undefined;
   const spawnCli =
@@ -674,7 +683,7 @@ export async function sendPromptHandler(raw: unknown): Promise<{ mode: string; c
   }
 
   let tabId: string | undefined;
-  if (p.fresh) {
+  if (p.fresh && !freshInPlace) {
     // A NEW secondary agent tab starts fresh by design (no resume
     // machinery touches it); unattended so a startup update menu can't
     // swallow the injection; focus:false so it never yanks the
@@ -703,10 +712,7 @@ export async function sendPromptHandler(raw: unknown): Promise<{ mode: string; c
     tabId = newTabId;
   } else {
     // --resume: a prior session must exist, else --fresh is the answer.
-    const hasSession =
-      !!task.has_resumable_history
-      || (task.persisted_tabs ?? []).some(pt => pt.session_id);
-    if (!hasSession) {
+    if (!hasSession && !freshInPlace) {
       throw sendErr(
         "no_session",
         "this task has no agent session to resume; use --fresh to start a new agent without context",
@@ -744,6 +750,44 @@ export async function sendPromptHandler(raw: unknown): Promise<{ mode: string; c
   // spawn; delivery confirms through cli_prompt_report.
   void injectPromptTracked(p.taskId, p.prompt, p.promptId, spawned, tabId);
   return { mode: "spawned", capable: workDoneCapable(spawnCli) };
+}
+
+// ─────────────────────────── wake ────────────────────────────────────
+
+/** Start a task's stopped agent in its last session, with no prompt: what
+ *  a paired computer needs when it opens that agent's terminal (the host
+ *  answered "not running" and Reopen could only ask again). The respawn
+ *  steps `send --resume` takes, minus the injection; a task with no
+ *  session gets its default tab's own decision (a fresh agent). */
+async function wakeAgentHandler(params: unknown): Promise<{ running: boolean }> {
+  const taskId = (params as { taskId?: unknown })?.taskId;
+  if (typeof taskId !== "string" || !taskId) throw new Error("wake_agent requires a taskId");
+  const task = useApp.getState().tasks.find(t => t.id === taskId);
+  if (!task || task.archived) throw new Error("no such task");
+  const agentTabs = sendableAgentTabs(taskId);
+  const running = agentTabs.find(t => t.ptyId);
+  if (running) return { running: true };
+  const exited = agentTabs.find(t => t.is_default && !t.ptyId) ?? agentTabs.find(t => !t.ptyId);
+  useApp.getState().mountTasks([taskId]);
+  if (exited) {
+    useApp.getState().patchTab(taskId, exited.id, { respawnKick: (exited.respawnKick ?? 0) + 1 });
+  } else {
+    useApp.getState().ensureDefaultTab(taskId, task.cli);
+  }
+  return { running: await waitForAgentPty(taskId, exited?.id) };
+}
+
+// ─────────────────────────── stop ────────────────────────────────────
+
+/** Stop a task as the sidebar's Stop does: leave its view, unmount it, clear
+ *  its tabs' live fields. `termic stop` (and a phone's or another computer's
+ *  Stop) only killed the PTYs, so a task open here kept its tab on the
+ *  exited banner and read as running; a Reopen then added a second tab. */
+async function stopTaskHandler(params: unknown): Promise<null> {
+  const taskId = (params as { taskId?: unknown })?.taskId;
+  if (typeof taskId !== "string" || !taskId) throw new Error("stop_task requires a taskId");
+  useApp.getState().stopTask(taskId);
+  return null;
 }
 
 // ─────────────────────────── archive ─────────────────────────────────
@@ -800,6 +844,23 @@ async function renameTaskHandler(params: unknown): Promise<null> {
     await taskRename(taskId, name);
     await useApp.getState().loadAll();
   });
+  return null;
+}
+
+/** `termic pin` (and MCP `task_pin`, and a remote client's Pin): the row's
+ *  Pin, store first so the row moves at once, then the file. */
+async function pinTaskHandler(params: unknown): Promise<null> {
+  const p = params as { taskId?: unknown; pinned?: unknown };
+  if (typeof p?.taskId !== "string" || !p.taskId) throw new Error("pin_task requires a taskId");
+  if (typeof p?.pinned !== "boolean") throw new Error("pin_task requires pinned");
+  const { taskId, pinned } = p as { taskId: string; pinned: boolean };
+  useApp.getState().setTaskPinned(taskId, pinned);
+  try {
+    await taskSetPinned(taskId, pinned);
+  } catch (e) {
+    useApp.getState().setTaskPinned(taskId, !pinned);
+    throw e;
+  }
   return null;
 }
 
@@ -1428,7 +1489,7 @@ export async function closeTabHandler(
   return { taskId: p.taskId, tabId: p.tabId, killedPty };
 }
 
-/** `termic view` (v30): show a file in a tab of the task, the route a
+/** `termic view` (v32): show a file in a tab of the task, the route a
  *  ⌘-click on the path takes. Inside a task root it opens the editor tab,
  *  anywhere else a read-only external tab. In the background unless
  *  `focus`. The reply never carries the file's content. */
@@ -1506,11 +1567,15 @@ const handlers: Record<string, Handler> = {
   list_agents: listAgentsHandler,
   list_prompts: listPromptsHandler,
   send_prompt: sendPromptHandler,
+  wake_agent: wakeAgentHandler,
+  stop_task: stopTaskHandler,
   archive_task: archiveTaskHandler,
   rename_task: renameTaskHandler,
+  pin_task: pinTaskHandler,
   set_task_group: setTaskGroupHandler,
   pad: padHandler,
   schedule: scheduleHandler,
+  run_script: runScriptRpc,
   project_add: projectAddHandler,
   project_remove: projectRemoveHandler,
 };

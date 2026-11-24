@@ -5,12 +5,13 @@
 // arrow keys. NO solid backdrop (the old `bg-black/40` overlay flickered the
 // whole screen on open) — just a subtle dim + blur that fades in, ⇧⌘P only.
 
+import { useRemote } from "@/lib/remote";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation, Trans } from "react-i18next";
 import * as Dialog from "@radix-ui/react-dialog";
 import {
   Search, Plus, FileText, Pencil, GitBranch, Archive, Zap, ShieldCheck,
-  PanelLeft, PanelRight, PanelBottom, Palette, Keyboard, Settings as SettingsIcon,
+  PanelLeft, PanelRight, PanelBottom, Palette, Keyboard, Settings as SettingsIcon, Server, Smartphone,
   FolderCog, RefreshCw, ScrollText, Compass, CalendarClock, Bug, SlidersHorizontal, Bot, BookText,
   Check, ChevronLeft, ListTodo, Bell, SquareTerminal, FolderPlus, History, Square,
   Play, Swords, Megaphone, Columns2, Rows2, Clock, UserPen, GitPullRequest, Activity, Code2,
@@ -27,7 +28,8 @@ import {
   readRecents, recentIds, recordRecent, readThemeRecents, recordThemeRecent,
   readSchemeFilter, writeSchemeFilter, type SchemeFilter,
 } from "@/lib/paletteRecent";
-import { usePrefs, resolveTheme, type BuiltinThemeMode, type ThemeMode } from "@/store/prefs";
+import { usePrefs, resolveTheme, type ThemeMode } from "@/store/prefs";
+import { useThemeEntries } from "@/hooks/useThemeEntries";
 import { useUpdate } from "@/store/update";
 import { useGuide } from "@/store/guide";
 import { fuzzyMatch, Highlighted } from "@/lib/fuzzy";
@@ -40,10 +42,10 @@ import { effectiveLanguageId, languageLabel } from "@/lib/languages";
 import { effectiveSandboxMode, isSandboxEnforced } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { taskLabel } from "@/lib/taskLabel";
+import { reportBug } from "@/lib/reportBug";
 import { setTreeFold } from "@/lib/treeFold";
 
 // New-issue page for the project repo. Opened via the OS browser (open_path).
-const ISSUE_URL = "https://github.com/simion/termic/issues/new";
 
 // Section render order. Sections with no (filtered) commands are dropped.
 // System / Dark / Light only ever hold the Change-theme submenu's rows.
@@ -99,22 +101,8 @@ interface Cmd {
   run: () => void;
 }
 
-// Theme display names. auto/light/dark are common words and translate
-// (commandPalette.themeAuto/themeLight/themeDark); the rest are proper-noun
-// theme names, the same in every language.
-type ThemeEntry = { id: ThemeMode; label: string; scheme: "system" | "dark" | "light"; imported?: boolean };
-const SCHEME_RANK: Record<ThemeEntry["scheme"], number> = { system: 0, dark: 1, light: 2 };
 const SCHEME_FILTERS: SchemeFilter[] = ["dark", "light", "all"];
 const SOURCE_LABEL = { ghostty: "Ghostty", warp: "Warp" } as const;
-
-const THEME_LABELS: Record<Exclude<BuiltinThemeMode, "auto" | "light" | "dark">, string> = {
-  claude: "Claude",
-  solarized: "Solarized",
-  cobalt: "Cobalt",
-  matrix: "Matrix",
-  rosepine: "Rosé Pine",
-};
-const THEME_ORDER: BuiltinThemeMode[] = ["auto", "light", "dark", "claude", "solarized", "cobalt", "matrix", "rosepine"];
 
 export function CommandPalette() {
   const { t } = useTranslation("dialogs");
@@ -140,32 +128,7 @@ export function CommandPalette() {
   // Only whether there is one: the Clear row comes and goes with it.
   const sidebarFiltered = useUI(s => s.sidebarQuery.trim() !== "");
 
-  // Every theme with its scheme, in the submenu's order: System, then the
-  // dark themes, then the light ones, each run sorted by name. An import
-  // already saved as a copy is left out: the copy is listed under the same
-  // name. `t` is a dep so a language switch recomputes the built-in labels.
-  const themeEntries = useMemo<ThemeEntry[]>(
-    () => {
-      const builtinLabel = (m: BuiltinThemeMode) =>
-        m === "auto" ? t("commandPalette.themeAuto")
-        : m === "light" ? t("commandPalette.themeLight")
-        : m === "dark" ? t("commandPalette.themeDark")
-        : THEME_LABELS[m];
-      const entries: ThemeEntry[] = [
-        ...THEME_ORDER.map(m => ({
-          id: m as ThemeMode, label: builtinLabel(m),
-          scheme: m === "auto" ? "system" as const : m === "light" ? "light" as const : "dark" as const,
-        })),
-        ...customThemes.map(th => ({ id: th.id as ThemeMode, label: th.name, scheme: th.colorScheme })),
-        ...importedThemes
-          .filter(th => !customThemes.some(c => c.id === copyIdOf(th.id)))
-          .map(th => ({ id: th.id as ThemeMode, label: th.name, scheme: th.colorScheme, imported: true })),
-      ];
-      return entries.sort((a, b) =>
-        SCHEME_RANK[a.scheme] - SCHEME_RANK[b.scheme] || a.label.localeCompare(b.label));
-    },
-    [customThemes, importedThemes, t],
-  );
+  const themeEntries = useThemeEntries();
   // Which schemes the submenu lists: the saved toggle, else the current
   // theme's scheme, so arrowing through a dark list never flashes a light
   // theme. Tab or the toggle changes (and saves) it. System always lists.
@@ -681,7 +644,7 @@ export function CommandPalette() {
     cmds.push({
       id: "open-issue", section: "Application", label: t("commandPalette.cmd.openIssue"),
       icon: Bug, keywords: "github bug report feedback",
-      run: act(() => { void openPath(ISSUE_URL); }),
+      run: act(() => { void reportBug(); }),
     });
 
     // ── Settings (deep links) ───────────────────────────────────────────
@@ -696,6 +659,8 @@ export function CommandPalette() {
       ["shortcuts", "commandPalette.cmd.linkShortcuts", Keyboard],
       ["sandbox", "commandPalette.cmd.linkSandbox", ShieldCheck],
       ["cli", "commandPalette.cmd.linkCli", SquareTerminal],
+      ["remote", "commandPalette.cmd.linkRemote", Smartphone],
+      ["servers", "commandPalette.cmd.linkServers", Server],
     ];
     for (const [tab, labelKey, icon] of settingsLinks) {
       cmds.push({
@@ -703,6 +668,12 @@ export function CommandPalette() {
         run: act(() => useApp.getState().openSettings(tab as any)),
       });
     }
+
+    cmds.push({
+      id: "connect-phone", section: "Application", label: t("commandPalette.cmd.connectPhone"), icon: Smartphone,
+      keywords: "phone mobile remote qr pair",
+      run: act(() => useRemote.getState().setDialog({ phoneDialog: true })),
+    });
 
     return cmds;
   }, [view, task, proj, committedTheme, visibleThemes, inlineBlame, editorWordWrap, useBranchAsTaskName, activeEditTab, sidebarFiltered, hasGitProject, t]); // eslint-disable-line react-hooks/exhaustive-deps

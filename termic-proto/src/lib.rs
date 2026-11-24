@@ -122,31 +122,39 @@ use std::io::{self, BufRead, Read, Write};
 /// member linked, which reads as success. `project list` reports each
 /// project's `type` and members.
 ///
-/// v25: `badge_set`, `badge_remove` and `badge_list` set, remove and list a
-/// task's badges, and `TaskSummary` carries them. A v24 server does not know
-/// the verbs, and the version check says "restart the app" where the bare
-/// failure would read as a broken command.
+/// v25: the `run` verb starts, stops or reports a task's run (or setup)
+/// script in its Run tab, the same tab the app's Run button drives. A v24
+/// server does not know the verb, and the version check says "restart the
+/// app" where the bare failure would read as a broken command.
 ///
-/// v26: the `present_*` verbs (`present_new`, `present_comment`,
+/// v26: the `pin` verb pins or unpins a task in the sidebar (a pinned task
+/// stays listed whatever the filters say), so a remote client or an agent
+/// can do what the row's Pin does. A v25 server does not know it.
+///
+/// v27: `badge_set`, `badge_remove` and `badge_list` set, remove and list a
+/// task's badges, and `TaskSummary` carries them. A v26 server does not know
+/// the verbs; the bump turns that into "restart the app".
+///
+/// v28: the `present_*` verbs (`present_new`, `present_comment`,
 /// `present_reply`, `present_show`, `present_list`, `present_claim`) open
 /// an agent-presented review of a commit range and thread comments on it.
-/// A v25 server does not know them; the bump turns that into "restart the
+/// A v27 server does not know them; the bump turns that into "restart the
 /// app" instead of an unknown-command failure.
 ///
-/// v27: `present_resolve` resolves or reopens a review thread, and a thread
-/// carries `resolved`. A v26 server does not know the verb; the bump turns
+/// v29: `present_resolve` resolves or reopens a review thread, and a thread
+/// carries `resolved`. A v28 server does not know the verb; the bump turns
 /// that into "restart the app".
 ///
-/// v28: `present_update` starts a review's next iteration, and a review carries
-/// `iterations` while its threads carry `iteration`, `origin` and `outdated`. A v27
+/// v30: `present_update` starts a review's next iteration, and a review carries
+/// `iterations` while its threads carry `iteration`, `origin` and `outdated`. A v29
 /// server does not know the verb; the bump turns that into "restart the app".
 ///
-/// v29: `present_delete` deletes a review and its hidden refs. A v28 server
+/// v31: `present_delete` deletes a review and its hidden refs. A v30 server
 /// does not know the verb; the bump turns that into "restart the app".
 ///
-/// v30: `view` shows a file to the user in a tab of a task. A v29 server does
+/// v32: `view` shows a file to the user in a tab of a task. A v31 server does
 /// not know the verb; the bump turns that into "restart the app".
-pub const PROTOCOL_VERSION: u32 = 30;
+pub const PROTOCOL_VERSION: u32 = 32;
 
 /// A pasted "123", "#123", "!123" or a PR / MR link, reduced to its number.
 /// None for anything else. The webview's `parsePrRef` (src/lib/prReview.ts)
@@ -283,7 +291,7 @@ pub fn prop_value_problem(value: &str) -> Option<String> {
     None
 }
 
-/// Badge limits (v25). Like properties, badge text comes from agents and is
+/// Badge limits (v27). Like properties, badge text comes from agents and is
 /// validated, not escaped.
 pub const BADGE_KEY_MAX: usize = 32;
 pub const BADGE_TEXT_MAX: usize = 40;
@@ -332,7 +340,7 @@ pub fn badge_color_problem(color: &str) -> Option<String> {
 /// Longest path `view` accepts, in bytes (macOS `PATH_MAX`).
 pub const VIEW_PATH_MAX: usize = 4096;
 
-/// Why `path` cannot be shown by `view` (v30), or None when it can: it must
+/// Why `path` cannot be shown by `view` (v32), or None when it can: it must
 /// be absolute, so the CLI resolves a relative path against its own cwd
 /// before sending. Existence and readability are the webview's to check.
 pub fn view_path_problem(path: &str) -> Option<String> {
@@ -1007,7 +1015,7 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cwd: Option<String>,
     },
-    /// v30: show a file to the user in a tab of the task: a file inside the
+    /// v32: show a file to the user in a tab of the task: a file inside the
     /// task in its editor, any other path read-only. Replies `ReplyData::View`,
     /// which never carries the file's content.
     View {
@@ -1025,7 +1033,7 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cwd: Option<String>,
     },
-    /// v25: set a badge on a task. Re-setting `key` replaces its text and
+    /// v27: set a badge on a task. Re-setting `key` replaces its text and
     /// colour in place. Replies `ReplyData::Badges`.
     BadgeSet {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1042,7 +1050,7 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cwd: Option<String>,
     },
-    /// v25: remove a task's badge by key. A missing key is not an error:
+    /// v27: remove a task's badge by key. A missing key is not an error:
     /// the reply's `changed` is false.
     BadgeRemove {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1053,7 +1061,7 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cwd: Option<String>,
     },
-    /// v25: list a task's badges.
+    /// v27: list a task's badges.
     BadgeList {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         task: Option<String>,
@@ -1062,7 +1070,7 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cwd: Option<String>,
     },
-    /// v26: open a review of `range` (`A..B`) in the task's Git tab.
+    /// v28: open a review of `range` (`A..B`) in the task's Git tab.
     /// `tab` is the agent tab the user's comments go to. Replies
     /// `ReplyData::Review`.
     PresentNew {
@@ -1086,7 +1094,7 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cwd: Option<String>,
     },
-    /// v26: open a thread on `file` of a review, on head-side lines
+    /// v28: open a thread on `file` of a review, on head-side lines
     /// `start_line..=end_line`, or at file level without them. Replies
     /// `ReplyData::ReviewWrite`.
     PresentComment {
@@ -1104,7 +1112,7 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cwd: Option<String>,
     },
-    /// v26: reply in a thread (`r1-t3`, which names its review). Replies
+    /// v28: reply in a thread (`r1-t3`, which names its review). Replies
     /// `ReplyData::ReviewWrite`.
     PresentReply {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1116,7 +1124,7 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cwd: Option<String>,
     },
-    /// v27: resolve (`resolved` true) or reopen a thread. Replies
+    /// v29: resolve (`resolved` true) or reopen a thread. Replies
     /// `ReplyData::ReviewResolve`.
     PresentResolve {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1128,7 +1136,7 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cwd: Option<String>,
     },
-    /// v26: one review. With `since`, only the comments whose seq is
+    /// v28: one review. With `since`, only the comments whose seq is
     /// greater, in the threads that have one. Replies `ReplyData::Review`.
     PresentShow {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1141,7 +1149,7 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cwd: Option<String>,
     },
-    /// v26: the task's reviews. Replies `ReplyData::Reviews`.
+    /// v28: the task's reviews. Replies `ReplyData::Reviews`.
     PresentList {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         task: Option<String>,
@@ -1150,7 +1158,7 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cwd: Option<String>,
     },
-    /// v26: point a review at another agent tab of its task, and with
+    /// v28: point a review at another agent tab of its task, and with
     /// `author` (default: that tab's agent name) the name its future agent
     /// comments carry. Replies `ReplyData::ReviewClaim`.
     PresentClaim {
@@ -1167,7 +1175,7 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cwd: Option<String>,
     },
-    /// v28: start the review's next iteration at `head`; `base` defaults to the
+    /// v30: start the review's next iteration at `head`; `base` defaults to the
     /// last iteration's base_ref re-resolved; `show` is full or an iteration number.
     /// Replies `ReplyData::ReviewUpdate`.
     PresentUpdate {
@@ -1184,7 +1192,7 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cwd: Option<String>,
     },
-    /// v29: delete a review, its file and its hidden refs. Its id is never
+    /// v31: delete a review, its file and its hidden refs. Its id is never
     /// reused. Replies `ReplyData::ReviewDelete`.
     PresentDelete {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1243,6 +1251,14 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         project: Option<String>,
     },
+    /// Stop a task's agent: its live PTYs are ended (SIGTERM, then
+    /// SIGKILL). The task, worktree and session stay; sending to it or
+    /// opening it starts the agent again.
+    Stop {
+        task: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project: Option<String>,
+    },
     /// Rename a task: the sidebar label ONLY. The branch and worktree
     /// directory keep their creation-time names (they are pushed /
     /// referenced by live PTY cwds; moving them is not this verb's job).
@@ -1256,6 +1272,19 @@ pub enum Command {
         /// same-project live duplicate is a Conflict.
         name: String,
         /// The CLI's working directory, for worktree-first resolution.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cwd: Option<String>,
+    },
+    /// v26: pin or unpin a task in the sidebar, as the row's Pin does: a
+    /// pinned task stays listed whatever the sidebar's filters say. Pins by
+    /// default; `pinned: false` unpins. cwd-aware when `task` absent.
+    Pin {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project: Option<String>,
+        #[serde(default = "pin_default")]
+        pinned: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cwd: Option<String>,
     },
@@ -1293,6 +1322,27 @@ pub enum Command {
         /// its other members. Not with `name`, `color` or `join`.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         leave: bool,
+    },
+    /// v25: the task's run script (or, with `setup`, its setup script) in
+    /// its Run tab, exactly as the app's Run button starts it. Starts what
+    /// is not already running; `stop` stops it; `status` only reports what
+    /// is configured and running. `member` narrows a multi-repo task's run
+    /// to one member repo. cwd-aware when `task` absent.
+    Run {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        setup: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        stop: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        status: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        member: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cwd: Option<String>,
     },
     /// List a task's scratchpads. cwd-aware when `task` absent.
     PadList {
@@ -1381,20 +1431,74 @@ pub enum Command {
         path: String,
         #[serde(default)]
         non_git: bool,
+        /// Clone this git URL into `path` first (which must not exist yet),
+        /// then register it. For a machine you only reach remotely (a
+        /// termic-server box), where nothing else can put a repo there.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        clone: Option<String>,
     },
     /// Registered projects with live-task counts.
     ProjectList,
     /// Unregister a project. Archives and deletes ALL its tasks; the
     /// CLI confirms before sending.
     ProjectRemove { name: String },
+    /// Run a program in a folder and return what it printed: termic-server
+    /// only (docs/remote.md, Servers), reached through the desktop's
+    /// own ssh bridge, and only inside a registered project or one of its
+    /// worktrees. The desktop answers it with Unsupported: an agent or a
+    /// paired machine must never run arbitrary commands through it.
+    Exec {
+        cwd: String,
+        argv: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        env: Vec<(String, String)>,
+        /// Bytes for the program's stdin, base64.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stdin: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_ms: Option<u64>,
+    },
+    /// Record a task on a termic-server, as plain data: the desktop made its
+    /// worktree itself (git through `exec`) and starts its agent itself
+    /// (`pty_open`), and the box keeps the record so every desktop that
+    /// reaches it sees the task (docs/remote.md, Servers). Inserts or
+    /// updates by `id`; starts nothing. termic-server only, like `exec`.
+    TaskPut {
+        /// The task's id (not `id`: that is the request's own, which the
+        /// command is flattened beside).
+        task: String,
+        name: String,
+        /// The box's project id.
+        project: String,
+        path: String,
+        branch: String,
+        #[serde(default)]
+        base_branch: String,
+        agent: String,
+        #[serde(default)]
+        is_main_checkout: bool,
+        /// The desktop's organisation of the task (name, pin, order, group),
+        /// opaque to the box: kept and handed back in `list` (`org`), so
+        /// every desktop that reaches it files the task the same way. Last
+        /// write wins. Absent: the box keeps what it had.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        org: Option<serde_json::Value>,
+    },
     /// This machine, the machines paired with it, and the unpaired ones in
     /// sight on the LAN (v22, docs/peers.md).
     PeerList,
     /// Pair with a machine in sight (its name or id) or at an address (`ip`
     /// or `ip:port`) that is in pairing mode, using the four-digit code its
     /// screen shows. Returns once both machines hold the pair, or fails on a
-    /// wrong code or a machine not in pairing mode.
-    PeerPair { target: String, code: String },
+    /// wrong code or a machine not in pairing mode. Without `code`, asks the
+    /// machine to show one and answers `PeerCodeShown`: the person there
+    /// reads it out, and the caller sends this again with it. No bump: a
+    /// v24 server refuses a missing code outright instead of misreading it.
+    PeerPair {
+        target: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        code: Option<String>,
+    },
     /// Forget a paired machine and tell it to forget this one. Its key is
     /// deleted here at once, so it can no longer call in even when it is
     /// offline and never hears about it.
@@ -1402,6 +1506,10 @@ pub enum Command {
     /// Set the local name of a paired machine (empty: back to the name it
     /// gives itself). Local only: the other machine is not told.
     PeerRename { target: String, name: String },
+    /// Put an image (base64 PNG) on this computer's clipboard. A paired
+    /// computer sends it before forwarding a Ctrl+V to an agent here, which
+    /// then reads the image from the clipboard natively, as a local paste.
+    ClipboardImage { png: String },
     /// List recurring schedules across projects, optionally filtered to one project.
     ScheduleList {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1674,31 +1782,35 @@ pub enum ReplyData {
     Tab(TabData),
     TabClose(TabCloseData),
     Prop(PropData),
-    /// `view` (v30).
+    /// `view` (v32).
     View(ViewData),
-    /// `badge set`, `badge rm` and `badge list` (v25).
+    /// `badge set`, `badge rm` and `badge list` (v27).
     Badges(BadgesData),
-    /// `present new` and `present show` (v26).
+    /// `present new` and `present show` (v28).
     Review(ReviewData),
-    /// `present claim` (v26).
+    /// `present claim` (v28).
     ReviewClaim(ReviewClaimData),
-    /// `present comment` and `present reply` (v26).
+    /// `present comment` and `present reply` (v28).
     ReviewWrite(ReviewWriteData),
-    /// `present resolve` and `present unresolve` (v27).
+    /// `present resolve` and `present unresolve` (v29).
     ReviewResolve(ReviewResolveData),
-    /// `present list` (v26).
+    /// `present list` (v28).
     Reviews(ReviewsData),
-    /// `present update` (v28).
+    /// `present update` (v30).
     ReviewUpdate(ReviewUpdateData),
-    /// `present delete` (v29).
+    /// `present delete` (v31).
     ReviewDelete(ReviewDeleteData),
     Quit(QuitData),
     Archive(ArchiveData),
+    Stop(StopData),
     Rename(RenameData),
+    Pin(PinData),
     Group(GroupData),
+    Run(RunData),
     Pad(PadData),
     ProjectList(ProjectListData),
     ProjectAdd(ProjectAddData),
+    Exec(ExecData),
     ProjectRemove(ProjectRemoveData),
     Send(SendData),
     Apply(ApplyData),
@@ -1712,6 +1824,7 @@ pub enum ReplyData {
     Peers(PeersData),
     /// `peer pair` (v22).
     PeerPair(PeerPairData),
+    PeerCodeShown(PeerCodeShownData),
 }
 
 /// One property as a tab carries it (GH #358).
@@ -1751,7 +1864,7 @@ pub struct PropData {
     pub collected: Vec<CollectedProp>,
 }
 
-/// `view`'s reply (v30): where the file opened. Never the file's content.
+/// `view`'s reply (v32): where the file opened. Never the file's content.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ViewData {
     pub task_id: String,
@@ -1763,7 +1876,7 @@ pub struct ViewData {
     pub focused: bool,
 }
 
-/// One badge on a task (v25), in the order its key was first set.
+/// One badge on a task (v27), in the order its key was first set.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct BadgeEntry {
     pub key: String,
@@ -1783,7 +1896,7 @@ pub struct BadgesData {
     pub changed: bool,
 }
 
-/// One review in full (v26).
+/// One review in full (v28).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ReviewData {
     pub task_id: String,
@@ -1792,7 +1905,7 @@ pub struct ReviewData {
     pub review: Review,
 }
 
-/// Where a `present comment` or `present reply` landed (v26).
+/// Where a `present comment` or `present reply` landed (v28).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ReviewWriteData {
     pub task_id: String,
@@ -1803,7 +1916,7 @@ pub struct ReviewWriteData {
     pub new_thread: bool,
 }
 
-/// A `present resolve` or `present unresolve` (v27). `changed` is false
+/// A `present resolve` or `present unresolve` (v29). `changed` is false
 /// when the thread was already in that state.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ReviewResolveData {
@@ -1814,7 +1927,7 @@ pub struct ReviewResolveData {
     pub changed: bool,
 }
 
-/// A `present delete` (v29).
+/// A `present delete` (v31).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ReviewDeleteData {
     pub task_id: String,
@@ -1823,7 +1936,7 @@ pub struct ReviewDeleteData {
     pub review_id: String,
 }
 
-/// One row of `present list` (v26).
+/// One row of `present list` (v28).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ReviewSummary {
     pub id: String,
@@ -1839,7 +1952,7 @@ pub struct ReviewSummary {
     pub iterations: u32,
 }
 
-/// `present update`'s reply (v28): the new iteration and the threads it outdated.
+/// `present update`'s reply (v30): the new iteration and the threads it outdated.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ReviewUpdateData {
     pub task_id: String,
@@ -2145,11 +2258,31 @@ pub struct ArchiveData {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct StopData {
+    pub task_id: String,
+    pub name: String,
+    pub project: String,
+    /// Agent PTYs that were running and are now ended.
+    pub stopped_agents: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RenameData {
     /// The task AFTER the rename, re-read from disk (name is the new one).
     pub task: TaskSummary,
     /// What the task was called before, for "renamed X to Y" output.
     pub old_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PinData {
+    /// The task after the change, re-read from disk.
+    pub task: TaskSummary,
+    pub pinned: bool,
+}
+
+fn pin_default() -> bool {
+    true
 }
 
 /// A task's sidebar task group, as `group` and task summaries report it.
@@ -2178,6 +2311,35 @@ pub struct GroupData {
     pub group: Option<TaskGroupInfo>,
 }
 
+/// Reply to `run` (v25).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RunData {
+    /// The task, as `project/name`.
+    pub task: String,
+    /// "run" or "setup". (Not `kind`: that is the reply's own tag.)
+    pub which: String,
+    /// One per configured script: the host's, then each multi-repo member
+    /// with one. Empty when nothing is configured.
+    pub targets: Vec<RunTarget>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RunTarget {
+    /// "" for the host project, else the member repo's directory name.
+    pub member: String,
+    /// The configured command.
+    pub script: String,
+    /// Its Run tab, once one exists: `logs --tab` reads its output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_id: Option<String>,
+    /// Running after the call.
+    pub running: bool,
+    /// What this call did: "started", "already_running", "stopped" or
+    /// "not_running". Absent for `status`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
+}
+
 /// One scratchpad, as `pad list` and every other pad verb report it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct PadInfo {
@@ -2204,6 +2366,14 @@ pub struct PadData {
     pub truncated: bool,
 }
 
+/// What `exec` printed: stdout base64 (it may be binary), stderr as text.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct ExecData {
+    pub code: i32,
+    pub stdout: String,
+    pub stderr: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct ProjectInfo {
     pub id: String,
@@ -2218,6 +2388,16 @@ pub struct ProjectInfo {
     /// v24: a multi-repo project's member repos, in project order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub members: Vec<ProjectMemberInfo>,
+    /// The slug of the profile it belongs to. Absent with no profiles.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    /// The server it lives on, by name. Absent for a project here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server: Option<String>,
+    /// A plain folder, not a git repo: its tasks run in it, never in a
+    /// worktree. A box reports it so the desktop's mirror knows.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub non_git: bool,
 }
 
 /// One member repo of a multi-repo project (v24).
@@ -2321,6 +2501,15 @@ pub struct PeersData {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PeerPairData {
     pub peer: PeerInfo,
+}
+
+/// `peer pair` without a code: the machine now shows one on its screen.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PeerCodeShownData {
+    /// The name it gives itself, as the person there sees it.
+    pub name: String,
+    /// What the caller does next, for an agent reading the reply.
+    pub next: String,
 }
 
 /// One schedule cadence.
@@ -2459,9 +2648,13 @@ pub struct TaskSummary {
     /// not reported the task's tabs.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub props: Vec<CollectedProp>,
-    /// v25: the task's badges.
+    /// v27: the task's badges.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub badges: Vec<BadgeEntry>,
+    /// A termic-server task's organisation as a desktop last wrote it
+    /// (`task_put`'s `org`). Desktops never send it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -3248,13 +3441,13 @@ mod tests {
                 key: Some("status".into()), value: Some(String::new()), cwd: None,
             },
             Command::Prop { task: None, project: None, tab: None, key: None, value: None, cwd: Some("/t".into()) },
-            // v30: show a file.
+            // v32: show a file.
             Command::View {
                 path: "/tmp/report.md".into(), focus: true, task: Some("fix-auth".into()),
                 project: Some("web".into()), cwd: None,
             },
             Command::View { path: "/t/a.rs".into(), focus: false, task: None, project: None, cwd: Some("/t".into()) },
-            // v25: badges.
+            // v27: badges.
             Command::BadgeSet {
                 task: Some("fix-auth".into()),
                 project: Some("web".into()),
@@ -3269,7 +3462,7 @@ mod tests {
             },
             Command::BadgeRemove { task: Some("fix-auth".into()), project: None, key: "ci".into(), cwd: None },
             Command::BadgeList { task: None, project: None, cwd: Some("/t".into()) },
-            // v26: agent-presented reviews.
+            // v28: agent-presented reviews.
             Command::PresentNew {
                 task: Some("fix-auth".into()),
                 project: Some("web".into()),
@@ -3306,7 +3499,7 @@ mod tests {
                 task: Some("fix-auth".into()), project: Some("web".into()), thread: "r1-t3".into(), resolved: false,
                 cwd: Some("/t".into()),
             },
-            // v28: review iterations.
+            // v30: review iterations.
             Command::PresentUpdate {
                 task: None, project: None, review: "r1".into(), head: "HEAD".into(), base: None, show: None,
                 cwd: Some("/t".into()),
@@ -3315,7 +3508,7 @@ mod tests {
                 task: Some("fix-auth".into()), project: Some("web".into()), review: "r2".into(), head: "HEAD".into(),
                 base: Some("main".into()), show: Some("1".into()), cwd: None,
             },
-            // v29: review deletion.
+            // v31: review deletion.
             Command::PresentDelete { task: None, project: None, review: "r1".into(), cwd: Some("/t".into()) },
             Command::PresentDelete { task: Some("fix-auth".into()), project: Some("web".into()), review: "r2".into(), cwd: None },
             Command::Agents,
@@ -3324,6 +3517,7 @@ mod tests {
             Command::Quit { commit: false },
             Command::Quit { commit: true },
             Command::Archive { task: "fix-auth".into(), project: Some("web".into()) },
+            Command::Stop { task: "fix-auth".into(), project: Some("web".into()) },
             Command::Rename {
                 task: Some("fix-auth".into()),
                 project: Some("web".into()),
@@ -3336,6 +3530,8 @@ mod tests {
                 name: "retitled".into(),
                 cwd: Some("/tasks/web/x".into()),
             },
+            Command::Pin { task: Some("fix-auth".into()), project: Some("web".into()), pinned: true, cwd: None },
+            Command::Pin { task: None, project: None, pinned: false, cwd: Some("/tasks/web/x".into()) },
             Command::PadList { task: None, project: None, scope: None, cwd: Some("/tasks/web/x".into()) },
             Command::PadNew {
                 task: Some("fix-auth".into()),
@@ -3357,12 +3553,13 @@ mod tests {
             Command::PadRead { task: Some("t1".into()), project: None, scope: None, pad: "p1".into(), cwd: None },
             Command::PadRemove { task: Some("t1".into()), project: None, scope: None, pad: "p1".into(), cwd: None },
             Command::PadClear { task: None, project: Some("web".into()), scope: Some("project".into()), cwd: None },
-            Command::ProjectAdd { path: "/repo/web".into(), non_git: false },
-            Command::ProjectAdd { path: "/notes/plain".into(), non_git: true },
+            Command::ProjectAdd { path: "/repo/web".into(), non_git: false, clone: None },
+            Command::ProjectAdd { path: "/notes/plain".into(), non_git: true, clone: None },
             Command::ProjectList,
             Command::ProjectRemove { name: "web".into() },
             Command::PeerList,
-            Command::PeerPair { target: "192.168.1.20:23620".into(), code: "4821".into() },
+            Command::PeerPair { target: "192.168.1.20:23620".into(), code: Some("4821".into()) },
+            Command::PeerPair { target: "laptop".into(), code: None },
             Command::PeerUnpair { target: "laptop".into() },
             Command::PeerRename { target: "laptop".into(), name: "".into() },
             Command::Send {
@@ -3431,6 +3628,9 @@ mod tests {
                 cwd: None,
             },
             Command::ScheduleRun { task: Some("parent-1".into()), project: None, cwd: None },
+            // v25: run / setup scripts.
+            Command::Run { task: Some("fix-auth".into()), project: None, setup: false, stop: false, status: false, member: None, cwd: None },
+            Command::Run { task: None, project: None, setup: true, stop: true, status: false, member: Some("api".into()), cwd: Some("/t".into()) },
             Command::ScheduleDelete { task: Some("parent-1".into()), project: None, delete_reports: true, archive_tasks: false, cwd: None },
             Command::ScheduleDelete { task: Some("parent-1".into()), project: None, delete_reports: false, archive_tasks: true, cwd: None },
         ] {
@@ -3486,6 +3686,9 @@ mod tests {
                 },
                 ProjectMemberInfo { name: "docs".into(), root_path: "/src/docs".into(), non_git: true, base_branch: String::new() },
             ],
+            profile: None,
+            server: None,
+            non_git: false,
         }
     }
 
@@ -3574,6 +3777,7 @@ mod tests {
             diff: Some(DiffStat { files_changed: 3, insertions: 10, deletions: 2, untracked: 1 }),
             group: None,
             spawned_by: None,
+            org: None,
         };
         for data in [
             ReplyData::Hello(HelloData {
@@ -3894,6 +4098,9 @@ mod tests {
                         default_agent: "claude".into(),
                         project_type: "single".into(),
                         members: Vec::new(),
+                        profile: None,
+                        server: None,
+                        non_git: false,
                     },
                     shop_project(),
                 ],
@@ -3945,6 +4152,17 @@ mod tests {
                 text: "All tests pass.".into(),
             }),
             ReplyData::Attach(AttachData { task_id: "w1".into(), reason: "archived".into() }),
+            ReplyData::Run(RunData {
+                task: "web/fix-auth".into(),
+                which: "run".into(),
+                targets: vec![RunTarget {
+                    member: String::new(),
+                    script: "npm run dev".into(),
+                    tab_id: Some("t1".into()),
+                    running: true,
+                    outcome: Some("started".into()),
+                }],
+            }),
             ReplyData::Schedule(ScheduleData {
                 schedules: vec![ScheduleSummary {
                     task_id: "w1".into(),
@@ -4498,5 +4716,77 @@ mod tests {
         for s in [CLI_DISABLED_MESSAGE, VERSION_MISMATCH_MESSAGE, VERSION_STALE_APP_MESSAGE] {
             assert!(!s.contains('\u{2014}'), "em dash in {s:?}");
         }
+    }
+}
+
+/// A task name as a branch and worktree-directory name: lowercase ASCII
+/// alphanumerics, `-` and `_`, dash runs collapsed, no leading or trailing
+/// dash, and never a Windows reserved device name (the slug is a directory,
+/// and a task named on a Mac must still check out on Windows). A name with
+/// no ASCII alphanumerics slugifies to "" and the caller refuses it.
+/// One function for the desktop and termic-server, so one name gives one
+/// branch on either; mirrored character for character by `slugify` in
+/// src/lib/utils.ts (`utils.test.ts` and `slugify_collapses_dash_runs`).
+pub fn slugify(s: &str) -> String {
+    let mapped: String = s
+        .trim()
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .collect();
+    let mut out = String::with_capacity(mapped.len());
+    let mut prev_dash = false;
+    for c in mapped.chars() {
+        if c == '-' {
+            if !prev_dash {
+                out.push(c);
+            }
+            prev_dash = true;
+        } else {
+            out.push(c);
+            prev_dash = false;
+        }
+    }
+    let out = out.trim_matches('-').to_string();
+    let reserved = matches!(out.as_str(), "con" | "prn" | "aux" | "nul")
+        || (out.len() == 4
+            && (out.starts_with("com") || out.starts_with("lpt"))
+            && matches!(out.as_bytes()[3], b'1'..=b'9'));
+    if reserved { format!("{out}-1") } else { out }
+}
+
+/// The key that interrupts an agent's turn without quitting it: Esc for the
+/// TUIs that take it (claude, codex, opencode, cursor, grok), Ctrl+C for the
+/// rest. Shared by the desktop's stream host and termic-server.
+pub fn interrupt_key(agent: &str) -> &'static [u8] {
+    match agent {
+        "claude" | "next-claude" | "codex" | "opencode" | "cursor" | "grok" => b"\x1b",
+        _ => b"\x03",
+    }
+}
+
+#[cfg(test)]
+mod shared_tests {
+    use super::*;
+
+    #[test]
+    fn slugify_is_path_and_branch_safe() {
+        assert_eq!(slugify("Fix the Login bug!"), "fix-the-login-bug");
+        assert_eq!(slugify("../../etc/passwd"), "etc-passwd");
+        assert_eq!(slugify("--rm -rf"), "rm-rf");
+        assert_eq!(slugify("snake_case name"), "snake_case-name");
+        assert_eq!(slugify("日本語"), "");
+        assert_eq!(slugify("CON"), "con-1");
+        assert_eq!(slugify("lpt3"), "lpt3-1");
+        for s in [slugify("-x-"), slugify(" a b "), slugify("a\nb\0c")] {
+            assert!(!s.starts_with('-') && !s.ends_with('-') && !s.contains('/') && !s.contains(".."), "{s}");
+        }
+    }
+
+    #[test]
+    fn interrupt_keys_per_agent() {
+        assert_eq!(interrupt_key("claude"), b"\x1b");
+        assert_eq!(interrupt_key("grok"), b"\x1b");
+        assert_eq!(interrupt_key("shell"), b"\x03");
     }
 }

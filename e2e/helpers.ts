@@ -84,6 +84,8 @@ export interface TermicApi {
     subscribe: (fn: (s: any, prev: any) => void) => () => void;
   };
   useUI: { getState: () => any; setState: (p: any) => void };
+  pinWindowFocus: (focused: boolean | null) => void;
+  useRemote: { getState: () => any; setState: (p: any) => void };
   usePrefs: { getState: () => any; setState: (p: any) => void; subscribe: (fn: (s: any, prev: any) => void) => () => void };
   useRace: { getState: () => any };
   /** PR/MR store (src/store/pr.ts). Specs seed `byTask` directly to render
@@ -171,6 +173,11 @@ export interface TermicApi {
   useForgeLists: { getState: () => any; setState: (p: any) => void };
   /** Forget every list and the launch snapshot. */
   clearForgeLists: () => void;
+  /** The GitHub rate ledger's mirror (store/forgeRate.ts). */
+  useForgeRate: { getState: () => any; setState: (p: any) => void };
+  setDraftStaleMs: (ms: number) => void;
+  /** One idle build-folder cleanup pass (src/lib/idleBuildDirs.ts). */
+  runIdleBuildDirCleanup: () => Promise<{ tasks: string[]; bytes: number } | null>;
   /** Tasks mid-creation (GH #242 — non-blocking worktree create). Seeding an
    *  entry directly lets specs catch PendingTaskRow / CreatingTaskPane in
    *  their "creating" state without racing the fixture repo's near-instant
@@ -1139,13 +1146,16 @@ export async function waitForOutputSpan(taskId: string, ms: number): Promise<voi
  *  which is the only time a badge is meant to persist at all.
  */
 export async function setWindowPresence(focused: boolean): Promise<void> {
-  // Sets the flag, rather than dispatching a focus/blur event. `initWindowFocus`
-  // treats those events only as a cue to re-read `document.hasFocus()`, because
-  // inferring focus from which event arrived gets it wrong when they interleave
-  // during a Space switch. A synthetic event would therefore be a no-op that
-  // silently re-asserted whatever the real window was doing.
+  // PINS the flag, rather than dispatching a focus/blur event. `initWindowFocus`
+  // treats those events only as a cue to re-read `document.hasFocus()`, so a
+  // synthetic one would silently re-assert whatever the real window was doing.
+  // Pinned, not just set: the invisible test window never has real focus, so a
+  // focus, blur or visibilitychange from the desktop (someone using the
+  // machine) re-read it as false and undid this. One such event between this
+  // and an Escape reproduced the interrupt cases' "termic still claims it is
+  // working" exactly.
   await browser.execute((f) => {
-    window.__termic!.useUI.getState().setWindowFocused(f);
+    window.__termic!.pinWindowFocus(f);
   }, focused);
 }
 
@@ -1203,6 +1213,19 @@ export async function typeIntoAgent(taskId: string, text: string): Promise<void>
     text,
   );
   if (result !== "ok") throw new Error(`typeIntoAgent: ${result}`);
+}
+
+/** Type into the open remote task's terminal (RemoteTaskView), through
+ *  xterm's own input path, so the bytes go out exactly as typed keys do. */
+export async function typeIntoRemoteTerminal(text: string): Promise<void> {
+  const result = await browser.execute((line) => {
+    const ta = document.querySelector<HTMLTextAreaElement>('[data-testid="remote-terminal"] .xterm-helper-textarea');
+    if (!ta) return "no remote terminal is open";
+    ta.focus();
+    ta.dispatchEvent(new InputEvent("input", { inputType: "insertText", data: line, bubbles: true }));
+    return "ok";
+  }, text);
+  if (result !== "ok") throw new Error(`typeIntoRemoteTerminal: ${result}`);
 }
 
 export async function submitToAgent(taskId: string, text: string): Promise<void> {
@@ -2022,3 +2045,15 @@ export async function clickMenuItemUntilReady(
   });
 }
 
+
+/** Argv of every agent spawn in a task, oldest first, from the fixture's
+ *  e2e-agent-argv.log. Only NEWLINE-TERMINATED lines count, so a read that
+ *  races the fixture's append never returns a half-written line. */
+export function spawnArgvLog(taskId: string): string[] {
+  const log = path.join(dataDir, "e2e-agent-argv.log");
+  if (!fs.existsSync(log)) return [];
+  const raw = fs.readFileSync(log, "utf8");
+  return raw.slice(0, raw.lastIndexOf("\n") + 1).split("\n")
+    .filter(l => l.startsWith(taskId + "\t"))
+    .map(l => l.slice(taskId.length + 1));
+}

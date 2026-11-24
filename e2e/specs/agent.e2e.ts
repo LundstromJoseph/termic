@@ -15,7 +15,7 @@ import { dataDir } from "../../wdio.conf.js";
 // from the store (`lastOutputAt`) — xterm paints to a WebGL canvas, so PTY
 // bytes are genuinely not in the DOM.
 
-import {
+import { spawnArgvLog,
   archiveTask,
   clickByText,
   clickWhenVisible,
@@ -702,7 +702,23 @@ describe("message queue", () => {
   // popover). The point of both is to IGNORE the work-done gate, so each case
   // queues while the agent is mid-turn and asserts the messages arrive anyway.
   it("sends every queued message now, in order, while the agent is working", async () => {
-    await submitToAgent(taskId, "work");
+    // The case before ends when its queued line REACHES the agent, i.e. at the
+    // start of that turn. Submitting inside it loses this turn's badge: that
+    // turn's done lands after this submit, so the store's sticky-done gate
+    // (app.ts setWorkState) sees no send since the done and refuses every
+    // "working" for 8s, longer than #busy lasts. Start once the last send's
+    // turn has been called done. (A watched tab's done is downgraded to idle,
+    // which the gate does not hold, so idle is settled too.)
+    await browser.waitUntil(
+      () => browser.execute((id) => {
+        const t = window.__termic!.useApp.getState().tabs[id][0];
+        if (t.workState === "working") return false;
+        return t.workState !== "done" || (t.workDoneAt ?? 0) > (t.lastInputAt ?? 0);
+      }, taskId),
+      { timeout: 15_000, interval: 200, timeoutMsg: "the previous turn was never called done" },
+    );
+    // A turn that lasts: the default one can end before the badge latches.
+    await submitToAgent(taskId, "#busy");
     await waitForWorkBadge(taskId, "working", {
       timeout: 10_000, message: "agent never went back to working",
     });
@@ -2469,10 +2485,7 @@ describe("main-checkout resume for a capture-resume agent", () => {
    *  the store can hold a session id while the flag that would have used it
    *  never reaches the process, and that is exactly the bug shape here. */
   function spawnArgv(id: string): string[] {
-    const raw = readFileSync(join(dataDir, "e2e-agent-argv.log"), "utf8");
-    return raw.split("\n")
-      .filter(l => l.startsWith(id + "\t"))
-      .map(l => l.slice(id.length + 1));
+    return spawnArgvLog(id);
   }
 
   after(async () => {
@@ -2558,10 +2571,7 @@ describe("a claude session that moves after /clear is the one resumed", () => {
   let tabIds: string[] = [];
 
   function spawnArgv(id: string): string[] {
-    const raw = readFileSync(join(dataDir, "e2e-agent-argv.log"), "utf8");
-    return raw.split("\n")
-      .filter(l => l.startsWith(id + "\t"))
-      .map(l => l.slice(id.length + 1));
+    return spawnArgvLog(id);
   }
   const sessions = (id: string) => browser.execute((t, ids) => {
     const st = window.__termic!.useApp.getState();
@@ -2728,8 +2738,7 @@ describe("a stored session that no longer resolves opens the agent's picker (#31
   before(() => writeFileSync(join(dataDir, "e2e-dead-sessions"), ""));
 
   function spawnArgv(id: string): string[] {
-    const raw = readFileSync(join(dataDir, "e2e-agent-argv.log"), "utf8");
-    return raw.split("\n").filter(l => l.startsWith(id + "\t")).map(l => l.slice(id.length + 1));
+    return spawnArgvLog(id);
   }
   const stored = (id: string) => browser.execute(
     (t) => (window.__termic!.useApp.getState().tabs[t] ?? [])[0]?.sessionId ?? null, id);
@@ -2977,8 +2986,7 @@ describe("a secondary capture-resume tab in the main checkout", () => {
   let taskId: string | null = null;
 
   function argvFor(id: string): string[] {
-    const raw = readFileSync(join(dataDir, "e2e-agent-argv.log"), "utf8");
-    return raw.split("\n").filter(l => l.startsWith(id + "\t")).map(l => l.slice(id.length + 1));
+    return spawnArgvLog(id);
   }
 
   after(async () => {
@@ -3087,8 +3095,7 @@ describe("closing the main agent tab while another tab is open", () => {
   let taskId: string | null = null;
 
   function argvFor(id: string): string[] {
-    const raw = readFileSync(join(dataDir, "e2e-agent-argv.log"), "utf8");
-    return raw.split("\n").filter(l => l.startsWith(id + "\t")).map(l => l.slice(id.length + 1));
+    return spawnArgvLog(id);
   }
 
   after(async () => {
@@ -3099,6 +3106,13 @@ describe("closing the main agent tab while another tab is open", () => {
     taskId = await openTask("e2e-capture-stranded", true, "fakecapture");
     const id = taskId;
     await waitForAgentReady(id);
+    // Ready means ANY output, and on Windows ConPTY writes its own setup bytes
+    // before the fixture's script runs, so the first spawn's argv line can
+    // still be missing here. Counted then, `before` was 0, that late line (an
+    // empty argv) satisfied "a new spawn landed" below, and the case read ""
+    // where the resume should be. Seen twice on Windows CI.
+    await browser.waitUntil(() => Promise.resolve(argvFor(id).length >= 1),
+      { timeout: 20_000, timeoutMsg: "the first spawn never logged its argv" });
     const agentTab = await browser.execute(
       (t) => (window.__termic!.useApp.getState().tabs[t] ?? [])[0]?.id as string, id);
     await browser.execute((t, tb, sid) => {
@@ -3645,6 +3659,31 @@ describe("agent messages wait for your draft", () => {
     await browser.waitUntil(async () => (await queuedCount(taskId)) === 0 && (await echoed("fourth-report")), {
       timeout: 30_000, timeoutMsg: "the report stayed queued behind a draft that was not there",
     });
+  });
+
+  // A draft the tracker believes in but nobody touches expires, so a wrong
+  // guess cannot hold another agent's report until someone presses Enter.
+  // Two minutes in the app; shortened here.
+  it("a draft left untouched expires, and the held report goes", async function () {
+    this.timeout(90_000);
+    await browser.execute(() => window.__termic!.setDraftStaleMs(4_000));
+    try {
+      await typeIntoAgent(taskId, "left alone");
+      await browser.waitUntil(composing, { timeout: 5_000, timeoutMsg: "the draft was never noticed" });
+      const r = await cliRpc({ cmd: "send", task: NAME, prompt: "fifth-report" });
+      expect(r.ok).toBe(true);
+      expect(r.data.mode).toBe("queued");
+      await browser.waitUntil(async () => !(await composing()), {
+        timeout: 15_000, timeoutMsg: "the untouched draft never expired",
+      });
+      // The accepted cost: the fixture's tty line still holds the draft, so
+      // the report is typed after it. What matters is that it went.
+      await browser.waitUntil(async () => (await queuedCount(taskId)) === 0 && (await logs()).includes("fifth-report"), {
+        timeout: 30_000, timeoutMsg: "the report stayed queued after the draft expired",
+      });
+    } finally {
+      await browser.execute(() => window.__termic!.setDraftStaleMs(120_000));
+    }
   });
 });
 

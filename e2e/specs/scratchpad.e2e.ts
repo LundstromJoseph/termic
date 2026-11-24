@@ -126,6 +126,21 @@ describe("scratchpads", () => {
       ).toUpperCase().includes("JSON"), taskId),
       { timeout: 10_000, timeoutMsg: "the syntax button never named JSON" },
     );
+    // Leaving markdown swaps the markdown shell for the plain editor, which
+    // REMOUNTS it, and the button names JSON before the new view exists. That
+    // view focuses itself on load; if the next case has opened the syntax
+    // picker by then, the focus leaves the non-modal dialog and Radix closes
+    // it. Measured: the view landed ~25ms after the button changed, and a
+    // picker opened in that gap was gone 500ms later with focus in
+    // cm-content. Wait for the new view, and for the focus it takes.
+    await browser.waitUntil(
+      () => browser.execute((id) => {
+        const root = document.querySelector(`[data-task-id="${id}"]`);
+        return !!(root?.querySelector(".cm-editor") as { __cmView?: unknown } | null)?.__cmView
+          && !!document.activeElement?.closest(".cm-editor");
+      }, taskId),
+      { timeout: 10_000, timeoutMsg: "the JSON pad's editor never remounted and took focus" },
+    );
   });
 
   it("takes a manual syntax pick and persists it in the index", async () => {
@@ -514,11 +529,11 @@ describe("scratchpads from the CLI", () => {
     });
     // Waited for, not read once. A write to an OPEN pad does not touch the
     // file: scratchCli's writePad hands the text to the live editor and
-    // returns, and the disk copy is that editor's own debounced flush
-    // (SCRATCH_FLUSH_MS, 500ms, in EditorPane). So the CLI reply and the
-    // editor showing the text say nothing about the file yet, and reading it
-    // immediately is a race this spec won on a Mac and lost on a Windows
-    // runner, where it read back the text from before the replace.
+    // returns, and the disk copy is that editor's own flush, still in flight
+    // when the CLI replies. It must also land AFTER the flush of the edit
+    // above: scratch_write runs on a blocking pool, and before EditorPane
+    // chained its flushes the older text could land last and stay there for
+    // good, which is how this failed on a Linux runner.
     await browser.waitUntil(
       async () => (await browser.execute((id, sid) => window.__termic!.ipc.scratchRead(id, sid), taskId, pad.scratchId)) === "replaced\n",
       { timeout: 8_000, timeoutMsg: "the replace never reached the file behind the open editor" },

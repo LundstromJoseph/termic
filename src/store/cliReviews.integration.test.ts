@@ -78,7 +78,7 @@ describe("reviewChangedHandler", () => {
     useReviews.getState().setShown("a", null);
     useUI.getState().clearReviewReveal();
 
-    useUI.getState().toasts[0].action!.onClick();
+    useUI.getState().toasts[0].actions[0].onClick();
 
     expect(useApp.getState().rightPanelHidden).toBe(false);
     expect(useApp.getState().activeTaskId).toBe("a");

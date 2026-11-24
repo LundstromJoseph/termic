@@ -3,11 +3,11 @@
 # Cargo.lock and target/ where every script, CI cache key, and Makefile
 # path already expects them.
 [workspace]
-members = ["../termic-proto", "../termic-cli"]
+members = ["../termic-proto", "../termic-cli", "../termic-remote", "../termic-server"]
 
 [package]
 name = "termic"
-version = "1.22.1"
+version = "2.0.3"
 description = "Run claude, gemini, and codex in parallel — each in its own git worktree."
 authors = ["Simion Agavriloaei"]
 edition = "2021"
@@ -93,6 +93,9 @@ tauri-plugin-deep-link = "2"
 # Wire types + framing for the CLI control socket (cli_server.rs). The
 # same crate termic-cli links, so server and client cannot drift.
 termic-proto = { path = "../termic-proto" }
+termic-remote = { path = "../termic-remote" }
+# The phone pairing QR code (peers.rs), drawn as SVG; no image crates.
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 # canonicalize() without Windows' `\\?\` verbatim prefix, which cmd.exe (and
 # so every npm `.cmd` agent shim) refuses as a working directory. A no-op
 # re-export of std on unix.
@@ -161,7 +164,7 @@ windows-core = "0.61"
 # Both crates are already in the dependency tree via tauri/wry, so pinning
 # them here doesn't change resolution.
 [target.'cfg(target_os = "macos")'.dependencies]
-objc2 = "0.6"
+objc2 = { version = "0.6", features = ["exception"] }
 objc2-foundation = { version = "0.3", features = ["NSProcessInfo", "NSData"] }
 # NSApplication.setApplicationIconImage, used ONLY by set_dev_dock_icon (debug
 # builds): `tauri dev` runs an unbundled binary, so the dock icon can't come
@@ -184,6 +187,8 @@ security-framework = { version = "3", features = ["OSX_10_15"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus = { version = "5.15", features = ["blocking-api"] }
+# Already in the tree through wry; named here only to log a dead web process.
+webkit2gtk = { version = "2.0", features = ["v2_20"] }
 
 [dev-dependencies]
 tempfile = "3"

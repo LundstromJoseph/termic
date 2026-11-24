@@ -49,11 +49,17 @@ mod shell_env;
 mod automation;
 mod cli_server;
 mod forge;
+mod forge_rate;
 mod theme_import;
 mod mcp_server;
 mod mdns;
 mod peer_crypto;
 mod peers;
+mod push;
+mod remote_client;
+mod remote_server;
+mod server_projects;
+mod task_host;
 // Config sync through a git repo the user owns (docs/ideas/config-sync.md).
 mod config_sync;
 pub mod customizations;
@@ -92,6 +98,7 @@ mod profiles;
 mod reviews;
 mod review_iterations;
 mod schedules;
+mod build_dirs;
 mod sudo_touchid;
 mod caffeinate;
 mod panic_log;
@@ -106,6 +113,11 @@ use sandbox::SandboxBundle;
 pub struct Project {
     pub id: String,
     pub name: String,
+    /// The server (`servers.json` id) this project lives on, reached over
+    /// SSH through termic-server; `root_path` is then a path on that box.
+    /// None for a project on this machine (docs/remote.md, Servers).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server: Option<String>,
     /// Filesystem path to the project's git repo. For
     /// `ProjectType::Single` this is the only repo in play. For
     /// `ProjectType::Multi` it's the HOST repo — the one that owns
@@ -760,6 +772,12 @@ pub struct Task {
     /// appends at the bottom instead of jumping to the top.
     #[serde(default)]
     pub order: Option<u32>,
+    /// Pinned in the sidebar (GH #458): neither the sidebar query nor the
+    /// project's filter hides it, and its project and task group stay listed
+    /// with it. Written by `task_set_pinned`. Omitted from the file while
+    /// false, so a record that was never pinned reads and writes as before.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pinned: bool,
     /// Task group this task belongs to in the sidebar, or `None`. A group is
     /// born when an agent running in task A creates task B through the CLI
     /// or MCP: both join a group whose `id` is A's task id, so the
@@ -813,6 +831,16 @@ pub struct Task {
     /// See docs/profiles.md, "the profile rides the DATA, not the call".
     #[serde(skip)]
     pub profile: ProfileId,
+    /// RFC3339, stamped by `task_mark_active` when the task becomes the
+    /// active one in the UI (throttled to once an hour by the caller). The
+    /// idle build-folder cleanup (build_dirs.rs) measures idleness from
+    /// max(this, `created`). `None` on tasks never opened since it existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_active_at: Option<String>,
+    /// RFC3339, set when build_dirs.rs deleted this task's build folders.
+    /// The next open re-runs the setup script (or toasts) and clears it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifacts_freed_at: Option<String>,
 }
 
 /// One durable agent tab. `session_id` is termic's own per-tab session
@@ -1190,6 +1218,11 @@ pub(crate) fn profiles_registry() -> profiles::Registry {
 /// install that never made a second profile byte-identical to a pre-profiles
 /// one (docs/plans/profiles.md, "the default profile stays exactly where it
 /// is").
+/// The profiles registry, read now (empty with no profiles or no data dir).
+pub(crate) fn profile_registry() -> profiles::Registry {
+    global_dir().map(|g| profiles::load_registry(&g)).unwrap_or_default()
+}
+
 pub(crate) fn profile_dir(id: &ProfileId) -> Result<PathBuf> {
     let p = profiles::profile_dir(&global_dir()?, id);
     fs::create_dir_all(&p)?;
@@ -2808,6 +2841,12 @@ fn save_task(w: &Task) -> Result<()> {
     // The only writer of task records, so it is also what keeps a remembered
     // routing miss from outliving a task created after it (see TASK_WINDOW).
     note_task_window(&w.id, w.profile.window_label());
+    // A rename, pin or group move changes what a phone's list shows but not
+    // the agent cache its loop waits on: wake it now rather than on its 4 s
+    // fallback (remote_server.rs STATE_REFRESH).
+    cli_server::global_agent_cache().nudge();
+    // A server task's name, pin, order or group, shared through its box.
+    server_projects::push_org_if_changed(w);
     Ok(())
 }
 
@@ -3337,6 +3376,17 @@ pub(crate) fn git_output(args: &[&str], cwd: &Path, stdin: Option<&[u8]>) -> Res
 }
 
 fn git_bytes(args: &[&str], cwd: &Path) -> Result<Vec<u8>> {
+    // A server project's folder: git runs on the box, through termic-server's
+    // `exec` (docs/remote.md, Servers).
+    if let Some(server) = server_projects::server_for_path(cwd) {
+        let mut argv = vec!["git"];
+        argv.extend_from_slice(args);
+        let (code, out, err) = server_projects::exec_on(&server, cwd, &argv, &[("GIT_OPTIONAL_LOCKS", "0")]).map_err(|e| anyhow!(e))?;
+        if code != 0 {
+            return Err(anyhow!("git {} failed: {err}", args.join(" ")));
+        }
+        return Ok(out);
+    }
     let mut cmd = git_cmd(args, cwd);
     // Space-joined, not {:?}: Debug escapes `\` to `\\`, so on Windows the
     // error showed every path doubled and read as the cause of the
@@ -3350,6 +3400,19 @@ fn git_bytes(args: &[&str], cwd: &Path) -> Result<Vec<u8>> {
         return Err(anyhow!("{cmd_line} failed: {}", String::from_utf8_lossy(&out.stderr)));
     }
     Ok(out.stdout)
+}
+
+/// git with any exit status accepted: (success, stdout). For the few
+/// callers that read output from a "failing" git (`diff --no-index` exits 1
+/// when files differ). A server project's folder runs it on the box.
+fn git_raw(args: &[&str], cwd: &Path) -> Option<(bool, Vec<u8>)> {
+    if let Some(server) = server_projects::server_for_path(cwd) {
+        let mut argv = vec!["git"];
+        argv.extend_from_slice(args);
+        return server_projects::exec_on(&server, cwd, &argv, &[("GIT_OPTIONAL_LOCKS", "0")]).ok().map(|(code, out, _)| (code == 0, out));
+    }
+    let out = git_command().args(args).current_dir(cwd).env("PATH", shell_env::resolved_path()).output().ok()?;
+    Some((out.status.success(), out.stdout))
 }
 
 pub(crate) fn git(args: &[&str], cwd: &Path) -> Result<String> {
@@ -3818,7 +3881,9 @@ struct PtySlot {
     /// above: `task_id` doubles as the sandbox trigger and `role` makes a
     /// PTY CLI-addressable (and allocates a retention ring), so neither
     /// can be set on a plain shell or a run-script tab just to label it.
-    /// NOTHING may branch on this field except reporting.
+    /// NOTHING may branch on this field except reporting, and the idle
+    /// build-folder cleanup (build_dirs.rs), which reads it only to leave a
+    /// task with an open shell ALONE.
     owner: Option<PtyOwner>,
     /// `--name` of the Docker container this PTY's `docker run` is
     /// attached to, if this is a Docker-sandboxed spawn. `None` for every
@@ -3898,7 +3963,8 @@ pub struct PtyRole {
     /// exist.
     #[serde(default)]
     pub tab_id: Option<String>,
-    /// "agent" (an agent CLI tab) or "aux" (the task's aux terminal).
+    /// "agent" (an agent CLI tab), "aux" (the task's aux terminal) or "run"
+    /// (a run/setup tab: addressable by `--tab` id only, never a default).
     pub kind: String,
     /// The task's default agent tab: `attach`/`logs`' default target.
     #[serde(default)]
@@ -3976,6 +4042,15 @@ impl PtyFeed {
         inner
             .taps
             .retain(|tx| tx.try_send(PtyTapMsg::Data(data.to_vec())).is_ok());
+    }
+    /// An empty chunk to every tap, outside the ring: wakes each forwarder
+    /// so it re-reads the PTY's size now. A forwarder learns of a resize
+    /// only per chunk, and an idle agent prints none, so a phone watching
+    /// a terminal the desktop took back was never told (no overlay; a
+    /// stale screen until the agent next printed).
+    fn nudge(&self) {
+        let mut inner = self.inner.lock();
+        inner.taps.retain(|tx| tx.try_send(PtyTapMsg::Data(Vec::new())).is_ok());
     }
     fn send_detach(&self, reason: &str) {
         let mut inner = self.inner.lock();
@@ -4221,6 +4296,14 @@ pub(crate) fn pty_write_inner(manager: &PtyManager, pty_id: &str, data: &[u8]) -
     Ok(())
 }
 
+/// A PTY's size as (rows, cols), for a remote terminal view that must
+/// draw at the desktop's size (remote_server.rs). None for a dead id.
+pub(crate) fn pty_size_inner(manager: &PtyManager, pty_id: &str) -> Option<(u16, u16)> {
+    let map = manager.inner.lock();
+    let size = map.get(pty_id)?.master.get_size().ok()?;
+    Some((size.rows, size.cols))
+}
+
 /// Resize a PTY by id; same sharing rationale as `pty_write_inner`.
 pub(crate) fn pty_resize_inner(
     manager: &PtyManager,
@@ -4233,6 +4316,9 @@ pub(crate) fn pty_resize_inner(
         slot.master
             .resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
             .map_err(|e| e.to_string())?;
+        if let Some(feed) = &slot.feed {
+            feed.nudge();
+        }
     }
     Ok(())
 }
@@ -4243,10 +4329,16 @@ pub struct PtyManager {
 }
 
 #[derive(Clone, Serialize)]
-struct PtyChunk { data: Vec<u8> }
+pub(crate) struct PtyChunk { pub(crate) data: Vec<u8> }
 
 #[derive(Clone, Serialize)]
-struct PtyExit { code: Option<i32> }
+pub(crate) struct PtyExit {
+    pub(crate) code: Option<i32>,
+    /// A server PTY its box ended on a restart onto a new build: the pane
+    /// starts it again instead of showing it exited.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) restarted: bool,
+}
 
 /// Truth about how the agent actually got spawned - not just whether
 /// the task WANTED to be sandboxed but whether the cage actually
@@ -4564,10 +4656,49 @@ fn configure_terminal_env(cmd: &mut CommandBuilder) {
     for key in FOREIGN_TERMINAL_ENV {
         cmd.env_remove(key);
     }
-    cmd.env("TERM", "xterm-256color");
-    cmd.env("COLORTERM", "truecolor");
-    cmd.env("TERM_PROGRAM", "iTerm.app");
-    cmd.env("TERM_PROGRAM_VERSION", "3.5.0");
+    for (k, v) in TERMINAL_CLAIMS {
+        cmd.env(k, v);
+    }
+}
+
+/// The terminal Termic claims to be, so agents emit the OSCs it parses.
+const TERMINAL_CLAIMS: [(&str, &str); 4] = [
+    ("TERM", "xterm-256color"),
+    ("COLORTERM", "truecolor"),
+    ("TERM_PROGRAM", "iTerm.app"),
+    ("TERM_PROGRAM_VERSION", "3.5.0"),
+];
+
+/// The env a task's spawn gets wherever it runs, on this computer or on a
+/// server (docs/remote.md, Servers): the task's identity
+/// (TERMIC_TASK carries the NAME, as setup and run scripts always received;
+/// TERMIC_TASK_ID the unambiguous handle), a multi-repo task's sibling
+/// ports, the agent's own tab (GH #358, so `termic prop` writes where it
+/// runs) and the terminal claims. What only makes sense here (TERMIC_CLI,
+/// the sandbox, accounts, TERMIC_PTY) stays in `pty_spawn`.
+pub(crate) fn task_spawn_env(args: &SpawnArgs) -> Vec<(String, String)> {
+    let mut env = Vec::new();
+    if let Some(wid) = args.task_id.as_deref() {
+        if let Some(task) = load_tasks_all().into_iter().find(|w| w.id == wid) {
+            // Multi-repo: sibling ports, so the agent (or anything run in
+            // this PTY) can `curl localhost:$TERMIC_PORT_API`. Same scheme
+            // as the script-stream spawn.
+            for (i, m) in task.composition.iter().enumerate() {
+                let p = if m.port == 0 { task.port.saturating_add(i as u16 + 1) } else { m.port };
+                let sanitized: String = m.dir_name.chars()
+                    .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_uppercase() } else { '_' })
+                    .collect();
+                env.push((format!("TERMIC_PORT_{sanitized}"), p.to_string()));
+            }
+            env.push(("TERMIC_TASK".into(), task.name.clone()));
+        }
+        env.push(("TERMIC_TASK_ID".into(), wid.to_string()));
+    }
+    if let Some(tab) = agent_tab_id(args) {
+        env.push(("TERMIC_TAB_ID".into(), tab.to_string()));
+    }
+    env.extend(TERMINAL_CLAIMS.iter().map(|(k, v)| (k.to_string(), v.to_string())));
+    env
 }
 
 /// Per-spawn opt-in sent by the frontend (Settings > Appearance > Share
@@ -4723,6 +4854,9 @@ fn descendant_names(_root: u32) -> Vec<String> { Vec::new() }
 /// that exited before the ack).
 #[tauri::command]
 fn pty_attached(state: State<'_, PtyManager>, id: String) {
+    if remote_client::pty_attached(&id) {
+        return;
+    }
     let map = state.inner.lock();
     let Some(slot) = map.get(&id) else { return };
     // Under the buffer mutex, exactly like the reader's `done` store: a store
@@ -4734,28 +4868,11 @@ fn pty_attached(state: State<'_, PtyManager>, id: String) {
 }
 
 
-/// Resolve the slave device path (`/dev/ttysNNN`) for a pty master, so it can be
-/// handed to agent hooks as `TERMIC_PTY`.
-///
-/// `ptsname` returns a pointer to a STATIC buffer and has no `_r` variant on
-/// macOS, so two concurrent spawns could otherwise read each other's result.
-/// The lock is held across the call and the copy, which is the whole critical
-/// section.
+/// The slave device path (`/dev/ttysNNN`) of a pty master, handed to agent
+/// hooks as `TERMIC_PTY` (termic_remote::pty, shared with termic-server).
 #[cfg(unix)]
 pub(crate) fn pty_slave_path(master: &Box<dyn portable_pty::MasterPty + Send>) -> Option<String> {
-    use std::os::unix::io::RawFd;
-    static PTSNAME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let fd: RawFd = master.as_raw_fd()?;
-    let _guard = PTSNAME_LOCK.lock().ok()?;
-    // SAFETY: `fd` is a live pty master owned by the caller for the duration of
-    // this call, and the returned pointer is copied before the lock is dropped.
-    unsafe {
-        let p = libc::ptsname(fd);
-        if p.is_null() {
-            return None;
-        }
-        Some(std::ffi::CStr::from_ptr(p).to_string_lossy().into_owned())
-    }
+    termic_remote::pty::slave_path(master.as_raw_fd()?)
 }
 
 #[cfg(not(unix))]
@@ -4770,12 +4887,170 @@ fn agent_tab_id(args: &SpawnArgs) -> Option<&str> {
     args.role.as_ref().filter(|r| r.kind == "agent").and_then(|r| r.tab_id.as_deref())
 }
 
+/// A server PTY's id. A task's tab gets a stable one, `<task>:<tab>`, and
+/// its default agent `<task>:agent`, so the id is the claim: termic-server
+/// attaches an open whose id is already running instead of starting a
+/// second process. A restarted desktop finds its agent still running on
+/// the box, and two desktops opening one task share one agent. Anything
+/// without a tab (an aux shell spawned bare) gets a fresh id.
+fn server_pty_id(args: &SpawnArgs) -> String {
+    if let Some(r) = &args.role {
+        if r.kind == "agent" && r.is_default {
+            return format!("{}:agent", r.task_id);
+        }
+        if let Some(tab) = &r.tab_id {
+            return format!("{}:{tab}", r.task_id);
+        }
+    }
+    // A shell tab carries no CLI role (it stays out of the CLI's reach) but
+    // its owner names the tab, which is all the id needs.
+    if let Some(PtyOwner { task_id: Some(task), tab_id: Some(tab), .. }) = &args.owner {
+        return format!("{task}:{tab}");
+    }
+    Uuid::new_v4().to_string()
+}
+
+/// The argv a spawn built for this computer runs as on a box. The program
+/// runs as named (termic-server looks a bare name up on the login shell's
+/// PATH there, as the registry's defaults are). A shell running a command
+/// (`zsh -lic "<run script>"`) runs under the box's own login shell with
+/// the same flags, since the box may not have this computer's shell.
+fn server_argv(cmd: &str, args: &[String]) -> Vec<String> {
+    let name = Path::new(cmd).file_name().and_then(|n| n.to_str()).unwrap_or(cmd).to_string();
+    if matches!(name.as_str(), "zsh" | "bash" | "fish" | "sh" | "dash" | "ksh") {
+        return ["/bin/sh", "-c", "exec \"${SHELL:-/bin/sh}\" \"$@\"", "sh"].iter().map(|s| s.to_string())
+            .chain(args.iter().cloned()).collect();
+    }
+    std::iter::once(cmd.to_string()).chain(args.iter().cloned()).collect()
+}
+
+/// A terminal in a server project's folder runs on the box (termic-server
+/// `pty_open`); its output arrives as the same `pty://` events, so the panes
+/// need no remote branch. A bare login shell becomes the box's own login
+/// shell: this Mac's `/bin/zsh` may not exist there.
+fn server_pty_spawn(server: &str, args: &SpawnArgs) -> Result<SpawnResult, String> {
+    let shell_only = Path::new(&args.cmd).file_name().and_then(|n| n.to_str())
+        .is_some_and(|n| matches!(n, "zsh" | "bash" | "fish" | "sh" | "dash" | "ksh"))
+        && args.args.iter().all(|a| matches!(a.as_str(), "-l" | "-i" | "--login" | "-il" | "-li"));
+    let argv = if shell_only { Vec::new() } else { server_argv(&args.cmd, &args.args) };
+    // The claim on the box, and this spawn's own id here (unique, so a kill
+    // of an earlier spawn cannot reach this one: remote_client::pty_open).
+    let claim = server_pty_id(args);
+    // `/` keeps it a legal Tauri event name (`pty://<id>`).
+    let id = format!("{claim}/{}", &Uuid::new_v4().simple().to_string()[..8]);
+    // The webview's overlay, then what every task spawn gets (as locally,
+    // the task env applied after the overlay wins).
+    let mut env: Vec<(String, String)> = args.env.iter()
+        .filter(|(k, _)| k.as_str() != SHARE_HISTORY_ENV)
+        .map(|(k, v)| (k.clone(), v.clone())).collect();
+    for (k, v) in task_spawn_env(args) {
+        env.retain(|(e, _)| *e != k);
+        env.push((k, v));
+    }
+    dlog(&format!("[server-pty] spawn {id}"));
+    remote_client::pty_open(server, &id, &claim, &args.cwd, argv, env, args.cols, args.rows)?;
+    // A slot like a local PTY's, so everything that finds, reads, types into
+    // or sizes a terminal (the CLI's logs / send / attach, the phone host)
+    // has one path: its writer and master forward to the server, and the
+    // feed fills from the server's output (server_projects' sink).
+    if let Some(app) = server_projects::app_handle() {
+        let state = tauri::Manager::state::<PtyManager>(&app);
+        let mut map = state.inner.lock();
+        map.insert(id.clone(), PtySlot {
+            writer: Arc::new(Mutex::new(Box::new(RemotePtyWriter { pid: id.clone() }))),
+            master: Box::new(RemotePtyMaster { pid: id.clone(), size: Mutex::new((args.rows, args.cols)) }),
+            child_pid: None,
+            sandbox: None,
+            shell: None,
+            keychain: None,
+            task_id: args.task_id.clone(),
+            role: args.role.clone(),
+            feed: args.role.as_ref().map(|_| Arc::new(PtyFeed::new())),
+            owner: args.owner.clone(),
+            docker_container: None,
+            out_bytes: Arc::new(AtomicU64::new(0)),
+            seq: next_pty_seq(),
+            attached: Arc::new(AtomicBool::new(true)),
+            out_buf: Arc::new((Mutex::new(Vec::new()), Condvar::new())),
+        });
+    }
+    Ok(SpawnResult { id, sandbox: SandboxStatus { active: false, proxy_active: false, warning: String::new() }, account: None })
+}
+
+/// A server PTY's output reached this desktop: its slot's feed and byte
+/// count, as a local PTY's reader thread does.
+pub(crate) fn server_pty_output(app: &AppHandle, pid: &str, data: &[u8]) {
+    let state = tauri::Manager::state::<PtyManager>(app);
+    let map = state.inner.lock();
+    if let Some(slot) = map.get(pid) {
+        slot.out_bytes.fetch_add(data.len() as u64, Ordering::Relaxed);
+        if let Some(feed) = &slot.feed {
+            feed.push(data);
+        }
+    }
+}
+
+/// A server PTY ended: its slot goes, as a local PTY's waiter reaps it.
+pub(crate) fn server_pty_gone(app: &AppHandle, pid: &str) {
+    dlog(&format!("[server-pty] gone {pid}"));
+    tauri::Manager::state::<PtyManager>(app).inner.lock().remove(pid);
+}
+
+/// Typing into a server PTY through its slot (the CLI's `send` and attach).
+struct RemotePtyWriter {
+    pid: String,
+}
+
+impl Write for RemotePtyWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        remote_client::pty_input(&self.pid, buf).map_err(std::io::Error::other)?;
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// A server PTY's size through its slot: a resize goes to the server.
+struct RemotePtyMaster {
+    pid: String,
+    size: Mutex<(u16, u16)>,
+}
+
+impl portable_pty::MasterPty for RemotePtyMaster {
+    fn resize(&self, size: PtySize) -> Result<(), anyhow::Error> {
+        *self.size.lock() = (size.rows, size.cols);
+        remote_client::pty_resize(&self.pid, size.cols, size.rows).map_err(anyhow::Error::msg)
+    }
+    fn get_size(&self) -> Result<PtySize, anyhow::Error> {
+        let (rows, cols) = *self.size.lock();
+        Ok(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
+    }
+    fn try_clone_reader(&self) -> Result<Box<dyn std::io::Read + Send>, anyhow::Error> {
+        Err(anyhow::anyhow!("a server PTY's output arrives over its connection"))
+    }
+    fn take_writer(&self) -> Result<Box<dyn Write + Send>, anyhow::Error> {
+        Ok(Box::new(RemotePtyWriter { pid: self.pid.clone() }))
+    }
+    #[cfg(unix)]
+    fn process_group_leader(&self) -> Option<libc::pid_t> {
+        None
+    }
+    #[cfg(unix)]
+    fn as_raw_fd(&self) -> Option<std::os::unix::io::RawFd> {
+        None
+    }
+}
+
 #[tauri::command]
 fn pty_spawn(
     app: AppHandle,
     state: State<'_, PtyManager>,
     args: SpawnArgs,
 ) -> Result<SpawnResult, String> {
+    if let Some(server) = server_projects::server_for_path(Path::new(&args.cwd)) {
+        return server_pty_spawn(&server, &args);
+    }
     // a shell running a Secrets role (docs/sandbox.md "Shells"). None for
     // every other spawn, and nothing below changes for those.
     let shell_bundle = match plan_shell_secrets(&args, sandbox::available(), |tid| {
@@ -5178,26 +5453,11 @@ fn pty_spawn(
     // Multi-repo: expose sibling ports so the agent (or anything the
     // user runs in this PTY) can `curl localhost:$TERMIC_PORT_API`
     // without hardcoding. Same scheme as the script-stream spawn.
-    let mut task_name: Option<String> = None;
-    if let Some(wid) = args.task_id.as_deref() {
-        if let Some(task) = load_tasks_all().into_iter().find(|w| w.id == wid) {
-            for (i, m) in task.composition.iter().enumerate() {
-                let p = if m.port == 0 { task.port.saturating_add(i as u16 + 1) } else { m.port };
-                let sanitized: String = m.dir_name.chars()
-                    .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_uppercase() } else { '_' })
-                    .collect();
-                cmd.env(format!("TERMIC_PORT_{sanitized}"), p.to_string());
-            }
-            // Reused below for TERMIC_TASK, saving a third load_tasks
-            // disk scan per spawn.
-            task_name = Some(task.name.clone());
-        }
+    for (k, v) in task_spawn_env(&args) {
+        cmd.env(k, v);
     }
-    // Task identity + control-plane advertisement (docs/plans/cli.md,
-    // "Agents as users"). TERMIC_TASK carries the task NAME, matching
-    // what setup/run scripts have always received; TERMIC_TASK_ID is
-    // the unambiguous handle (names can repeat across projects), and
-    // the CLI resolves either. TERMIC_CLI is the absolute path of the
+    // Control-plane advertisement (docs/plans/cli.md, "Agents as users").
+    // TERMIC_CLI is the absolute path of the
     // bundled binary, injected only while "Enable CLI" is on so the
     // advertisement is never a lie; an ENFORCING-caged agent still sees
     // it, runs it, and gets the explicit "control plane unavailable"
@@ -5205,12 +5465,6 @@ fn pty_spawn(
     // allowed through by contract (observe, never block). The TOKEN is
     // deliberately never here: pty_spawn hands this env to every child,
     // caged included (cli_server.rs).
-    if let Some(wid) = args.task_id.as_deref() {
-        cmd.env("TERMIC_TASK_ID", wid);
-        if let Some(name) = &task_name {
-            cmd.env("TERMIC_TASK", name);
-        }
-    }
     let inherits_customizations = spawn_task.as_ref().map(|t| {
         load_projects_all()
             .into_iter()
@@ -5227,13 +5481,6 @@ fn pty_spawn(
             }
         }
     }
-    // The agent's OWN tab (GH #358), so `termic prop` writes where the agent
-    // runs without it having to discover its tab id. Only agent tabs carry a
-    // role with a tab id; the Docker branch gets the same through its env
-    // overlay (`agent_tab_env`).
-    if let Some(tab) = agent_tab_id(&args) {
-        cmd.env("TERMIC_TAB_ID", tab);
-    }
     if load_settings_inner().cli_enabled {
         if let Ok(cli) = cli_server::bundled_cli_path() {
             cmd.env("TERMIC_CLI", cli);
@@ -5245,7 +5492,7 @@ fn pty_spawn(
             // agent to prompt them back (src/lib/agentBriefing.ts).
             cmd.env(
                 "TERMIC_CLI_HELP",
-                "You are running INSIDE a Termic task ($TERMIC_TASK_ID): Termic runs coding agents side by side, each task a git worktree (or the main checkout) with its own terminal, listed in the app's sidebar. TERMIC_CLI is the Termic control CLI, which drives the app around you. Run `\"$TERMIC_CLI\" help --json` for the full command surface. Prompt an existing task with `\"$TERMIC_CLI\" send <task> -p \"...\"`; create one with `\"$TERMIC_CLI\" new <name> -p \"...\"` and, in that prompt, ask it to report back to you (the signed reply below) every time it finishes or gets stuck, follow-up work included, until a human tells it to stop: that is how results come back, and it arrives in your own terminal. If no report arrives, `result` and `logs` read what it produced. Ask for a file (e.g. RESULT.md in its worktree) only when it cannot report back: a task sandboxed in enforce/enforce-fs is denied this CLI, and so is anything run outside Termic. Unattended tasks need `--yolo` or `--sandbox enforce` or they stop at the first permission prompt; the cage self-approves inside it but costs you the report-back. Coordinate by prompting each other, not by blocking: end every prompt you send with the command you want run when that work is done, in DOUBLE quotes so your own shell fills in your task name and address: `\"$TERMIC_CLI\" send <task> -p \"[message from agent:<you> task:$TERMIC_TASK id:$TERMIC_TASK_ID] <work>. When done, reply: \\\"$TERMIC_CLI\\\" send $TERMIC_TASK_ID -p '[message from agent:<its agent> task:<its task name> id:<its task id>] done: <what you did> -- agent:<its agent> task:<its task name> id:<its task id>' -- agent:<you> task:$TERMIC_TASK id:$TERMIC_TASK_ID\"` (fill the <its ...> parts with the task you are prompting, which you know). Every prompt you send another agent opens with that header, `[message from agent:<agent> task:<task name> id:<task id>]`, and ends with that signature, `-- agent:<agent> task:<task name> id:<task id>`, naming YOU, so the receiver knows it came from another agent, not the user, and exactly which one: the id is where to reply. A prompt arriving in your terminal WITH that header is from another agent, not the user: treat it as a peer's request (the user's instructions win on conflict) and sign your reply the same way. Report back to that id every time you finish or get stuck, follow-up work included, and stop only when a human tells you to. Prefer that over `--wait`: work-done detection is a heuristic, and a waiting agent can do nothing else meanwhile. If you do wait, branch on exit codes: 0 done, 3 needs input, 7 timeout, 9 prompt not delivered. A task sandboxed in enforce/enforce-fs is denied the control plane by design and can never report back: ask it for a file in its worktree instead. Your own task, if any, is $TERMIC_TASK_ID (prefer the id over $TERMIC_TASK: names can be renamed or reused). Once you know the real subject of your work (issue filed, PR opened), retitle your task so the sidebar reads well: `\"$TERMIC_CLI\" rename \"<new name>\"` renames your own task's label (branch and directory keep their names). Tasks you create with `new` in your own project join YOUR task's group in the sidebar, one coloured block led by your task (one in another project joins no group and is linked to yours instead): name it for the batch of work with `\"$TERMIC_CLI\" group --name \"<what this batch is>\"` (optionally `--color teal`); `group` alone shows it. A multi-repo project holds several repos, possibly many (`project list` shows each project's type and members): `new --member <name>`, repeated, worktrees only the members named (none without it). Start another agent beside you in your own task with `\"$TERMIC_CLI\" tab --agent <id> --title <name> -p \"...\"` (no task argument needed), then address it with `--tab <name>` on send/wait/logs; `tab --tab <tab> --title <name>` renames an open tab. Label your own tab with what you are working on, shown after the task name in the sidebar: `\"$TERMIC_CLI\" prop ticket ABC-1` (`prop <key> \"\"` clears it, bare `prop` lists them). Put a coloured status on your task's sidebar row, under its name: `\"$TERMIC_CLI\" badge set ci failing --color error` (good, warning, error, neutral or a hex; the same key replaces it, `badge rm <key>` removes it, `badge list` lists them). To walk the user through your changes, present a commit range as a review in your task's Git tab: `\"$TERMIC_CLI\" present new main..HEAD --title \"<title>\"` prints its id; `present comment r1 --file <path> --line 12-14 -m \"...\"` opens a thread (no `--line`: the whole file). The user's comments arrive in your terminal naming each thread: answer each with `present reply r1-t3 -m \"...\"`, not in the terminal; `present show r1 --since <seq>` catches up; after an amend, rebase or new commit, `present update r1 --head HEAD` starts the review's next iteration and moves its threads, and its reply lists the threads that went outdated; `present delete r1` deletes a review for good. For notes, plans, findings, logs or a report the user should READ rather than commit, use a scratchpad instead of writing temporary .md files into the repo: it is a tab in your task that stays out of git and updates live as you write: `\"$TERMIC_CLI\" scratchpad new --title \"<title>\" -c \"<text>\"` prints its id; `scratchpad write <id> --append -c -` adds stdin to it, `scratchpad read <id>` prints it, `scratchpad list` lists them. If this machine is paired with others on its network (`\"$TERMIC_CLI\" peer list`), `--peer <machine>` runs any verb THERE (`\"$TERMIC_CLI\" --peer <machine> new <name> -p \"...\"`): add `peer:<this machine's name, from peer list>` to your header and ask for the reply as `termic --peer <this machine> send $TERMIC_TASK_ID ...`; a header carrying `peer:<machine>` came from that machine, so answer it with `--peer <machine>`.",
+                "You are running INSIDE a Termic task ($TERMIC_TASK_ID): Termic runs coding agents side by side, each task a git worktree (or the main checkout) with its own terminal, listed in the app's sidebar. TERMIC_CLI is the Termic control CLI, which drives the app around you. Run `\"$TERMIC_CLI\" help --json` for the full command surface. Prompt an existing task with `\"$TERMIC_CLI\" send <task> -p \"...\"`; create one with `\"$TERMIC_CLI\" new <name> -p \"...\"` and, in that prompt, ask it to report back to you (the signed reply below) every time it finishes or gets stuck, follow-up work included, until a human tells it to stop: that is how results come back, and it arrives in your own terminal. If no report arrives, `result` and `logs` read what it produced. Ask for a file (e.g. RESULT.md in its worktree) only when it cannot report back: a task sandboxed in enforce/enforce-fs is denied this CLI, and so is anything run outside Termic. Unattended tasks need `--yolo` or `--sandbox enforce` or they stop at the first permission prompt; the cage self-approves inside it but costs you the report-back. Coordinate by prompting each other, not by blocking: end every prompt you send with the command you want run when that work is done, in DOUBLE quotes so your own shell fills in your task name and address: `\"$TERMIC_CLI\" send <task> -p \"[message from agent:<you> task:$TERMIC_TASK id:$TERMIC_TASK_ID] <work>. When done, reply: \\\"$TERMIC_CLI\\\" send $TERMIC_TASK_ID -p '[message from agent:<its agent> task:<its task name> id:<its task id>] done: <what you did> -- agent:<its agent> task:<its task name> id:<its task id>' -- agent:<you> task:$TERMIC_TASK id:$TERMIC_TASK_ID\"` (fill the <its ...> parts with the task you are prompting, which you know). Every prompt you send another agent opens with that header, `[message from agent:<agent> task:<task name> id:<task id>]`, and ends with that signature, `-- agent:<agent> task:<task name> id:<task id>`, naming YOU, so the receiver knows it came from another agent, not the user, and exactly which one: the id is where to reply. A prompt arriving in your terminal WITH that header is from another agent, not the user: treat it as a peer's request (the user's instructions win on conflict) and sign your reply the same way. Report back to that id every time you finish or get stuck, follow-up work included, and stop only when a human tells you to. Prefer that over `--wait`: work-done detection is a heuristic, and a waiting agent can do nothing else meanwhile. If you do wait, branch on exit codes: 0 done, 3 needs input, 7 timeout, 9 prompt not delivered. A task sandboxed in enforce/enforce-fs is denied the control plane by design and can never report back: ask it for a file in its worktree instead. Your own task, if any, is $TERMIC_TASK_ID (prefer the id over $TERMIC_TASK: names can be renamed or reused). Once you know the real subject of your work (issue filed, PR opened), retitle your task so the sidebar reads well: `\"$TERMIC_CLI\" rename \"<new name>\"` renames your own task's label (branch and directory keep their names). Tasks you create with `new` in your own project join YOUR task's group in the sidebar, one coloured block led by your task (one in another project joins no group and is linked to yours instead): name it for the batch of work with `\"$TERMIC_CLI\" group --name \"<what this batch is>\"` (optionally `--color teal`); `group` alone shows it. A multi-repo project holds several repos, possibly many (`project list` shows each project's type and members): `new --member <name>`, repeated, worktrees only the members named (none without it). Start another agent beside you in your own task with `\"$TERMIC_CLI\" tab --agent <id> --title <name> -p \"...\"` (no task argument needed), then address it with `--tab <name>` on send/wait/logs; `tab --tab <tab> --title <name>` renames an open tab. Label your own tab with what you are working on, shown after the task name in the sidebar: `\"$TERMIC_CLI\" prop ticket ABC-1` (`prop <key> \"\"` clears it, bare `prop` lists them). To start the dev server, when your task has a run script configured use `\"$TERMIC_CLI\" run`: it runs that script in the task's Run tab, where the user sees it and can stop it, so do not launch your own `npm run dev` or similar in a shell (`run --status` shows the script and whether it runs, `run --stop` stops it, `logs --tab <tab id>` reads its output). Put a coloured status on your task's sidebar row, under its name: `\"$TERMIC_CLI\" badge set ci failing --color error` (good, warning, error, neutral or a hex; the same key replaces it, `badge rm <key>` removes it, `badge list` lists them). To walk the user through your changes, present a commit range as a review in your task's Git tab: `\"$TERMIC_CLI\" present new main..HEAD --title \"<title>\"` prints its id; `present comment r1 --file <path> --line 12-14 -m \"...\"` opens a thread (no `--line`: the whole file). The user's comments arrive in your terminal naming each thread: answer each with `present reply r1-t3 -m \"...\"`, not in the terminal; `present show r1 --since <seq>` catches up; after an amend, rebase or new commit, `present update r1 --head HEAD` starts the review's next iteration and moves its threads, and its reply lists the threads that went outdated; `present delete r1` deletes a review for good. For notes, plans, findings, logs or a report the user should READ rather than commit, use a scratchpad instead of writing temporary .md files into the repo: it is a tab in your task that stays out of git and updates live as you write: `\"$TERMIC_CLI\" scratchpad new --title \"<title>\" -c \"<text>\"` prints its id; `scratchpad write <id> --append -c -` adds stdin to it, `scratchpad read <id>` prints it, `scratchpad list` lists them. If this machine is paired with others on its network (`\"$TERMIC_CLI\" peer list`), `--peer <machine>` runs any verb THERE (`\"$TERMIC_CLI\" --peer <machine> new <name> -p \"...\"`): add `peer:<this machine's name, from peer list>` to your header and ask for the reply as `termic --peer <this machine> send $TERMIC_TASK_ID ...`; a header carrying `peer:<machine>` came from that machine, so answer it with `--peer <machine>`.",
             );
         }
     }
@@ -5582,7 +5829,7 @@ fn pty_spawn(
                 buf_w.1.wait(&mut b);
             }
         }
-        emit_to_window(&app_w, window_w.as_deref(), &format!("pty-exit://{}", id_w), PtyExit { code });
+        emit_to_window(&app_w, window_w.as_deref(), &format!("pty-exit://{}", id_w), PtyExit { code, restarted: false });
         // Drop this PID from the sandbox's PID set so the path watcher
         // stops counting denies from anything that happened to inherit
         // this PID after exit (rare but possible on macOS).
@@ -5655,6 +5902,7 @@ fn pty_spawn(
 
 #[tauri::command]
 fn pty_write(state: State<'_, PtyManager>, pty_id: String, data: Vec<u8>) -> Result<(), String> {
+    // A server PTY's slot writes to the server (RemotePtyWriter).
     pty_write_inner(&state, &pty_id, &data)
 }
 
@@ -5665,11 +5913,18 @@ fn pty_resize(
     rows: u16,
     cols: u16,
 ) -> Result<(), String> {
+    // A server PTY's slot sizes it on the server (RemotePtyMaster).
     pty_resize_inner(&state, &pty_id, rows, cols)
 }
 
 #[tauri::command]
 fn pty_kill(state: State<'_, PtyManager>, pty_id: String) -> Result<(), String> {
+    if remote_client::pty_machine(&pty_id).is_some() {
+        dlog(&format!("[server-pty] kill {pty_id}"));
+        // Its slot goes now: the box sends no exit for a kill it was asked for.
+        state.inner.lock().remove(&pty_id);
+        return remote_client::pty_kill(&pty_id);
+    }
     let slot = state.inner.lock().remove(&pty_id);
     if let Some(mut slot) = slot {
         caffeinate::exited(&pty_id);
@@ -6822,6 +7077,7 @@ fn project_add(window: tauri::Window, root_path: String, non_git: Option<bool>) 
     let remote = if non_git { String::new() } else { detect_default_remote(&canon) };
     let base = if non_git { String::new() } else { detect_base_branch(&canon, &remote).unwrap_or_else(|_| "main".into()) };
     let p = Project {
+        server: None,
         default_role: None,
         // The one thing that genuinely cannot come from a record: a NEW
         // project joins the profile whose window asked for it.
@@ -7045,6 +7301,7 @@ fn project_add_multi(window: tauri::Window, root_path: String, name: String, mem
     let base = if non_git { String::new() } else { detect_base_branch(&canon, &remote).unwrap_or_else(|_| "main".into()) };
     let name = trimmed_name.to_string();
     let p = Project {
+        server: None,
         default_role: None,
         // The one thing that genuinely cannot come from a record: a NEW
         // project joins the profile whose window asked for it.
@@ -7226,6 +7483,23 @@ fn project_update(mut p: Project) -> Result<(), String> {
 async fn project_remove(state: State<'_, PtyManager>, id: String) -> Result<(), String> {
     let ptys = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
+        // A server project exists on the box (it owns existence; a resync
+        // would bring a locally removed one back): remove it there, which
+        // archives its tasks and leaves the repo's files, then forget it here.
+        if let Some(server) = load_projects_all().into_iter().find(|p| p.id == id).and_then(|p| p.server) {
+            let reply = remote_client::call(&server, serde_json::json!({"cmd": "project_remove", "name": id}), Some(std::time::Duration::from_secs(300)))?;
+            if reply.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
+                return Err(reply.pointer("/error/message").and_then(serde_json::Value::as_str).unwrap_or("the server did not remove it").to_string());
+            }
+            for w in load_tasks_all().into_iter().filter(|w| w.project_id == id) {
+                let _ = delete_task_file(&w.id);
+            }
+            let mut list = load_projects_all();
+            list.retain(|p| p.id != id);
+            save_projects(&list).map_err(|e| e.to_string())?;
+            server_projects::refresh_paths();
+            return Ok(());
+        }
         let tasks: Vec<Task> = load_tasks_all()
             .into_iter().filter(|w| w.project_id == id).collect();
         let projects = load_projects_all();
@@ -7372,7 +7646,7 @@ fn link_repo_mode_members(host_dir: &Path, members: &[ProjectMember], first_port
 /// Branch is read from `git symbolic-ref` so the UI shows whichever branch
 /// the user has checked out in the actual repo.
 #[tauri::command]
-fn task_open_repo(
+async fn task_open_repo(
     project_id: String,
     cli: Option<String>,
     name: Option<String>,
@@ -7404,6 +7678,8 @@ fn task_open_repo(
     // Unknown paths are ignored — the list is a filter, not a spec.
     members: Option<Vec<String>>,
 ) -> Result<Task, String> {
+    // Off the main thread: on a server project this is an ssh round trip.
+    tauri::async_runtime::spawn_blocking(move || {
     check_session_id(resume_session_id.as_deref())?;
     let proj = load_projects_all().into_iter().find(|p| p.id == project_id)
         .ok_or("project not found")?;
@@ -7619,21 +7895,34 @@ fn task_open_repo(
         // New tasks are unordered: they append below any manually
         // ordered sibling (see sort_tasks).
         order: None,
+        pinned: false,
         group: None,
         spawned_by: None,
         schedule: None,
         badges: Vec::new(),
+        last_active_at: None,
+        artifacts_freed_at: None,
     };
     // a picked role only sticks where the Keychain block applies; no pick
     // takes the defaults.
     task.drop_role_unless_keychain_blocked();
     seed_task_role(&mut task);
+    // A server project's main-checkout task is recorded on the box too, like
+    // a worktree task (task_create_sync), or the mirror archives it.
+    if let Some(server) = &proj.server {
+        server_projects::put_task(server, &task)?;
+    }
     save_task(&task).map_err(|e| e.to_string())?;
-    if let Ok(pdir) = profile_dir(&proj.profile) {
+    if proj.server.is_some() {
+        server_projects::refresh_paths();
+    }
+    // Customizations are written into the checkout here, so not on a server.
+    if let (None, Ok(pdir)) = (&proj.server, profile_dir(&proj.profile)) {
         let _ = customizations::ensure_builtin_skills(&pdir);
         let _ = customizations::reconcile_customizations(&pdir, Path::new(&task.path), effective_customization_mode(&proj), &task.cli);
     }
     Ok(task)
+}).await.map_err(|e| e.to_string())?
 }
 
 // ───────────────────────── import existing worktree (issue #5) ─────────────────────────
@@ -7688,6 +7977,30 @@ fn slot_occupant(wt_path: &Path) -> Option<std::fs::FileType> {
 /// or `ls-files` alone dying on a corrupt/locked index). And when git
 /// can't run here, the `worktree add` that follows can't succeed anyway.
 /// `advice` is appended to every refusal ("pick a different name…").
+/// `clear_orphan_or_refuse` wherever the task's files live (task_host): a
+/// server's slot is checked and cleared on the box, by the same rules
+/// (a link is unlinked, a non-directory refused, a registered worktree
+/// refused, an orphan removed).
+fn clear_orphan_on(host: &task_host::Host, repo: &Path, wt_path: &Path, advice: &str) -> Result<(), String> {
+    if !host.is_server() {
+        return clear_orphan_or_refuse(repo, wt_path, advice);
+    }
+    match host.slot(wt_path) {
+        task_host::Slot::Empty => Ok(()),
+        task_host::Slot::Link => host.remove_link(wt_path)
+            .map_err(|e| format!("link at {} couldn't be removed: {e}.{advice}", wt_path.display())),
+        task_host::Slot::Other => Err(format!("something that isn't a directory sits at {}.{advice}", wt_path.display())),
+        task_host::Slot::Dir => {
+            let listed = git(&["worktree", "list", "--porcelain"], repo).map_err(|e| e.to_string())?;
+            if worktree_listed(&listed, wt_path) {
+                return Err(format!("a worktree already lives at {}.{advice}", wt_path.display()));
+            }
+            host.remove_dir_all(wt_path)
+                .map_err(|e| format!("orphan directory at {} couldn't be removed: {e}.{advice}", wt_path.display()))
+        }
+    }
+}
+
 fn clear_orphan_or_refuse(repo: &Path, wt_path: &Path, advice: &str) -> Result<(), String> {
     let ftype = match slot_occupant(wt_path) {
         Some(f) => f,
@@ -8127,10 +8440,13 @@ fn task_import_worktree(
         // New tasks are unordered: they append below any manually
         // ordered sibling (see sort_tasks).
         order: None,
+        pinned: false,
         group: None,
         spawned_by: None,
         schedule: None,
         badges: Vec::new(),
+        last_active_at: None,
+        artifacts_freed_at: None,
     };
     // a picked role only sticks where the Keychain block applies; no pick
     // takes the defaults.
@@ -8201,7 +8517,19 @@ fn task_create_sync(app: AppHandle, args: CreateTaskArgs) -> Result<Task, String
 
     // Determine "branch new from" — strip the remote prefix if needed for create.
     // git can branch off "origin/master" directly.
-    let base_full = task_base_branch(&proj.base_branch, args.base_branch.as_deref());
+    let mut base_full = task_base_branch(&proj.base_branch, args.base_branch.as_deref());
+    // A server project is mirrored from the box, never added here, so it has
+    // no base pinned at add time: detect it now as project_add would (git
+    // runs on the box), or the task records no base and its diff, Send to
+    // main and PR have nothing to compare against.
+    if base_full.trim().is_empty() && proj.server.is_some() {
+        let remote = detect_default_remote(&repo);
+        let b = detect_base_branch(&repo, &remote).unwrap_or_else(|_| "main".into());
+        let tracked = format!("{remote}/{b}");
+        // A box repo with no remote (a folder `git init`-ed there) has only
+        // the local branch: record what resolves.
+        base_full = if !remote.is_empty() && try_resolve_base_ref(&repo, &tracked).is_some() { tracked } else { b };
+    }
     // Did the CALLER name this base, or did it come off the project's pin?
     // Only the first is verified strictly: see the resolution below. Trimmed
     // and emptiness-checked the same way `task_base_branch` does, so " " is
@@ -8215,8 +8543,25 @@ fn task_create_sync(app: AppHandle, args: CreateTaskArgs) -> Result<Task, String
     // The PROJECT's profile owns the worktrees base. Reading the root's here
     // was a real bug: a second profile's seeded `~/termic/profiles/<slug>/tasks`
     // would be written to settings and then never used.
-    let wt_root = project_tasks_root(&globals.default_tasks_path, &proj)?;
-    fs::create_dir_all(&wt_root).map_err(|e| e.to_string())?;
+    // Where its files live (task_host): a server project's worktrees go in
+    // the box's own worktrees folder, the one its exec fence allows, under
+    // the project's slug, as termic-server always laid them out.
+    let host = task_host::Host::for_project(&proj);
+    let wt_root = match &proj.server {
+        Some(server) => {
+            // The slug plus the project's id: two projects whose names slug
+            // alike ("my.app", "my-app") must not share a folder, where one's
+            // orphan sweep would delete the other's live worktree.
+            let pslug = slugify(&proj.name);
+            let short: String = proj.id.chars().filter(char::is_ascii_alphanumeric).take(8).collect();
+            task_host::server_worktrees_root(server, &repo)?.join(if pslug.is_empty() { proj.id.clone() } else { format!("{pslug}-{short}") })
+        }
+        None => project_tasks_root(&globals.default_tasks_path, &proj)?,
+    };
+    host.create_dir_all(&wt_root)?;
+    if let Some(server) = &proj.server {
+        server_projects::note_server_path(&wt_root, server);
+    }
 
     // Clean stale worktree metadata (refs to dirs the user removed manually,
     // or leftovers from a previous failed create) so `git worktree add` has
@@ -8228,8 +8573,8 @@ fn task_create_sync(app: AppHandle, args: CreateTaskArgs) -> Result<Task, String
     // project's slot is named after the branch, so it is checked once the
     // branch resolves below.
     if !proj.is_bare() {
-        clear_orphan_or_refuse(
-            &repo, &wt_root.join(&slug),
+        clear_orphan_on(
+            &host, &repo, &wt_root.join(&slug),
             " Pick a different task name, or move the tasks path outside the repo.",
         )?;
     }
@@ -8262,7 +8607,8 @@ fn task_create_sync(app: AppHandle, args: CreateTaskArgs) -> Result<Task, String
             let p = PathBuf::from(&s);
             if p.is_absolute() { p } else { repo.join(p) }
         });
-    let has_git_crypt = common_gitdir
+    // Not on a server: bridging the key is a local symlink into the gitdir.
+    let has_git_crypt = !host.is_server() && common_gitdir
         .as_ref()
         .map(|p| p.join("git-crypt").exists())
         .unwrap_or(false);
@@ -8441,7 +8787,9 @@ fn task_create_sync(app: AppHandle, args: CreateTaskArgs) -> Result<Task, String
         emit_create_progress(&app, &task_id, format!("Copying {} file pattern(s): {}", copy_patterns.len(), copy_patterns.join(", ")));
     }
     for pat in &copy_patterns {
-        if proj.is_bare() {
+        if host.is_server() {
+            host.copy_matching_on_box(&repo, &wt_path, pat);
+        } else if proj.is_bare() {
             copy_matching_from_bare_root(&repo, &wt_path, pat, common_gitdir.as_deref());
         } else {
             copy_matching(&repo, &wt_path, pat);
@@ -8454,15 +8802,20 @@ fn task_create_sync(app: AppHandle, args: CreateTaskArgs) -> Result<Task, String
     // (Settings.worktree_symlink_paths); each entry is linked only when it
     // exists in the repo and the checkout/copy didn't already provide it.
     for name in &globals.worktree_symlink_paths {
-        let existed = wt_path.join(name).exists();
-        link_config_dir(&repo, &wt_path, name);
-        if !existed && wt_path.join(name).exists() {
+        let existed = host.exists(&wt_path.join(name));
+        if host.is_server() {
+            host.link_on_box(&repo, &wt_path, name);
+        } else {
+            link_config_dir(&repo, &wt_path, name);
+        }
+        if !existed && host.exists(&wt_path.join(name)) {
             emit_create_progress(&app, &task_id, format!("Linked {name}."));
         }
     }
 
-    // Profile customizations (skills, personas, mcp)
-    if let Ok(pdir) = profile_dir(&proj.profile) {
+    // Profile customizations (skills, personas, mcp): written into the
+    // worktree here, so not on a server yet.
+    if let (false, Ok(pdir)) = (host.is_server(), profile_dir(&proj.profile)) {
         let _ = customizations::ensure_builtin_skills(&pdir);
         let cli_hint = args.cli.as_deref().unwrap_or(&proj.default_cli);
         let _ = customizations::reconcile_customizations(&pdir, &wt_path, effective_customization_mode(&proj), cli_hint);
@@ -8601,16 +8954,36 @@ fn task_create_sync(app: AppHandle, args: CreateTaskArgs) -> Result<Task, String
         // New tasks are unordered: they append below any manually
         // ordered sibling (see sort_tasks).
         order: None,
+        pinned: false,
         group: None,
         spawned_by: None,
         schedule: None,
         badges: Vec::new(),
+        last_active_at: None,
+        artifacts_freed_at: None,
     };
     // a picked role only sticks where the Keychain block applies; no pick
     // takes the defaults.
     task.drop_role_unless_keychain_blocked();
     seed_task_role(&mut task);
+    // A server project's task is recorded on the box too, as plain data, so
+    // every desktop that reaches it lists it (task_put) and the box reads
+    // its agent's state; the desktop starts that agent itself. Unrecorded,
+    // the worktree just made would be an orphan the next try refuses: it is
+    // taken back (git routes to the box by path).
+    if let Some(server) = &proj.server {
+        if let Err(e) = server_projects::put_task(server, &task) {
+            let _ = git(&["worktree", "remove", "--force", &task.path], &repo);
+            if !task.checkout_existing {
+                let _ = git(&["branch", "-D", &task.branch], &repo);
+            }
+            return Err(format!("{}: could not record the task ({e})", remote_client::server_name(server)));
+        }
+    }
     save_task(&task).map_err(|e| e.to_string())?;
+    if proj.server.is_some() {
+        server_projects::refresh_paths();
+    }
     drop(port_guard);
     emit_create_progress(&app, &task_id, format!("Worktree ready (port {port})."));
 
@@ -9016,10 +9389,13 @@ fn task_create_multi_sync(app: AppHandle, args: CreateMultiArgs) -> Result<Task,
         // New tasks are unordered: they append below any manually
         // ordered sibling (see sort_tasks).
         order: None,
+        pinned: false,
         group: None,
         spawned_by: None,
         schedule: None,
         badges: Vec::new(),
+        last_active_at: None,
+        artifacts_freed_at: None,
     };
     // a picked role only sticks where the Keychain block applies; no pick
     // takes the defaults.
@@ -10735,12 +11111,15 @@ fn tokenize_home_prefix(path: &str) -> String {
 /// `Ok(None)` when the repo has no such file; `Err` when it exists but
 /// is malformed. Keyed by project — backs the Repository settings.
 #[tauri::command]
-fn repo_config_load(project_id: String) -> Result<Option<repo_config::RepoConfig>, String> {
+async fn repo_config_load(project_id: String) -> Result<Option<repo_config::RepoConfig>, String> {
+    // Off the main thread: on a server project this is an ssh round trip.
+    tauri::async_runtime::spawn_blocking(move || {
     let p = load_projects_all()
         .into_iter()
         .find(|p| p.id == project_id)
         .ok_or("no such project")?;
     repo_config::load(Path::new(&p.root_path)).map_err(|e| e.to_string())
+}).await.map_err(|e| e.to_string())?
 }
 
 /// Load a repo's `.termic.yaml` directly by path — used for inline
@@ -10756,12 +11135,15 @@ fn repo_config_load_at(path: String) -> Result<Option<repo_config::RepoConfig>, 
 /// Write a project's `.termic.yaml` (full re-serialize — see
 /// `repo_config::save`). Backs the Repository settings' Scripts tab.
 #[tauri::command]
-fn repo_config_save(project_id: String, config: repo_config::RepoConfig) -> Result<(), String> {
+async fn repo_config_save(project_id: String, config: repo_config::RepoConfig) -> Result<(), String> {
+    // Off the main thread: on a server project this is an ssh round trip.
+    tauri::async_runtime::spawn_blocking(move || {
     let p = load_projects_all()
         .into_iter()
         .find(|p| p.id == project_id)
         .ok_or("no such project")?;
     repo_config::save(Path::new(&p.root_path), &config).map_err(|e| e.to_string())
+}).await.map_err(|e| e.to_string())?
 }
 
 /// Write a fresh `.termic.yaml` scaffold to a project's repo if it has
@@ -11841,6 +12223,25 @@ fn on_main_thread<T: Send + 'static>(
     rx.recv().map_err(|e| e.to_string())?
 }
 
+/// Log when WebKitGTK's web process dies. The window goes blank while the
+/// app and its PTYs keep running, and nothing else records it: a Linux CI
+/// run lost every WebDriver call mid-spec with the debug log simply going
+/// quiet, and whether the page crashed or hung could not be told apart.
+fn log_web_process_exit(win: &tauri::WebviewWindow) {
+    #[cfg(target_os = "linux")]
+    {
+        let label = win.label().to_owned();
+        let _ = win.with_webview(move |wv| {
+            use webkit2gtk::WebViewExt;
+            wv.inner().connect_web_process_terminated(move |_, reason| {
+                dlog(&format!("[webview] {label}: web process terminated: {reason:?}"));
+            });
+        });
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = win;
+}
+
 /// Register `disable_browser_accelerators` for when the page has loaded, on
 /// the main thread, with the webview fully created.
 fn without_browser_accelerators<'a>(
@@ -11982,6 +12383,7 @@ fn build_profile_window(app: &AppHandle, id: &ProfileId) -> tauri::Result<tauri:
     let win = without_browser_accelerators(with_grayscale_text(without_writing_tools(builder))).build()?;
     dlog(&format!("[profile] build {label}: built"));
     caffeinate::configure_window(&win);
+    log_web_process_exit(&win);
     #[cfg(all(target_os = "macos", feature = "e2e"))]
     hide_window_from_user_in_e2e(&win);
 
@@ -12121,8 +12523,18 @@ fn build_profile_window(app: &AppHandle, id: &ProfileId) -> tauri::Result<tauri:
     #[cfg(not(target_os = "macos"))]
     {
         let close_id = id.clone();
+        let handle = app.clone();
         win.on_window_event(move |event| {
-            if matches!(event, tauri::WindowEvent::CloseRequested { .. }) {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                // Closing the LAST window quits, so the running-agents question
+                // is asked here, while the window is still up. Left to
+                // ExitRequested it came after the window was gone: the app
+                // looked dead, then asked, and Cancel left it running with no
+                // window at all.
+                if shown_profile_windows(&handle).len() <= 1 && confirm_quit_or_exit(&handle) {
+                    api.prevent_close();
+                    return;
+                }
                 set_open_at_quit(&close_id, false);
             }
         });
@@ -12784,6 +13196,19 @@ fn task_set_yolo(id: String, yolo: bool) -> Result<(), String> {
     Ok(())
 }
 
+/// Pin or unpin a task in the sidebar (GH #458). Only the flag changes: the
+/// task keeps its order, its group and its tabs.
+#[tauri::command]
+fn task_set_pinned(id: String, pinned: bool) -> Result<(), String> {
+    let mut list = load_tasks_all();
+    let w = list.iter_mut().find(|w| w.id == id).ok_or("no such task")?;
+    if w.pinned != pinned {
+        w.pinned = pinned;
+        save_task(w).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 /// Increment + persist the task's `spawn_count`. Historical metric
 /// only — resume gating now uses `has_resumable_history` instead.
 #[tauri::command]
@@ -13009,6 +13434,35 @@ fn task_archive_sync(id: String, delete_branch: bool, skip_scripts: bool) -> Res
 
     let mut list = load_tasks_all();
     let w = list.iter_mut().find(|w| w.id == id).ok_or("task not found")?;
+
+    // A server project's task lives on the box: termic-server removes its
+    // worktree and stops its agent there; this side only marks the record
+    // (docs/remote.md, Servers). Nothing on this machine to tear down.
+    if let Some(proj) = load_projects_all().into_iter().find(|p| p.id == w.project_id && p.server.is_some()) {
+        let server = proj.server.clone().unwrap_or_default();
+        // The project's archive script runs in the worktree on the box first
+        // (Settings or the box's .termic.yaml), as a local archive runs it.
+        // A failing script does not block the archive.
+        let script = effective_scripts(&proj).2;
+        if !skip_scripts && !script.trim().is_empty() {
+            match server_projects::exec_on(&server, Path::new(&w.path), &["sh", "-c", &script], &[]) {
+                Ok((0, _, _)) => {}
+                Ok((code, _, err)) => dlog(&format!("[archive] {}: archive script exited {code}: {}", w.id, err.trim())),
+                Err(e) => dlog(&format!("[archive] {}: archive script did not run: {e}", w.id)),
+            }
+        }
+        let reply = remote_client::call(&server, serde_json::json!({"cmd": "archive", "task": w.id}), Some(std::time::Duration::from_secs(300)))?;
+        if reply.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
+            return Err(reply.pointer("/error/message").and_then(serde_json::Value::as_str).unwrap_or("the server did not archive it").to_string());
+        }
+        // "Delete the branch too", as for a local task: the box removed the
+        // worktree and kept the branch; git runs there by the project's path.
+        if delete_branch && !w.is_main_checkout && !w.branch.is_empty() {
+            let _ = git(&["branch", "-D", &w.branch], Path::new(&proj.root_path));
+        }
+        w.archived = true;
+        return save_task(w).map_err(|e| e.to_string());
+    }
 
     // Remove any Docker containers for this task (non-fatal). `--rm`
     // handles the clean-exit case; this covers crashes / kills where it
@@ -13630,13 +14084,8 @@ pub(crate) fn task_diff_inner(id: String) -> Result<TaskDiffSummary, String> {
         // `git diff --no-index /dev/null <file>` renders the whole file as
         // added; it exits 1 whenever the files differ (always, here), so run it
         // directly and accept the non-zero status the git() helper would reject.
-        let out = git_command()
-            .args(["--no-pager", "diff", "--no-index", "--", "/dev/null", rel])
-            .current_dir(&wt)
-            .env("PATH", shell_env::resolved_path())
-            .output();
-        if let Ok(out) = out {
-            let text = String::from_utf8_lossy(&out.stdout);
+        if let Some((_, stdout)) = git_raw(&["--no-pager", "diff", "--no-index", "--", "/dev/null", rel], &wt) {
+            let text = String::from_utf8_lossy(&stdout);
             if !text.trim().is_empty() {
                 if !diff.is_empty() && !diff.ends_with('\n') { diff.push('\n'); }
                 diff.push_str(&text);
@@ -13888,6 +14337,44 @@ impl SendDiffError {
     }
 }
 
+/// Send to main for a server task: the same steps as the local path, run on
+/// the box (server_projects.rs `exec`). The checks and the diff go through
+/// the routed `git`; the patch is applied there with stdin, and untracked
+/// files are copied there with a tar pipe, never through this Mac.
+fn send_diff_to_main_on_server(server: &str, base: &str, worktree: &Path, main: &Path) -> Result<SendDiffResult, SendDiffError> {
+    let other = SendDiffError::Other;
+    let main_status = git(&["status", "--porcelain"], main).map_err(|e| other(e.to_string()))?;
+    if !main_status.trim().is_empty() {
+        return Err(SendDiffError::DirtyMain);
+    }
+    let patch = git_bytes(&["--no-pager", "diff", "--binary", base], worktree).map_err(|e| other(e.to_string()))?;
+    let tracked_files = patch.windows(11).filter(|w| w.starts_with(b"diff --git ")).count();
+    if !patch.is_empty() {
+        let (code, _, stderr) = server_projects::exec_with_stdin(
+            server, main, &["git", "apply", "--3way", "--whitespace=nowarn", "-"], &[("LC_ALL", "C")], Some(&patch),
+        ).map_err(other)?;
+        if code != 0 {
+            if stderr.lines().any(|l| l.trim_end().ends_with("with conflicts.")) {
+                return Err(SendDiffError::Conflict { main: main.display().to_string(), detail: stderr });
+            }
+            return Err(other(format!("git apply failed in {}: {stderr}", main.display())));
+        }
+    }
+    let untracked = git(&["ls-files", "--others", "--exclude-standard", "-z"], worktree).map_err(|e| other(e.to_string()))?;
+    let untracked_files = untracked.split('\0').filter(|s| !s.is_empty()).count();
+    if untracked_files > 0 {
+        let (code, _, stderr) = server_projects::exec_on(
+            server, worktree,
+            &["sh", "-c", "git ls-files --others --exclude-standard -z | tar --null -T - -cf - | (cd \"$1\" && tar -xf -)", "sh", &main.to_string_lossy()],
+            &[],
+        ).map_err(other)?;
+        if code != 0 {
+            return Err(other(format!("copying untracked files to {} failed: {}", main.display(), stderr.trim())));
+        }
+    }
+    Ok(SendDiffResult { tracked_files, untracked_files })
+}
+
 pub(crate) fn task_send_diff_to_main_inner(id: &str) -> Result<SendDiffResult, SendDiffError> {
     let other = SendDiffError::Other;
     {
@@ -13901,6 +14388,9 @@ pub(crate) fn task_send_diff_to_main_inner(id: &str) -> Result<SendDiffResult, S
         }
         let worktree = PathBuf::from(&w.path);
         let main = PathBuf::from(&p.root_path);
+        if let Some(server) = p.server.as_deref() {
+            return send_diff_to_main_on_server(server, &resolve_base_ref(&worktree, &w.base_branch), &worktree, &main);
+        }
         if !main.is_dir() {
             return Err(other(format!("Project main checkout missing: {}", main.display())));
         }
@@ -13918,7 +14408,9 @@ pub(crate) fn task_send_diff_to_main_inner(id: &str) -> Result<SendDiffResult, S
         // `git diff <base>` in a worktree returns the cumulative delta
         // between base and the working tree — exactly the union of
         // commits + staged + unstaged. --binary preserves binary blobs.
-        let base = w.base_branch.clone();
+        // The stored base as a ref that exists ("origin/main" in a repo with
+        // no remote is its local "main"), as creation resolved it.
+        let base = resolve_base_ref(&worktree, &w.base_branch);
         let patch_out = git_command()
             .args(["--no-pager", "diff", "--binary", &base])
             .current_dir(&worktree)
@@ -16035,6 +16527,23 @@ async fn detect_forges() -> Vec<forge::ForgeCliStatus> {
         .unwrap_or_default()
 }
 
+/// The GitHub rate ledger: each host's limits, what is left, termic's own
+/// spend in the last hour by feature, and whether background work is
+/// paused. `probe` first seeds unknown hosts from `GET /rate_limit` (free
+/// against the primary limit). Changes also arrive as
+/// `termic://forge-rate-changed` with the same payload.
+#[tauri::command]
+async fn forge_rate_status(probe: Option<bool>) -> Vec<forge_rate::RateStatus> {
+    tauri::async_runtime::spawn_blocking(move || {
+        if probe.unwrap_or(false) {
+            forge::probe_rate_limits();
+        }
+        forge_rate::status()
+    })
+    .await
+    .unwrap_or_default()
+}
+
 /// Everything the PR card needs in one round-trip: provider resolution
 /// from the task's remote + the live PR/MR snapshot (or a precise
 /// reason there isn't one). `status` tells the frontend exactly which
@@ -16046,12 +16555,16 @@ pub struct PrLookup {
     pub provider: Option<String>,
     pub remote_url: String,
     /// "ok" | "no-remote" | "unsupported-remote" | "cli-missing"
-    /// | "cli-unauthed" | "error".
+    /// | "cli-unauthed" | "rate-limited" | "error". "rate-limited" is GitHub
+    /// refusing on a limit; the webview words it from the rate ledger.
     pub status: String,
     /// Human hint for the non-ok states.
     pub message: String,
     /// Present iff status == "ok" AND a PR/MR exists for the branch.
     pub pr: Option<forge::PrStatus>,
+    /// "rate-limited" only: when termic asks that host again (epoch
+    /// seconds), for the webview to word in the UI's language and clock.
+    pub retry_at: Option<u64>,
 }
 
 /// The shared lookup body: resolve the repo's forge off its default remote,
@@ -16076,6 +16589,7 @@ fn pr_lookup_at(
             status: "no-remote".into(),
             message: "No git remote configured. Push the repo to GitHub, GitLab, or Azure DevOps first.".into(),
             pr: None,
+            retry_at: None,
         };
     }
     let Some(provider) = provider else {
@@ -16085,6 +16599,7 @@ fn pr_lookup_at(
             status: "unsupported-remote".into(),
             message: format!("Remote {} is not a GitHub, GitLab, or Azure DevOps host.", forge::remote_for_display(&remote_url)),
             pr: None,
+            retry_at: None,
         };
     };
     // Resolve by BRANCH first, and only fall back to the stored number.
@@ -16118,32 +16633,28 @@ fn pr_lookup_at(
             status: "ok".into(),
             message: String::new(),
             pr,
+            retry_at: None,
         },
-        Err(forge::ForgeError::CliMissing(cli)) => PrLookup {
-            provider: Some(provider.to_string()),
-            remote_url,
-            status: "cli-missing".into(),
-            message: cli_missing_message(provider, &cli, &format!(
-                "see and create {}",
-                if provider == forge::GITLAB { "merge requests" } else { "pull requests" }
-            )),
-            pr: None,
-        },
-        Err(forge::ForgeError::Auth(msg)) => PrLookup {
-            provider: Some(provider.to_string()),
-            remote_url,
-            status: "cli-unauthed".into(),
-            message: msg,
-            pr: None,
-        },
-        Err(forge::ForgeError::Other(msg)) => PrLookup {
-            provider: Some(provider.to_string()),
-            remote_url,
-            status: "error".into(),
-            message: msg,
-            pr: None,
-        },
+        Err(e) => pr_lookup_failed(provider, remote_url, e),
     }
+}
+
+/// A lookup that failed, with the status the PR card turns into a hint.
+fn pr_lookup_failed(provider: &str, remote_url: String, e: forge::ForgeError) -> PrLookup {
+    let mut retry_at = None;
+    let (status, message) = match e {
+        forge::ForgeError::CliMissing(cli) => ("cli-missing", cli_missing_message(provider, &cli, &format!(
+            "see and create {}",
+            if provider == forge::GITLAB { "merge requests" } else { "pull requests" }
+        ))),
+        forge::ForgeError::Auth(msg) => ("cli-unauthed", msg),
+        forge::ForgeError::RateLimited { until, message } => {
+            retry_at = Some(until);
+            ("rate-limited", message)
+        }
+        forge::ForgeError::Other(msg) | forge::ForgeError::TooLarge(msg) => ("error", msg),
+    };
+    PrLookup { provider: Some(provider.to_string()), remote_url, status: status.into(), message, pr: None, retry_at }
 }
 
 /// Whether a poll's PR differs from what the task record caches. The
@@ -16160,27 +16671,325 @@ fn pr_cache_differs(w: &Task, p: &forge::PrStatus, provider: &str) -> bool {
 
 fn pr_lookup_blocking(id: &str) -> Result<PrLookup, String> {
     let w = load_tasks_all().into_iter().find(|w| w.id == id).ok_or("no task")?;
+    Ok(pr_lookup_task(&w))
+}
+
+/// A task's own lookup, its identity persisted.
+fn pr_lookup_task(w: &Task) -> PrLookup {
     let lookup = pr_lookup_at(Path::new(&w.path), w.pr_number, w.pr_provider.as_deref());
-    // Cache the identity on the task record so future polls (and the next
-    // app launch) can resolve by number.
-    if let (Some(p), Some(provider)) = (&lookup.pr, lookup.provider.as_deref()) {
-        // The title and state ride along (History searches and shows them),
-        // but a poll that saw nothing new writes nothing: this runs every
-        // few seconds per task with a PR.
-        if pr_cache_differs(&w, p, provider) {
-            let mut list = load_tasks_all();
-            if let Some(wm) = list.iter_mut().find(|x| x.id == id) {
-                wm.pr_url = Some(p.url.clone());
-                wm.pr_number = Some(p.number);
-                wm.pr_provider = Some(provider.to_string());
-                wm.pr_title = Some(p.title.clone());
-                wm.pr_state = Some(p.state.clone());
-                wm.pr_state_at = Some(chrono::Utc::now().to_rfc3339());
-                let _ = save_task(wm);
+    persist_pr_identity(w, &lookup);
+    lookup
+}
+
+/// Cache the identity on the task record so future polls (and the next app
+/// launch) can resolve by number. The title and state ride along (History
+/// searches and shows them), but a poll that saw nothing new writes nothing:
+/// this runs every minute per task with a PR.
+fn persist_pr_identity(w: &Task, lookup: &PrLookup) {
+    let (Some(p), Some(provider)) = (&lookup.pr, lookup.provider.as_deref()) else { return };
+    if !pr_cache_differs(w, p, provider) {
+        return;
+    }
+    let mut list = load_tasks_all();
+    if let Some(wm) = list.iter_mut().find(|x| x.id == w.id) {
+        wm.pr_url = Some(p.url.clone());
+        wm.pr_number = Some(p.number);
+        wm.pr_provider = Some(provider.to_string());
+        wm.pr_title = Some(p.title.clone());
+        wm.pr_state = Some(p.state.clone());
+        wm.pr_state_at = Some(chrono::Utc::now().to_rfc3339());
+        let _ = save_task(wm);
+    }
+}
+
+#[derive(Serialize)]
+struct TaskPrLookup {
+    id: String,
+    #[serde(flatten)]
+    lookup: PrLookup,
+}
+
+/// PR status for many tasks at once. A GitHub task whose record has a PR url
+/// goes into one GraphQL query per host (up to `PR_BATCH_MAX` PRs each);
+/// anything else takes the per-task `pr_lookup_at` path, and so does a batch
+/// answer that cannot be trusted on its own (see `batch_route`).
+///
+/// Background work, always: `gh_api` refuses a chunk while the host's gate
+/// is closed, and the rest of that host is left out of the answer, so the
+/// caller keeps what it had. How any other failure is answered: see
+/// `batch_failure_plan`.
+///
+/// Every way out of the batch into a per-task `gh pr view` (a task the query
+/// cannot hold, a chunk that keeps failing, an answer that needs a second
+/// look, a moved branch) spends from one `BATCH_FALLBACK_MAX` budget per
+/// pass. A task past it is left out, or answered with what the batch saw, and
+/// comes first next pass, since the caller asks stalest first.
+fn pr_lookup_batch(ids: &[String]) -> Vec<TaskPrLookup> {
+    let all = load_tasks_all();
+    // Rechecks of tasks that are gone or archived are never asked again.
+    rechecks().lock().retain(|id, _| all.iter().any(|t| &t.id == id && !t.archived));
+    let tasks: Vec<&Task> = ids.iter()
+        .filter_map(|id| all.iter().find(|t| &t.id == id))
+        .filter(|t| !t.is_main_checkout)
+        .collect();
+    let now = forge_rate::now_secs();
+    let mut budget = BATCH_FALLBACK_MAX;
+
+    // `single` carries what the batch saw, to answer with when the per-task
+    // lookup does not run this pass.
+    let mut by_host: std::collections::BTreeMap<String, Vec<(&Task, forge::PrRef)>> = Default::default();
+    let mut single: Vec<(&Task, Option<forge::PrStatus>)> = Vec::new();
+    for t in tasks {
+        let github = t.pr_provider.as_deref().map_or(true, |p| p == forge::GITHUB);
+        match t.pr_url.as_deref().and_then(forge::parse_github_pr_url) {
+            Some((host, owner, repo, number)) if github => {
+                by_host.entry(host).or_default().push((t, forge::PrRef { owner, repo, number }));
+            }
+            // A url the query cannot hold: per task, at the recheck pace.
+            _ => {
+                if take_recheck(&t.id, "", now) {
+                    single.push((t, None));
+                }
             }
         }
     }
-    Ok(lookup)
+
+    let ok = |t: &Task, pr: forge::PrStatus| -> TaskPrLookup {
+        // The cached remote, not a `git remote` per task per pass.
+        let (_, remote_url) = forge::repo_forge(Path::new(&t.path));
+        let lookup = PrLookup {
+            provider: Some(forge::GITHUB.to_string()),
+            remote_url,
+            status: "ok".into(),
+            message: String::new(),
+            pr: Some(pr),
+            retry_at: None,
+        };
+        persist_pr_identity(t, &lookup);
+        TaskPrLookup { id: t.id.clone(), lookup }
+    };
+
+    let mut out = Vec::new();
+    'hosts: for (host, items) in by_host {
+        for chunk in items.chunks(forge::PR_BATCH_MAX) {
+            let refs: Vec<forge::PrRef> = chunk.iter().map(|(_, r)| r.clone()).collect();
+            let answers = match forge::github_pr_status_batch(&host, "pr_status", &refs) {
+                Ok(a) => {
+                    batch_failures().lock().remove(&host);
+                    a
+                }
+                // The gate is closed, now or since a chunk ago: the rest of
+                // the host waits for the next pass.
+                Err(forge::ForgeError::RateLimited { .. }) => continue 'hosts,
+                Err(e) => {
+                    let streak = {
+                        let mut f = batch_failures().lock();
+                        let n = f.entry(host.clone()).or_insert(0);
+                        *n = n.saturating_add(1);
+                        *n
+                    };
+                    match batch_failure_plan(&e, streak) {
+                        FailurePlan::Answer => {
+                            for (t, _) in chunk {
+                                let (_, remote_url) = forge::repo_forge(Path::new(&t.path));
+                                let failed = pr_lookup_failed(forge::GITHUB, remote_url, e.clone());
+                                out.push(TaskPrLookup { id: t.id.clone(), lookup: failed });
+                            }
+                        }
+                        FailurePlan::LeaveOut => {
+                            eprintln!("[pr] batch status on {host} failed, retrying next pass: {e:?}");
+                        }
+                        FailurePlan::FallBack => {
+                            eprintln!("[pr] batch status on {host} keeps failing, per task within the pass budget: {e:?}");
+                            single.extend(chunk.iter().map(|(t, _)| (*t, None)));
+                        }
+                    }
+                    continue;
+                }
+            };
+            for ((t, r), answer) in chunk.iter().zip(answers) {
+                // An answer about some other PR (a host that re-homed it, or
+                // a renamed repo) is not trusted, nor persisted onto the
+                // task: the per-task lookup finds what the branch is on.
+                let answer = answer.filter(|p| answer_is_for(&p.url, &host, r));
+                let path = Path::new(&t.path);
+                let branch = head_branch(path);
+                match batch_route(answer.as_ref(), branch.as_deref()) {
+                    BatchRoute::Trusted => out.push(ok(t, answer.expect("trusted means answered"))),
+                    BatchRoute::Single => {
+                        if take_recheck(&t.id, "", now) {
+                            single.push((t, answer));
+                        } else if let Some(pr) = answer {
+                            // Closed, as of this pass. A replacement on the
+                            // same branch is looked for at the recheck pace.
+                            out.push(ok(t, pr));
+                        }
+                    }
+                    BatchRoute::Moved => {
+                        let pr = answer.expect("moved means answered");
+                        let branch = branch.as_deref().unwrap_or_default();
+                        out.push(ok(t, moved_branch_pr(t, branch, pr, now, &mut budget)));
+                    }
+                }
+            }
+        }
+    }
+
+    for (t, batch_pr) in single {
+        let path = Path::new(&t.path);
+        if forge::background_held(t.pr_provider.as_deref(), t.pr_url.as_deref(), path) {
+            continue;
+        }
+        if budget == 0 {
+            if let Some(pr) = batch_pr {
+                out.push(ok(t, pr));
+            }
+            continue;
+        }
+        budget -= 1;
+        out.push(TaskPrLookup { id: t.id.clone(), lookup: pr_lookup_task(t) });
+    }
+    out
+}
+
+/// Whether a batch answer's url names the PR that was asked for. Case
+/// aside: GitHub answers with the canonical spelling.
+fn answer_is_for(url: &str, host: &str, asked: &forge::PrRef) -> bool {
+    forge::parse_github_pr_url(url).is_some_and(|(h, owner, repo, number)| {
+        h.eq_ignore_ascii_case(host)
+            && owner.eq_ignore_ascii_case(&asked.owner)
+            && repo.eq_ignore_ascii_case(&asked.repo)
+            && number == asked.number
+    })
+}
+
+/// The checkout's branch from its HEAD file, without a `git` subprocess
+/// (the batch asks this for every task, every pass). A worktree's `.git` is
+/// a `gitdir:` pointer file. Anything unexpected asks git.
+fn head_branch(repo: &Path) -> Option<String> {
+    let dot_git = repo.join(".git");
+    let git_dir = match std::fs::read_to_string(&dot_git) {
+        Ok(pointer) => {
+            let dir = PathBuf::from(pointer.trim().strip_prefix("gitdir:")?.trim());
+            if dir.is_absolute() { dir } else { repo.join(dir) }
+        }
+        Err(_) => dot_git,
+    };
+    match std::fs::read_to_string(git_dir.join("HEAD")) {
+        Ok(head) => match head.trim().strip_prefix("ref: refs/heads/") {
+            Some(b) if !b.is_empty() => Some(b.to_string()),
+            Some(_) => current_branch(repo),
+            // Detached.
+            None => None,
+        },
+        Err(_) => current_branch(repo),
+    }
+}
+
+/// What a batch answer for one task means.
+#[derive(Debug, PartialEq, Eq)]
+enum BatchRoute {
+    /// The PR the task is on: use it.
+    Trusted,
+    /// Open, but the task's branch is no longer its head: the task moved to
+    /// another branch, which may have a PR of its own (`moved_branch_pr`).
+    Moved,
+    /// Missing (deleted repo, wrong number, lost access) or closed (not
+    /// merged): the full per-task lookup, whose by-branch half is what finds
+    /// a replacement PR opened on the same branch. At the recheck pace.
+    Single,
+}
+
+fn batch_route(answer: Option<&forge::PrStatus>, branch: Option<&str>) -> BatchRoute {
+    match answer {
+        None => BatchRoute::Single,
+        Some(p) if p.state == "closed" => BatchRoute::Single,
+        // Detached HEAD (a PR review checkout) has no branch to disagree.
+        Some(p) => match branch {
+            Some(b) if !forge::branch_matches_pr(b, &p.head, p.number) => BatchRoute::Moved,
+            _ => BatchRoute::Trusted,
+        },
+    }
+}
+
+/// How often one task's batch answer gets a per-task second look (a moved
+/// branch, or an answer the batch could not trust). Without this each cost a
+/// `gh pr view` every pass, forever: a deleted repo's PR never stops being
+/// missing.
+const RECHECK_SECS: u64 = 180;
+
+/// Per task: what was last rechecked (the moved branch, or "" for a
+/// per-task lookup) and when.
+fn rechecks() -> &'static Mutex<HashMap<String, (String, u64)>> {
+    static M: std::sync::OnceLock<Mutex<HashMap<String, (String, u64)>>> = std::sync::OnceLock::new();
+    M.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Whether to recheck again: something new (`key`), or the last look is
+/// older than `RECHECK_SECS`.
+fn recheck_due(last: Option<&(String, u64)>, key: &str, now: u64) -> bool {
+    last.map_or(true, |(k, at)| k != key || now >= at + RECHECK_SECS)
+}
+
+/// `recheck_due`, and if so, mark it done now.
+fn take_recheck(id: &str, key: &str, now: u64) -> bool {
+    let mut m = rechecks().lock();
+    if !recheck_due(m.get(id), key, now) {
+        return false;
+    }
+    m.insert(id.to_string(), (key.to_string(), now));
+    true
+}
+
+/// The PR for a task whose branch moved off `batch_pr`: the branch's own PR
+/// when it has one (the record re-points to it and the next pass trusts the
+/// batch again), else `batch_pr`, which is what the stored number would
+/// answer anyway. By branch only, at the recheck pace, within the pass's
+/// budget, and not while the host is held.
+fn moved_branch_pr(t: &Task, branch: &str, batch_pr: forge::PrStatus, now: u64, budget: &mut usize) -> forge::PrStatus {
+    let path = Path::new(&t.path);
+    if *budget == 0 || forge::background_held(t.pr_provider.as_deref(), t.pr_url.as_deref(), path) {
+        return batch_pr;
+    }
+    if !take_recheck(&t.id, branch, now) {
+        return batch_pr;
+    }
+    *budget -= 1;
+    match forge::pr_status(forge::GITHUB, path, None) {
+        Ok(Some(own)) => own,
+        _ => batch_pr,
+    }
+}
+
+/// Per-task `gh pr view`s one batched pass may start, however it got there
+/// (the old poller's per-tick cap).
+const BATCH_FALLBACK_MAX: usize = 8;
+
+/// Consecutive non-limit batch failures per host, reset by a good answer.
+fn batch_failures() -> &'static Mutex<HashMap<String, u32>> {
+    static F: std::sync::OnceLock<Mutex<HashMap<String, u32>>> = std::sync::OnceLock::new();
+    F.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum FailurePlan {
+    /// Answer every task with the failure's status: missing CLI or signed
+    /// out, which the card turns into a hint the user can act on.
+    Answer,
+    /// Answer nobody this pass, so a transient 502 or a timeout does not
+    /// replace good lookups with an error.
+    LeaveOut,
+    /// It keeps failing (an older GHES missing a queried field): ask per
+    /// task, which may still work there, within the pass budget.
+    FallBack,
+}
+
+fn batch_failure_plan(e: &forge::ForgeError, streak: u32) -> FailurePlan {
+    match e {
+        forge::ForgeError::CliMissing(_) | forge::ForgeError::Auth(_) => FailurePlan::Answer,
+        _ if streak <= 1 => FailurePlan::LeaveOut,
+        _ => FailurePlan::FallBack,
+    }
 }
 
 /// A member's PR/MR lookup inside a multi-repo task: the `PrLookup`
@@ -16200,9 +17009,21 @@ pub struct MemberPrLookup {
     pub lookup: PrLookup,
 }
 
-fn member_pr_lookups(id: &str) -> Result<Vec<MemberPrLookup>, String> {
+/// `background`: a poller. None, with nothing called, while any member's
+/// GitHub host is rate-paused; the caller keeps the rows it has. All or
+/// nothing, so a held member's row is never dropped from the list.
+// ponytail: one paused GitHub member holds the task's other members too;
+// split per member if mixed-host multi-repo tasks show up.
+fn member_pr_lookups(id: &str, background: bool) -> Result<Option<Vec<MemberPrLookup>>, String> {
     let w = load_tasks_all().into_iter().find(|w| w.id == id).ok_or("no task")?;
-    Ok(on_disk_members(&w)
+    if background && on_disk_members(&w).any(|m| {
+        let cwd = Path::new(&m.path);
+        forge::provider_for_repo(cwd, &detect_default_remote(cwd)).0 == Some(forge::GITHUB)
+            && forge::background_held(Some(forge::GITHUB), None, cwd)
+    }) {
+        return Ok(None);
+    }
+    Ok(Some(on_disk_members(&w)
         .map(|m| {
             let cwd = Path::new(&m.path);
             // Frozen `m.branch` is the create-time value; read HEAD like
@@ -16220,7 +17041,7 @@ fn member_pr_lookups(id: &str) -> Result<Vec<MemberPrLookup>, String> {
                 lookup: pr_lookup_at(cwd, None, None),
             }
         })
-        .collect())
+        .collect()))
 }
 
 /// One issue-list round-trip: provider resolution + the open issues, or
@@ -16234,6 +17055,8 @@ struct IssueLookup {
     status: String,
     message: String,
     issues: Vec<forge::ForgeIssue>,
+    /// As `PrLookup::retry_at`.
+    retry_at: Option<u64>,
 }
 
 /// The "CLI missing" hint, per forge: az is two installs (CLI + the
@@ -16264,6 +17087,7 @@ fn issue_lookup_blocking(project_id: &str, limit: u32, scope: forge::IssueScope)
         status: status.into(),
         message,
         issues: Vec::new(),
+        retry_at: None,
     };
     if remote_url.is_empty() {
         return Ok(none(
@@ -16283,6 +17107,7 @@ fn issue_lookup_blocking(project_id: &str, limit: u32, scope: forge::IssueScope)
         status: status.into(),
         message,
         issues,
+        retry_at: None,
     };
     match forge::issue_list(provider, &cwd, limit, scope) {
         Ok(issues) => Ok(with("ok", String::new(), issues)),
@@ -16295,7 +17120,10 @@ fn issue_lookup_blocking(project_id: &str, limit: u32, scope: forge::IssueScope)
             Vec::new(),
         )),
         Err(forge::ForgeError::Auth(msg)) => Ok(with("cli-unauthed", msg, Vec::new())),
-        Err(forge::ForgeError::Other(msg)) => Ok(with("error", msg, Vec::new())),
+        Err(forge::ForgeError::RateLimited { until, message }) => {
+            Ok(IssueLookup { retry_at: Some(until), ..with("rate-limited", message, Vec::new()) })
+        }
+        Err(forge::ForgeError::Other(msg) | forge::ForgeError::TooLarge(msg)) => Ok(with("error", msg, Vec::new())),
     }
 }
 
@@ -16306,6 +17134,8 @@ struct PrPickList {
     status: String,
     message: String,
     prs: Vec<forge::ForgePr>,
+    /// As `PrLookup::retry_at`.
+    retry_at: Option<u64>,
 }
 
 /// One of the PR picker's lists for a PROJECT, and the by-number lookup
@@ -16328,6 +17158,7 @@ fn pr_picker_blocking(project_id: &str, limit: u32, number: Option<u64>, scope: 
         status: status.into(),
         message,
         prs: Vec::new(),
+        retry_at: None,
     };
     if remote_url.is_empty() {
         return Ok(none("no-remote", "No git remote configured, so there are no pull requests to pull from.".into()));
@@ -16341,6 +17172,7 @@ fn pr_picker_blocking(project_id: &str, limit: u32, number: Option<u64>, scope: 
         status: status.into(),
         message,
         prs,
+        retry_at: None,
     };
     let result = match number {
         // One number: `pr view`. Not found is a status, not an error, because
@@ -16359,7 +17191,10 @@ fn pr_picker_blocking(project_id: &str, limit: u32, number: Option<u64>, scope: 
             Vec::new(),
         )),
         Err(forge::ForgeError::Auth(msg)) => Ok(with("cli-unauthed", msg, Vec::new())),
-        Err(forge::ForgeError::Other(msg)) => Ok(with("error", msg, Vec::new())),
+        Err(forge::ForgeError::RateLimited { until, message }) => {
+            Ok(PrPickList { retry_at: Some(until), ..with("rate-limited", message, Vec::new()) })
+        }
+        Err(forge::ForgeError::Other(msg) | forge::ForgeError::TooLarge(msg)) => Ok(with("error", msg, Vec::new())),
     }
 }
 
@@ -16490,6 +17325,185 @@ async fn project_forge_provider(project_id: String) -> Result<ForgeProvider, Str
 
 /// Open issues for a PROJECT (not a task): the New Task dialog runs before
 /// any task exists, so this resolves the repo from the project root.
+/// One list the Todos view (or a dialog) reads: `kind` "issues" | "prs",
+/// `scope` as `project_forge_issues` / `project_forge_prs` take it.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ForgeListQuery {
+    project_id: String,
+    kind: String,
+    scope: Option<String>,
+    limit: Option<u32>,
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum ForgeListAnswer {
+    Issues(IssueLookup),
+    Prs(PrPickList),
+}
+
+/// A list answer with no rows, shaped for the list it answers.
+fn list_answer_empty(issues: bool, provider: Option<String>, remote_url: String, status: &str, message: String, retry_at: Option<u64>) -> ForgeListAnswer {
+    let status = status.to_string();
+    if issues {
+        ForgeListAnswer::Issues(IssueLookup { provider, remote_url, status, message, issues: Vec::new(), retry_at })
+    } else {
+        ForgeListAnswer::Prs(PrPickList { provider, remote_url, status, message, prs: Vec::new(), retry_at })
+    }
+}
+
+/// Many project lists in one call, answers in `queries` order. GitHub lists
+/// on one host go out as GraphQL queries of up to `forge::LISTS_BATCH_MAX`
+/// lists each (`forge::github_lists`); the rest (GitLab, Azure, no forge, a
+/// limit past one GraphQL page) take the per-project CLI path, three at a
+/// time. A failed GitHub query falls back to that path too, which is also
+/// what turns the failure into the usual "cli-missing" / "cli-unauthed"
+/// statuses, except a rate limit, which answers each of its lists (and the
+/// host's later chunks) with the limit instead of asking again.
+fn forge_lists_blocking(queries: &[ForgeListQuery]) -> Vec<ForgeListAnswer> {
+    let projects = load_projects_all();
+    let limit_of = |q: &ForgeListQuery| if q.kind == "issues" {
+        q.limit.unwrap_or(50).clamp(1, 200)
+    } else {
+        q.limit.unwrap_or(30).clamp(1, 100)
+    };
+    let mut out: Vec<Option<ForgeListAnswer>> = queries.iter().map(|_| None).collect();
+    let mut by_host: std::collections::BTreeMap<String, Vec<(usize, forge::RepoList, String)>> = Default::default();
+    let mut single: Vec<usize> = Vec::new();
+    for (i, q) in queries.iter().enumerate() {
+        let limit = limit_of(q);
+        let batched = projects.iter().find(|p| p.id == q.project_id).and_then(|p| {
+            let cwd = PathBuf::from(&p.root_path);
+            let (provider, remote_url) = forge::provider_for_repo(&cwd, &detect_default_remote(&cwd));
+            if provider != Some(forge::GITHUB) || limit > 100 {
+                return None;
+            }
+            let host = forge::host_of_remote(&remote_url)?;
+            let (owner, repo) = forge::github_remote_slug(&remote_url)?;
+            let kind = if q.kind == "issues" {
+                forge::ListKind::Issues(forge::IssueScope::parse(q.scope.as_deref()))
+            } else {
+                forge::ListKind::Prs(forge::PrScope::parse(q.scope.as_deref()))
+            };
+            Some((host, forge::RepoList { owner, repo, kind, limit }, remote_url))
+        });
+        match batched {
+            Some((host, list, remote_url)) => by_host.entry(host).or_default().push((i, list, remote_url)),
+            None => single.push(i),
+        }
+    }
+
+    for (host, items) in by_host {
+        let mut limited: Option<forge::ForgeError> = None;
+        // A stack of chunks, so one that comes back too large can be split
+        // and asked again as two.
+        let mut chunks: Vec<&[(usize, forge::RepoList, String)]> = items.chunks(forge::LISTS_BATCH_MAX).rev().collect();
+        while let Some(chunk) = chunks.pop() {
+            let result = match &limited {
+                Some(e) => Err(e.clone()),
+                None => {
+                    let lists: Vec<forge::RepoList> = chunk.iter().map(|(_, l, _)| l.clone()).collect();
+                    forge::github_lists(&host, "lists", &lists)
+                }
+            };
+            match result {
+                Ok(rows) => {
+                    for ((i, _, remote_url), rows) in chunk.iter().zip(rows) {
+                        let (provider, remote_url) = (Some(forge::GITHUB.to_string()), remote_url.clone());
+                        out[*i] = Some(match rows {
+                            forge::ListRows::Issues(issues) => ForgeListAnswer::Issues(IssueLookup {
+                                provider, remote_url, status: "ok".into(), message: String::new(), issues, retry_at: None,
+                            }),
+                            forge::ListRows::Prs(prs) => ForgeListAnswer::Prs(PrPickList {
+                                provider, remote_url, status: "ok".into(), message: String::new(), prs, retry_at: None,
+                            }),
+                        });
+                    }
+                }
+                // GitHub said stop: the per-project CLI path would only ask
+                // again, list by list. Each list says why instead.
+                Err(e @ forge::ForgeError::RateLimited { .. }) => {
+                    let forge::ForgeError::RateLimited { until, message } = &e else { unreachable!() };
+                    for (i, list, remote_url) in chunk {
+                        let issues = matches!(list.kind, forge::ListKind::Issues(_));
+                        out[*i] = Some(list_answer_empty(
+                            issues, Some(forge::GITHUB.to_string()), remote_url.clone(), "rate-limited", message.clone(), Some(*until),
+                        ));
+                    }
+                    limited = Some(e);
+                }
+                // Past the output cap (issue bodies are attacker-sized):
+                // halve it. A single list still too large answers an error
+                // rather than going to the CLI path, which has no cap.
+                Err(forge::ForgeError::TooLarge(message)) => {
+                    if chunk.len() > 1 {
+                        let (a, b) = chunk.split_at(chunk.len() / 2);
+                        chunks.push(b);
+                        chunks.push(a);
+                    } else {
+                        for (i, list, remote_url) in chunk {
+                            let issues = matches!(list.kind, forge::ListKind::Issues(_));
+                            out[*i] = Some(list_answer_empty(
+                                issues, Some(forge::GITHUB.to_string()), remote_url.clone(), "error", message.clone(), None,
+                            ));
+                        }
+                    }
+                }
+                // Anything else falls back, which is also what turns it into
+                // the usual cli-missing / cli-unauthed statuses.
+                Err(_) => single.extend(chunk.iter().map(|(i, _, _)| *i)),
+            }
+        }
+    }
+
+    // The per-project path, three workers, like the webview's queue.
+    let one = |i: usize| -> ForgeListAnswer {
+        let q = &queries[i];
+        let limit = limit_of(q);
+        let failed = |message: String| (None, String::new(), "error".to_string(), message);
+        if q.kind == "issues" {
+            ForgeListAnswer::Issues(issue_lookup_blocking(&q.project_id, limit, forge::IssueScope::parse(q.scope.as_deref()))
+                .unwrap_or_else(|e| {
+                    let (provider, remote_url, status, message) = failed(e);
+                    IssueLookup { provider, remote_url, status, message, issues: Vec::new(), retry_at: None }
+                }))
+        } else {
+            ForgeListAnswer::Prs(pr_picker_blocking(&q.project_id, limit, None, forge::PrScope::parse(q.scope.as_deref()))
+                .unwrap_or_else(|e| {
+                    let (provider, remote_url, status, message) = failed(e);
+                    PrPickList { provider, remote_url, status, message, prs: Vec::new(), retry_at: None }
+                }))
+        }
+    };
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let done: Mutex<Vec<(usize, ForgeListAnswer)>> = Mutex::new(Vec::new());
+    std::thread::scope(|sc| {
+        for _ in 0..3.min(single.len()) {
+            sc.spawn(|| loop {
+                let k = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let Some(&i) = single.get(k) else { break };
+                let a = one(i);
+                done.lock().push((i, a));
+            });
+        }
+    });
+    for (i, a) in done.into_inner() {
+        out[i] = Some(a);
+    }
+    out.into_iter().zip(queries).map(|(a, q)| a.unwrap_or_else(|| {
+        list_answer_empty(q.kind == "issues", None, String::new(), "error", "no answer".into(), None)
+    })).collect()
+}
+
+/// Many forge lists at once, for the Todos view. See `forge_lists_blocking`.
+#[tauri::command]
+async fn project_forge_lists(queries: Vec<ForgeListQuery>) -> Result<Vec<ForgeListAnswer>, String> {
+    tauri::async_runtime::spawn_blocking(move || forge_lists_blocking(&queries))
+        .await
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 async fn project_forge_issues(project_id: String, limit: Option<u32>, scope: Option<String>) -> Result<IssueLookup, String> {
     let limit = limit.unwrap_or(50).clamp(1, 200);
@@ -16521,19 +17535,39 @@ fn branch_then_number<T, E>(
     }
 }
 
+/// PR status for many tasks in one call: the background poller's path, so
+/// always rate-gated. See `pr_lookup_batch`; tasks a closed gate skipped are
+/// absent.
 #[tauri::command]
-async fn task_pr_status(id: String) -> Result<PrLookup, String> {
-    tauri::async_runtime::spawn_blocking(move || pr_lookup_blocking(&id))
+async fn task_pr_status_batch(ids: Vec<String>) -> Result<Vec<TaskPrLookup>, String> {
+    tauri::async_runtime::spawn_blocking(move || pr_lookup_batch(&ids))
         .await
-        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
+}
+
+/// `background`: a poller, not a user. A GitHub task whose host is paused
+/// (forge_rate) answers None without calling anything. Required, so a new
+/// caller has to say which it is rather than landing on the ungated path.
+#[tauri::command]
+async fn task_pr_status(id: String, background: bool) -> Result<Option<PrLookup>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let w = load_tasks_all().into_iter().find(|w| w.id == id).ok_or("no task")?;
+        if background && forge::background_held(w.pr_provider.as_deref(), w.pr_url.as_deref(), Path::new(&w.path)) {
+            return Ok(None);
+        }
+        Ok(Some(pr_lookup_task(&w)))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Live PR/MR status for each non-host member of a multi-repo task. Same
 /// cadence contract as `task_pr_status` (the pr store folds it into the
 /// task's refresh) - one forge CLI call per member with a forge remote.
+/// `background` as `task_pr_status`.
 #[tauri::command]
-async fn task_member_pr_status(id: String) -> Result<Vec<MemberPrLookup>, String> {
-    tauri::async_runtime::spawn_blocking(move || member_pr_lookups(&id))
+async fn task_member_pr_status(id: String, background: bool) -> Result<Option<Vec<MemberPrLookup>>, String> {
+    tauri::async_runtime::spawn_blocking(move || member_pr_lookups(&id, background))
         .await
         .map_err(|e| e.to_string())?
 }
@@ -16601,7 +17635,7 @@ async fn task_pr_create(
                     if provider == forge::GITLAB { "a merge request" } else { "a pull request" }
                 )))
             }
-            Err(forge::ForgeError::Auth(m)) | Err(forge::ForgeError::Other(m)) => return Err(m),
+            Err(e) => return Err(e.into_message()),
         };
         // Persist identity immediately — the follow-up lookup also does
         // this, but creation should never lose the URL even if the status
@@ -16624,19 +17658,28 @@ async fn task_pr_create(
 /// Every comment on the task's PR/MR (discussion + review +
 /// inline), oldest first, normalized timestamps. Requires the PR
 /// identity to be known (a status poll or create already cached it).
+/// `background` (the comment watcher): None while a GitHub host is paused.
 #[tauri::command]
-async fn task_pr_comments(id: String) -> Result<Vec<forge::PrComment>, String> {
+async fn task_pr_comments(id: String, background: bool) -> Result<Option<Vec<forge::PrComment>>, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let w = load_tasks_all().into_iter().find(|w| w.id == id).ok_or("no task")?;
         let provider = w.pr_provider.clone().ok_or("no PR known for this task yet")?;
         let number = w.pr_number.ok_or("no PR known for this task yet")?;
         let cwd = PathBuf::from(&w.path);
-        forge::pr_comments(&provider, &cwd, number).map_err(|e| match e {
+        if background && forge::background_held(Some(&provider), w.pr_url.as_deref(), &cwd) {
+            return Ok(None);
+        }
+        let comments = match forge::pr_comments(&provider, &cwd, number, background) {
+            // Held mid-call (the inline leg met the gate): nothing was read.
+            Err(forge::ForgeError::RateLimited { .. }) if background => return Ok(None),
+            other => other,
+        };
+        comments.map(Some).map_err(|e| match e {
             forge::ForgeError::CliMissing(cli) => cli_missing_message(&provider, &cli, &format!(
                 "read {} comments",
                 if provider == forge::GITLAB { "merge request" } else { "pull request" }
             )),
-            forge::ForgeError::Auth(m) | forge::ForgeError::Other(m) => m,
+            e => e.into_message(),
         })
     })
     .await
@@ -17091,6 +18134,48 @@ fn save_clipboard_image(bytes: &[u8], dir: &Path) -> Result<String, String> {
 /// clipboard, an AppHandle, or a running app - and because the ONE thing
 /// that must hold here is that the result is identifiable by
 /// `image_extension`, which is what every downstream reader uses.
+/// A PNG's pixels as 8-bit RGBA (a paired computer's pasted image, written
+/// to this computer's clipboard). Palette and grey images are expanded.
+pub(crate) fn decode_png_rgba(png_bytes: &[u8]) -> Result<(Vec<u8>, u32, u32), String> {
+    let mut dec = png::Decoder::new(png_bytes);
+    dec.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16 | png::Transformations::ALPHA);
+    let mut reader = dec.read_info().map_err(|e| e.to_string())?;
+    let mut buf = vec![0; reader.output_buffer_size()];
+    let info = reader.next_frame(&mut buf).map_err(|e| e.to_string())?;
+    buf.truncate(info.buffer_size());
+    let rgba = match info.color_type {
+        png::ColorType::Rgba => buf,
+        png::ColorType::GrayscaleAlpha => buf.chunks(2).flat_map(|p| [p[0], p[0], p[0], p[1]]).collect(),
+        other => return Err(format!("unexpected PNG colour type {other:?}")),
+    };
+    Ok((rgba, info.width, info.height))
+}
+
+#[cfg(test)]
+#[test]
+fn a_png_round_trips_to_the_same_pixels() {
+    let px = vec![10u8, 20, 30, 255, 40, 50, 60, 128];
+    let png = encode_rgba_png(&px, 2, 1).unwrap();
+    assert_eq!(decode_png_rgba(&png).unwrap(), (px, 2, 1));
+}
+
+/// Base64 PNG of this computer's clipboard image, for sending to a paired
+/// computer before forwarding a Ctrl+V there. Err when there is none.
+#[tauri::command]
+async fn clipboard_image_png_b64(app: tauri::AppHandle) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        use tauri_plugin_clipboard_manager::ClipboardExt;
+        let image = app.clipboard().read_image().map_err(|e| e.to_string())?;
+        let (w, h) = (image.width(), image.height());
+        if w == 0 || h == 0 {
+            return Err("clipboard image had no size".to_string());
+        }
+        Ok(termic_remote::b64(&encode_rgba_png(image.rgba(), w, h)?))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 fn encode_rgba_png(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>, String> {
     let expected = (width as usize) * (height as usize) * 4;
     if rgba.len() < expected {
@@ -17172,6 +18257,31 @@ async fn clipboard_image_save(request: tauri::ipc::Request<'_>) -> Result<String
         .map_err(|e| e.to_string())?
 }
 
+/// Put a pasted clipboard image on a server, for a server task's agent to
+/// read. A headless box has no clipboard for the agent to read, so the image
+/// saved on THIS computer (`clipboard_image_capture`) is copied into a temp
+/// file there and its path is pasted, which the agent turns into an image
+/// (the Docker route). Only files from this app's clipboard folder.
+#[tauri::command]
+async fn server_paste_image(server: String, cwd: String, path: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let dir = std::fs::canonicalize(clipboard_dir()?).map_err(|e| e.to_string())?;
+        let file = std::fs::canonicalize(&path).map_err(|e| e.to_string())?;
+        if !file.starts_with(&dir) {
+            return Err("not a pasted image".into());
+        }
+        let bytes = std::fs::read(&file).map_err(|e| e.to_string())?;
+        let script = "f=$(mktemp \"${TMPDIR:-/tmp}/termic-paste-XXXXXX\") && mv \"$f\" \"$f.png\" && cat > \"$f.png\" && printf %s \"$f.png\"";
+        let (code, out, err) = server_projects::exec_with_stdin(&server, std::path::Path::new(&cwd), &["sh", "-c", script], &[], Some(&bytes))?;
+        if code != 0 {
+            return Err(if err.trim().is_empty() { format!("exited {code}") } else { err.trim().to_string() });
+        }
+        Ok(String::from_utf8_lossy(&out).trim().to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Read a text file by ABSOLUTE path, with NO task containment (GH #240).
 ///
 /// This is the ONLY read in the app that is not bounded by a task root, and
@@ -17212,8 +18322,23 @@ fn read_external_file(path: &str) -> Result<String, String> {
 }
 
 #[tauri::command]
-fn task_file_read(id: String, path: String) -> Result<String, String> {
+async fn task_file_read(id: String, path: String) -> Result<String, String> {
+    // Off the main thread: on a server project this is an ssh round trip.
+    tauri::async_runtime::spawn_blocking(move || {
     let w = load_tasks_all().into_iter().find(|w| w.id == id).ok_or("no task")?;
+    // A server task: read the file on the box, same cap, text only.
+    if let Some(server) = server_projects::server_for_path(Path::new(&w.path)) {
+        let base = PathBuf::from(&w.path);
+        let file = server_rel(&base, &path)?;
+        let (code, out, err) = server_projects::exec_on(&server, &base, &["head", "-c", "2000001", "--", &file.to_string_lossy()], &[])?;
+        if code != 0 {
+            return Err(err.trim().to_string());
+        }
+        if out.len() > 2_000_000 {
+            return Err(format!("{path} is larger than 2 MB"));
+        }
+        return String::from_utf8(out).map_err(|_| format!("{path} is not valid UTF-8 text"));
+    }
     // Member-aware: a `<dir_name>/…` path resolves inside that member's repo
     // (which may live outside the wrapper for repo_root members), matching
     // the diff/finder/grep path scheme.
@@ -17221,6 +18346,7 @@ fn task_file_read(id: String, path: String) -> Result<String, String> {
     let abs = safe_task_read_path(&w, &cwd, &rel)?;
     // Refuse binary or huge files for now — viewer is text-only.
     read_text_file_capped(&abs, 2_000_000)
+}).await.map_err(|e| e.to_string())?
 }
 
 /// Text-or-nothing decode for the editor's read. Split out ONLY so the
@@ -17495,14 +18621,36 @@ fn taskpdf_response(uri_path: &str) -> tauri::http::Response<Vec<u8>> {
 /// as the read side. Synchronous to mirror `task_file_read` — a
 /// single text file (capped at 2 MB on read) is not the heavy-IO case
 /// the spawn_blocking discipline targets.
+/// Write stdin to the file $1 on a box, atomically, as `write_atomic` does
+/// here: through a symlink to its target (a dotfiles link stays a link),
+/// keeping the file's mode (an executable script stays executable), via a
+/// temp file renamed over it. `stat -c` is GNU and busybox, `-f` the BSDs.
+pub(crate) const BOX_WRITE_SH: &str = r#"f=$1; [ -L "$f" ] && f=$(readlink -f -- "$f" 2>/dev/null || printf %s "$f"); t="$f.termic-tmp.$$"; cat > "$t" || exit 1; if [ -e "$f" ]; then m=$(stat -c %a "$f" 2>/dev/null || stat -f %Lp "$f" 2>/dev/null) && chmod "$m" "$t"; fi; mv -f "$t" "$f""#;
+
 #[tauri::command]
-fn task_file_write(id: String, path: String, content: String) -> Result<(), String> {
+async fn task_file_write(id: String, path: String, content: String) -> Result<(), String> {
+    // Off the main thread: on a server project this is an ssh round trip.
+    tauri::async_runtime::spawn_blocking(move || {
     let w = load_tasks_all().into_iter().find(|w| w.id == id).ok_or("no task")?;
+    // A server task: write it on the box (write to a temp file, then rename
+    // over, so a torn write never leaves half a file), fenced to the task.
+    if let Some(server) = server_projects::server_for_path(Path::new(&w.path)) {
+        let base = PathBuf::from(&w.path);
+        let file = server_rel(&base, &path)?;
+        let f = file.to_string_lossy();
+        let (code, _, err) = server_projects::exec_with_stdin(
+            &server, &base,
+            &["sh", "-c", BOX_WRITE_SH, "sh", &f],
+            &[], Some(content.as_bytes()),
+        )?;
+        return if code == 0 { Ok(()) } else { Err(format!("write failed: {}", err.trim())) };
+    }
     let (cwd, rel) = resolve_task_git_path(&w, &path)?;
     let abs = safe_task_path(&cwd, &rel)?;
     // Atomic: uncommitted source is unrecoverable if a truncate-write tears.
     // Tradeoff accepted: the swap installs a new inode (breaks hardlinks).
     write_atomic(&abs, content.as_bytes()).map_err(|e| format!("write failed: {e}"))
+}).await.map_err(|e| e.to_string())?
 }
 
 // ──────────────────────────── scratchpads (GH #244) ────────────────────────
@@ -18611,9 +19759,36 @@ async fn task_dir_list(id: String, rel: String, heal: bool) -> Result<Vec<FileEn
         .map_err(|e| e.to_string())?
 }
 
+/// A relative path inside a server task, refused if it could climb out
+/// (`..`, absolute): the box checks its project fence, this keeps the
+/// request inside the task too.
+fn server_rel(base: &Path, rel: &str) -> Result<PathBuf, String> {
+    let p = Path::new(rel);
+    if p.is_absolute() || p.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+        return Err(format!("{rel}: outside the task"));
+    }
+    Ok(if rel.is_empty() { base.to_path_buf() } else { base.join(p) })
+}
+
 fn task_dir_list_sync(id: String, rel: String, heal: bool) -> Result<Vec<FileEntry>, String> {
     let w = load_tasks_all().into_iter().find(|w| w.id == id).ok_or("no task")?;
     let base = PathBuf::from(&w.path);
+    // A server task: list the folder on the box (server_projects.rs).
+    if let Some(server) = server_projects::server_for_path(&base) {
+        let dir = server_rel(&base, &rel)?;
+        let (code, out, err) = server_projects::exec_on(&server, &base, &["ls", "-1Ap", "--", &dir.to_string_lossy()], &[])?;
+        if code != 0 {
+            return Err(err.trim().to_string());
+        }
+        let mut entries: Vec<FileEntry> = String::from_utf8_lossy(&out)
+            .lines()
+            // `.git` is a file in a worktree, a folder in a checkout: hide both.
+            .filter(|l| !l.is_empty() && *l != ".git/" && *l != ".git" && *l != ".DS_Store")
+            .map(|l| FileEntry { is_dir: l.ends_with('/'), name: l.trim_end_matches('/').to_string() })
+            .collect();
+        entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())));
+        return Ok(entries);
+    }
     // Multi-repo: when the relative path enters a composition member
     // (e.g. "pydpf" or "pydpf/src"), resolve under that member's real
     // path instead of going through safe_task_path — which would
@@ -18752,12 +19927,8 @@ async fn task_list_files_for_finder(id: String) -> Result<Vec<String>, String> {
         // globs (same ones the file tree uses) so a hidden path doesn't leak
         // back in via ⌘P. A repo that won't list just contributes nothing.
         let ls = |dir: &str, prefix: &str, patterns: &[glob::Pattern]| -> Vec<String> {
-            match git_command()
-                .args(["ls-files", "--cached", "--others", "--exclude-standard"])
-                .current_dir(dir)
-                .output()
-            {
-                Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+            match git_raw(&["ls-files", "--cached", "--others", "--exclude-standard"], Path::new(dir)) {
+                Some((true, stdout)) => String::from_utf8_lossy(&stdout)
                     .lines()
                     .filter(|l| !l.is_empty())
                     .filter(|l| !path_is_excluded(patterns, l))
@@ -18921,36 +20092,7 @@ fn unique_task_name(base: &str, tasks: &[Task], project_id: &str) -> String {
 ///
 /// Mirrors `slugify` in src/lib/utils.ts character for character; `utils.test.ts`
 /// and `slugify_collapses_dash_runs` pin the pair against one case list.
-fn slugify(s: &str) -> String {
-    let mapped: String = s
-        .trim()
-        .to_lowercase()
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
-        .collect();
-    let mut out = String::with_capacity(mapped.len());
-    let mut prev_dash = false;
-    for c in mapped.chars() {
-        if c == '-' {
-            if !prev_dash {
-                out.push(c);
-            }
-            prev_dash = true;
-        } else {
-            out.push(c);
-            prev_dash = false;
-        }
-    }
-    let out = out.trim_matches('-').to_string();
-    // Windows cannot create a directory with a reserved device name, and the
-    // slug is a worktree directory. On every OS, so a task named on a Mac
-    // still checks out on a teammate's Windows machine. Mirrored in utils.ts.
-    let reserved = matches!(out.as_str(), "con" | "prn" | "aux" | "nul")
-        || (out.len() == 4
-            && (out.starts_with("com") || out.starts_with("lpt"))
-            && matches!(out.as_bytes()[3], b'1'..=b'9'));
-    if reserved { format!("{out}-1") } else { out }
-}
+use termic_proto::slugify;
 
 /// Recursively copy a file or directory. `fs::copy` ONLY handles files, so
 /// the previous implementation silently dropped directory patterns like
@@ -23118,6 +24260,17 @@ fn reveal_path(path: String) -> Result<(), String> {
     Ok(())
 }
 
+/// What the Report a bug button prefills: the version and OS, and the crash
+/// log when there is one, so it can show the user the file to attach.
+#[tauri::command]
+fn bug_report_info() -> serde_json::Value {
+    serde_json::json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "os": format!("{} {}", std::env::consts::OS, std::env::consts::ARCH),
+        "crashLog": panic_log::existing().map(|p| p.to_string_lossy().into_owned()),
+    })
+}
+
 /// What to do once the OS launcher has been run for a file (GH #147).
 /// Only the real (non-e2e) build shells out, so the e2e binary never reaches
 /// the decision — the unit tests below still cover it in either build.
@@ -24336,7 +25489,7 @@ pub struct Settings {
     /// one and then keeps it across restarts.
     #[serde(default)]
     pub mcp_port: u16,
-    /// "Share on this network" (Settings > Agent access, docs/peers.md):
+    /// "Share on this network" (Settings > Remote control, docs/peers.md):
     /// binds the peer listener on every interface and advertises this
     /// machine over mDNS so other Termic instances can ask to pair. Default
     /// OFF; applied live both ways by settings_save, and re-read per request
@@ -27108,13 +28261,20 @@ fn paint_t_mark(rgba: &mut [u8], w: usize, color: [u8; 4]) {
     for cy in 2..7 { fill(2, cy); fill(3, cy); }        // stem
 }
 
-/// 32×32 template image of the app mark. macOS recolors template images
-/// itself, so only alpha matters; color is black + opaque wherever the mark
-/// is painted.
+/// 32×32 image of the app mark. On macOS a template image: the menu bar
+/// recolors it, so only alpha matters and the black is never seen.
+///
+/// Everywhere else the pixels are drawn as they are (Linux trays and
+/// Windows have no template images), and a black mark vanished on a dark
+/// panel, GNOME's top bar included. An orange mark reads on both, with
+/// nothing to detect: #bf694d, the accent (#d97757) a shade darker, clears
+/// 3:1 contrast on a #1e1e1e panel (4.2), a #f0f0f0 one (3.4), white and
+/// black. The accent itself fell to 2.7 on the light panel.
 fn tray_icon_image() -> tauri::image::Image<'static> {
     const W: usize = 32;
+    const MARK: [u8; 4] = if cfg!(target_os = "macos") { [0, 0, 0, 255] } else { [191, 105, 77, 255] }; // #bf694d
     let mut rgba = vec![0u8; W * W * 4];
-    paint_t_mark(&mut rgba, W, [0, 0, 0, 255]);
+    paint_t_mark(&mut rgba, W, MARK);
     tauri::image::Image::new_owned(rgba, W as u32, W as u32)
 }
 
@@ -27791,7 +28951,14 @@ pub(crate) fn leave_windowless(app: &AppHandle) {
     // user opened them, so hiding all and restoring one would silently lose a
     // profile. A root the user CLOSED stays closed (ROOT_PUT_AWAY), unless it
     // is the only window there is.
-    let wins = shown_profile_windows(app);
+    let mut wins = shown_profile_windows(app);
+    // No window at all (Linux and Windows destroy the last one on close):
+    // build the root again, or Show would do nothing.
+    if wins.is_empty() {
+        if let Ok(w) = build_profile_window(app, &ProfileId::Root) {
+            wins.push(w);
+        }
+    }
     if wins.iter().any(|w| w.label() == ProfileId::Root.window_label()) {
         root_brought_back();
     }
@@ -28173,9 +29340,7 @@ fn app_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
         let MenuItemKind::Submenu(sub) = top else { continue };
         for (i, item) in sub.items()?.into_iter().enumerate() {
             let MenuItemKind::Predefined(p) = item else { continue };
-            // The predefined item's kind is not exposed; muda titles the
-            // macOS Close Window item "Close".
-            if p.text()? != "Close" {
+            if !is_close_window_title(&p.text()?) {
                 continue;
             }
             sub.remove(&p)?;
@@ -28190,7 +29355,21 @@ fn app_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
             }
         }
     }
+    if !bound {
+        // Silent here meant ⌘W in a preview iframe quit Termic for every
+        // release since muda's title stopped matching (see below).
+        dlog("[menu] no Close Window item found; ⌘W stays Close Window and a preview iframe's ⌘W closes the window");
+    }
     Ok(menu)
+}
+
+/// The predefined Close Window item, by title: its kind is not exposed.
+/// muda titles it "C&lose Window" (mnemonic stripped: "Close Window") on
+/// macOS and "Close" on Windows. Matching only "Close" left ⌘W unbound on
+/// macOS, so it kept closing the window from inside a preview iframe.
+#[cfg(target_os = "macos")]
+fn is_close_window_title(text: &str) -> bool {
+    matches!(text, "Close Window" | "Close")
 }
 
 /// Tell the focused window to close its innermost thing (tab, pane, then
@@ -28278,10 +29457,22 @@ pub fn run() {
         } else {
             dlog("[gpu] non-NVIDIA GPU (or nouveau/offload); keeping WebKitGTK DMA-BUF renderer on");
         }
+        if let Ok(dir) = global_dir() {
+            appimage_env::hide_colrv1_fonts(&dir);
+        }
     }
     // `mut` is only used when the e2e plugin is compiled in.
     #[cfg_attr(not(feature = "e2e"), allow(unused_mut))]
     let mut builder = tauri::Builder::default();
+    // Replaces tauri's default (reload the webview) with the same reload, plus
+    // a line in panic.log: otherwise the interface resets with no trace.
+    #[cfg(target_os = "macos")]
+    {
+        builder = builder.on_web_content_process_terminate(|webview| {
+            panic_log::record_webcontent_terminated(webview.label());
+            let _ = webview.reload();
+        });
+    }
     // E2E-ONLY (`--features e2e`): embed the WebDriver HTTP server so the
     // WebdriverIO e2e suite can drive this WKWebView window. Absent from
     // every normal dev and release build. The plugin exposes no IPC
@@ -28369,6 +29560,10 @@ pub fn run() {
         .manage(PtyManager::default())
         .setup(|app| {
             caffeinate::start(app.handle().clone());
+            {
+                let h = app.handle().clone();
+                forge_rate::on_changed(move |s| { let _ = h.emit("termic://forge-rate-changed", s); });
+            }
             // CLI detection that ran on the fallback PATH re-runs (GH #441).
             {
                 let h = app.handle().clone();
@@ -28596,6 +29791,8 @@ pub fn run() {
             cli_server::start(app.handle().clone());
             mcp_server::start_if_enabled(app.handle().clone());
             peers::start_if_enabled(app.handle().clone());
+            remote_client::init(app.handle().clone());
+            server_projects::init(app.handle().clone());
             // E2E: show the window, never take focus. `set_focus()` on macOS
             // ACTIVATES the app, which yanks the user to whichever Space the
             // window opened on — seventeen times a suite run, since each spec
@@ -28648,7 +29845,7 @@ pub fn run() {
             window_close_if_not_last,
             profiles_list, profiles_disable, profile_create, profile_close, profile_seeded_tasks_path, profile_update, profile_open, profile_delete_preview, profile_delete,
             projects_list, project_add, project_add_multi, project_set_members, project_update, project_remove, project_reorder, project_set_group,
-            tasks_list, task_create, task_create_multi, task_update_members, task_open_repo, task_importable_worktrees, task_import_worktree, task_archive, task_set_cli, task_set_custom_command, task_set_resume_override, task_set_sandbox, task_set_docker, task_set_yolo,
+            tasks_list, task_create, task_create_multi, task_update_members, task_open_repo, task_importable_worktrees, task_import_worktree, task_archive, task_set_cli, task_set_custom_command, task_set_resume_override, task_set_sandbox, task_set_docker, task_set_yolo, task_set_pinned,
             task_set_role, secret_probe, secret_store, secret_forget, secrets_protected_available, secrets_gh_accounts, secrets_exposed, secrets_test_request, env_guard_list, env_guard_save, agent_set_pass_env,
             broker_counts, broker_events, broker_all_events, broker_set_paused, broker_allow, broker_unallow,
             sandbox_available, sandbox_deny_counts, sandbox_recent_denied_hosts, sandbox_recent_denied_paths, sandbox_access_counts, sandbox_recent_access_hosts, sandbox_recent_access_paths, sandbox_set_monitor_filters, task_sandbox_add_allowed_host, task_sandbox_add_allowed_path, sandbox_remove_allowed, agent_sandbox_add_allowed_path, agent_sandbox_add_allowed_host, task_recent_denials,
@@ -28661,7 +29858,7 @@ pub fn run() {
             task_group_leave,
             task_group_update,
             task_group_dissolve,
-            task_restore, task_delete, task_run_script, task_run_script_stream, task_ensure_extra_ports, task_stop_script, task_record_spawn, task_set_has_history, task_set_agent_session_id,
+            task_restore, task_delete, task_run_script, task_run_script_stream, task_ensure_extra_ports, task_stop_script, task_record_spawn, task_set_has_history, task_set_agent_session_id, build_dirs::task_mark_active, build_dirs::idle_build_dirs_free,
             task_set_tabs, task_set_tab_session_id, task_set_tab_scheduled,
             task_set_schedule, schedule_prune_reports, schedule_delete_reports, schedule_report_status,
             task_set_split_layout,
@@ -28672,9 +29869,9 @@ pub fn run() {
             desktop_integration_status, desktop_integration_add, desktop_integration_remove, task_list_files_for_finder, task_match_ignored_files, task_send_diff_to_main,
             task_changes, task_git_status, task_git_branches, project_git_branches, project_branch_context, project_git_current_branch, task_git_checkout, task_git_update, task_git_update_all, task_git_update_info, task_stage, task_unstage, task_commit, task_discard,
             task_git_log, task_git_refs, task_git_push, task_git_commit_files, task_git_compare, task_review_range, review_list, review_post, review_resolve, review_delete, task_git_blame, task_git_commit_meta, task_git_commit_offset,
-            detect_forges, task_pr_status, task_member_pr_status, task_pr_create, task_pr_comments, task_set_pr_watch, task_set_pr_comments_seen,
+            detect_forges, forge_rate_status, task_pr_status, task_pr_status_batch, project_forge_lists, task_member_pr_status, task_pr_create, task_pr_comments, task_set_pr_watch, task_set_pr_comments_seen,
             project_forge_issues, project_forge_provider, project_forge_prs, project_fetch_pr_branch, project_git_checkout,
-            task_file_diff, task_file_diff_sides, task_file_read, file_read_external, clipboard_image_save, clipboard_image_capture, task_file_read_base64, task_file_fp, task_file_write, task_dir_list, task_path_stat,
+            task_file_diff, task_file_diff_sides, task_file_read, file_read_external, clipboard_image_save, clipboard_image_capture, server_paste_image, clipboard_image_png_b64, task_file_read_base64, task_file_fp, task_file_write, task_dir_list, task_path_stat,
             task_path_rename, task_path_delete, task_reveal_path,
             scratch_list, scratch_read, scratch_write, scratch_set_meta, scratch_delete,
             scratch_promote, scratch_promote_target_exists,
@@ -28684,7 +29881,7 @@ pub fn run() {
             pty_spawn, pty_write, pty_resize, pty_kill,
             procmon_start, procmon_sample, procmon_stop, procmon_signal, procmon_open_window,
             lsp_offer, lsp_catalog, lsp_install, lsp_install_zuban, lsp_check_update, lsp_update, lsp_start, lsp_send, lsp_stop, lsp_reap_foreign, lsp_list,
-            notify, open_path, reveal_path, open_file_external, open_with_apps, open_with_app, open_external_url, browser_command_check, home_dir, project_tasks_path_default, customizations_open, customizations_set_enabled, tasks_path_conflicts, default_shell, script_shell, path_exists, path_is_git_repo, git_init_repo, log_line, pty_debug_append, terminal_stage_file, install_notification_sound, play_completion_sound,
+            notify, open_path, reveal_path, bug_report_info, open_file_external, open_with_apps, open_with_app, open_external_url, browser_command_check, home_dir, project_tasks_path_default, customizations_open, customizations_set_enabled, tasks_path_conflicts, default_shell, script_shell, path_exists, path_is_git_repo, git_init_repo, log_line, pty_debug_append, terminal_stage_file, install_notification_sound, play_completion_sound,
             settings_load, settings_save, discovery_dismiss,
             config_sync::sync_status, config_sync::sync_connect, config_sync::sync_preview,
             config_sync::sync_bind, config_sync::sync_now, config_sync::sync_launch_pull, config_sync::sync_focus_pull,
@@ -28713,6 +29910,7 @@ pub fn run() {
             mcp_server::mcp_regenerate_token,
             mcp_server::mcp_install_client,
             peers::peer_status,
+            push::phones_push,
             peers::peer_set_name,
             peers::peer_pair,
             peers::peer_pair_mode,
@@ -28722,6 +29920,29 @@ pub fn run() {
             peers::peer_set_note,
             peers::peer_unpair,
             peers::peer_refresh,
+            peers::phone_pair_start,
+            peers::phone_pair_cancel,
+            peers::phone_unpair,
+            peers::phone_rename,
+            remote_client::remote_machines,
+            remote_client::remote_call,
+            remote_client::remote_term_open,
+            remote_client::remote_term_close,
+            remote_client::remote_term_input,
+            remote_client::remote_set_folder_colors,
+            remote_client::remote_set_sidebar_folds,
+            remote_client::remote_term_size,
+            remote_client::remote_reconnect,
+            remote_client::remote_set_connected,
+            remote_client::server_add,
+            server_projects::server_which,
+            remote_client::server_restart,
+            remote_client::server_remove,
+            remote_client::server_rename,
+            remote_client::server_list,
+            remote_client::server_probe,
+            remote_client::server_trust,
+            remote_client::server_install,
             window_close_choice, window_is_windowless, close_prompt_ack,
             tray_set_attention,
             list_monospace_fonts, list_font_families,
@@ -28779,6 +30000,13 @@ pub fn run() {
                 // time a coded exit reaches here the question has been put.
                 if code.is_none() && confirm_quit_or_exit(app) {
                     api.prevent_exit();
+                }
+                // A restart spawns the next process from this one's
+                // environment while we still hold the control socket; this
+                // tells it to wait for us instead of deferring to us.
+                if *code == Some(tauri::RESTART_EXIT_CODE) {
+                    std::env::set_var(cli_server::RELAUNCH_ENV, "1");
+                    cli_server::release_socket_for_restart();
                 }
             }
             // Dock-icon click on a windowless app (applicationShouldHandle-
@@ -29265,6 +30493,32 @@ fn position_on_cursor_monitor(win: &tauri::WebviewWindow) -> Result<(), Box<dyn 
 
 #[cfg(test)]
 mod tests {
+
+    /// An executable script for a test that will RUN it, written by a child
+    /// process. On Linux, exec of a file fails with ETXTBSY while any process
+    /// holds it open for writing, and a sibling test thread that forks while
+    /// this one's write fd is open inherits it until its own exec. Writing in
+    /// `sh` keeps the fd out of this process, so no fork can carry it.
+    #[cfg(unix)]
+    fn write_test_script(path: &std::path::Path, body: &str) {
+        use std::io::Write;
+        let mut child = std::process::Command::new("/bin/sh")
+            .args(["-c", "cat > \"$1\" && chmod 755 \"$1\"", "sh"])
+            .arg(path)
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(body.as_bytes()).unwrap();
+        assert!(child.wait().unwrap().success(), "could not write {}", path.display());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn close_window_is_found_by_the_title_muda_gives_it_on_macos() {
+        assert!(super::is_close_window_title("Close Window"), "muda's macOS title");
+        assert!(super::is_close_window_title("Close"));
+        assert!(!super::is_close_window_title("Close All"));
+    }
 
     #[test]
     fn keychain_blocked_only_where_the_profile_blocks() {
@@ -31831,12 +33085,10 @@ mod tests {
         let venv_bin = dir.path().join(".venv/bin");
         fs::create_dir_all(&venv_bin).unwrap();
         let local_zuban = venv_bin.join("zuban");
-        fs::write(&local_zuban, "#!/bin/sh\n").unwrap();
         #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&local_zuban, fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        write_test_script(&local_zuban, "#!/bin/sh\n");
+        #[cfg(not(unix))]
+        fs::write(&local_zuban, "#!/bin/sh\n").unwrap();
         let (exe, args) = lsp_resolve_server(dir.path(), "python").expect("a python server");
         assert_eq!(exe, local_zuban.to_string_lossy());
         assert_eq!(args, vec!["server".to_string()]);
@@ -32102,7 +33354,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_typed_command_beats_everything_termic_knows() {
-        use std::os::unix::fs::PermissionsExt;
         // The escape hatch: a server termic does not ship (pylsp, jedi, a
         // wrapper script). It must win over both the pick and the default
         // order, because it is the most explicit thing anybody said.
@@ -32110,8 +33361,7 @@ mod tests {
         let venv = dir.path().join(".venv/bin");
         fs::create_dir_all(&venv).unwrap();
         let zuban = venv.join("zuban");
-        fs::write(&zuban, "#!/bin/sh\n").unwrap();
-        fs::set_permissions(&zuban, fs::Permissions::from_mode(0o755)).unwrap();
+        write_test_script(&zuban, "#!/bin/sh\n");
 
         let (exe, args) = lsp_resolve_server_preferring(
             dir.path(), "python", Some("zuban"), Some("./scripts/pylsp --stdio"),
@@ -32167,7 +33417,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_picked_server_beats_the_default_order() {
-        use std::os::unix::fs::PermissionsExt;
         // A checkout with BOTH zuban and ty in its virtualenv. The default
         // order prefers zuban (it understands Django); somebody who wants ty
         // has no way to say so without this, which was the whole complaint.
@@ -32175,9 +33424,7 @@ mod tests {
         let venv = dir.path().join(".venv/bin");
         fs::create_dir_all(&venv).unwrap();
         for name in ["zuban", "ty"] {
-            let p = venv.join(name);
-            fs::write(&p, "#!/bin/sh\n").unwrap();
-            fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+            write_test_script(&venv.join(name), "#!/bin/sh\n");
         }
 
         let (exe, _) = lsp_resolve_server_preferring(dir.path(), "python", None, None).unwrap();
@@ -32191,7 +33438,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_pick_that_resolves_to_nothing_falls_back_instead_of_failing() {
-        use std::os::unix::fs::PermissionsExt;
         // A preference is a preference, not an assertion that the binary is
         // installed. Someone who picks basedpyright and then works on a
         // machine without it should still get navigation, not silence.
@@ -32199,8 +33445,7 @@ mod tests {
         let venv = dir.path().join(".venv/bin");
         fs::create_dir_all(&venv).unwrap();
         let zuban = venv.join("zuban");
-        fs::write(&zuban, "#!/bin/sh\n").unwrap();
-        fs::set_permissions(&zuban, fs::Permissions::from_mode(0o755)).unwrap();
+        write_test_script(&zuban, "#!/bin/sh\n");
 
         // Names that CANNOT resolve here, whatever this machine has installed.
         // Deliberately not "basedpyright": plenty of dev machines have it on
@@ -32221,12 +33466,10 @@ mod tests {
         // Windows runs the `.bat` beside a Bundler binstub, never the
         // extensionless script itself.
         let binstub = dir.path().join(if cfg!(windows) { "bin/ruby-lsp.bat" } else { "bin/ruby-lsp" });
-        fs::write(&binstub, "#!/bin/sh\n").unwrap();
         #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&binstub, fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        write_test_script(&binstub, "#!/bin/sh\n");
+        #[cfg(not(unix))]
+        fs::write(&binstub, "#!/bin/sh\n").unwrap();
         let (exe, args) = lsp_resolve_server(dir.path(), "ruby").expect("a ruby server");
         assert_eq!(Path::new(&exe), binstub.as_path());
         assert!(args.is_empty(), "ruby-lsp takes no arguments: {args:?}");
@@ -32620,17 +33863,15 @@ mod tests {
         // server that answers nothing, which is the worst failure this
         // subsystem has. Verified live on this machine before the check
         // existed.
+        //
+        // Links to true/false, not scripts written here: on Linux, exec of a
+        // file this process just wrote fails with ETXTBSY whenever another
+        // test thread forks while the write fd is open, and that flaked CI.
         let dir = tempdir().unwrap();
         let good = dir.path().join("runs");
         let bad = dir.path().join("shim");
-        fs::write(&good, "#!/bin/sh\nexit 0\n").unwrap();
-        fs::write(&bad, "#!/bin/sh\necho 'unavailable for the active toolchain' >&2\nexit 1\n").unwrap();
-        {
-            use std::os::unix::fs::PermissionsExt;
-            for p in [&good, &bad] {
-                fs::set_permissions(p, fs::Permissions::from_mode(0o755)).unwrap();
-            }
-        }
+        std::os::unix::fs::symlink("/usr/bin/true", &good).unwrap();
+        std::os::unix::fs::symlink("/usr/bin/false", &bad).unwrap();
         // The uncached form: the cached one is keyed by path forever, which
         // would make this test order-dependent against its siblings.
         assert!(lsp_candidate_runs_uncached(good.to_str().unwrap(), &["--version"]));
@@ -33366,6 +34607,22 @@ mod tests {
         let t0 = Instant::now();
         wait_for_attach(&buf, &attached, &done, Duration::from_secs(30));
         assert!(t0.elapsed() < Duration::from_secs(1), "took {:?}", t0.elapsed());
+    }
+
+    #[test]
+    fn a_resize_nudge_wakes_every_tap_and_adds_nothing_to_the_backlog() {
+        // A phone watching a terminal must hear of a resize while the agent
+        // is idle: the nudge is the wake-up its forwarder checks the size on.
+        let feed = PtyFeed::new();
+        feed.push(b"screen");
+        let (_, _, rx, _tx) = feed.subscribe();
+        feed.nudge();
+        match rx.recv_timeout(std::time::Duration::from_secs(1)) {
+            Ok(PtyTapMsg::Data(d)) => assert!(d.is_empty(), "a nudge carries no bytes"),
+            other => panic!("expected a nudge, got {:?}", other.is_ok()),
+        }
+        let (backlog, _, _, _) = feed.subscribe();
+        assert_eq!(backlog, b"screen", "a nudge is not output");
     }
 
     #[test]
@@ -35295,6 +36552,84 @@ mod tests {
         assert_eq!(dirs, vec!["api"]);
     }
 
+    fn pr(state: &str, head: &str, number: u64) -> forge::PrStatus {
+        forge::PrStatus {
+            provider: "github".into(), number, url: format!("https://github.com/o/r/pull/{number}"),
+            title: "t".into(), state: state.into(), checks: "none".into(), review: "none".into(),
+            base: "main".into(), head: head.into(),
+        }
+    }
+
+    #[test]
+    fn batch_route_trusts_only_an_open_pr_on_the_tasks_branch() {
+        assert_eq!(batch_route(Some(&pr("open", "feat", 5)), Some("feat")), BatchRoute::Trusted);
+        assert_eq!(batch_route(Some(&pr("merged", "feat", 5)), Some("feat")), BatchRoute::Trusted);
+        // Fork checkouts and a detached review checkout are still the PR.
+        assert_eq!(batch_route(Some(&pr("open", "feat", 5)), Some("pr-5-feat")), BatchRoute::Trusted);
+        assert_eq!(batch_route(Some(&pr("open", "feat", 5)), None), BatchRoute::Trusted);
+        assert_eq!(batch_route(Some(&pr("open", "feat", 5)), Some("follow-up")), BatchRoute::Moved);
+        assert_eq!(batch_route(Some(&pr("closed", "feat", 5)), Some("feat")), BatchRoute::Single);
+        assert_eq!(batch_route(None, Some("feat")), BatchRoute::Single);
+    }
+
+    #[test]
+    fn a_moved_branch_is_looked_up_once_per_window_and_again_on_a_new_branch() {
+        let now = 1_800_000_000;
+        assert!(recheck_due(None, "follow-up", now));
+        let last = ("follow-up".to_string(), now);
+        assert!(!recheck_due(Some(&last), "follow-up", now + RECHECK_SECS - 1));
+        assert!(recheck_due(Some(&last), "follow-up", now + RECHECK_SECS));
+        assert!(recheck_due(Some(&last), "another", now + 1));
+    }
+
+    #[test]
+    fn a_failed_batch_hints_on_auth_skips_once_then_falls_back() {
+        let other = forge::ForgeError::Other("502".into());
+        assert_eq!(batch_failure_plan(&forge::ForgeError::Auth("x".into()), 1), FailurePlan::Answer);
+        assert_eq!(batch_failure_plan(&forge::ForgeError::CliMissing("gh"), 1), FailurePlan::Answer);
+        assert_eq!(batch_failure_plan(&other, 1), FailurePlan::LeaveOut);
+        assert_eq!(batch_failure_plan(&other, 2), FailurePlan::FallBack);
+        let limited = pr_lookup_failed("github", String::new(), forge::ForgeError::RateLimited { until: 42, message: "m".into() });
+        assert_eq!((limited.status.as_str(), limited.retry_at), ("rate-limited", Some(42)));
+    }
+
+    #[test]
+    fn an_empty_list_answer_has_its_own_lists_shape() {
+        let as_json = |a: ForgeListAnswer| serde_json::to_value(a).unwrap();
+        let prs = as_json(list_answer_empty(false, None, String::new(), "error", "no answer".into(), None));
+        assert!(prs.get("prs").is_some() && prs.get("issues").is_none());
+        let issues = as_json(list_answer_empty(true, None, String::new(), "rate-limited", "m".into(), Some(42)));
+        assert!(issues.get("issues").is_some());
+        assert_eq!(issues["status"], "rate-limited");
+        assert_eq!(issues["retry_at"], 42);
+    }
+
+    #[test]
+    fn a_batch_answer_is_trusted_only_for_the_pr_that_was_asked() {
+        let asked = forge::PrRef { owner: "acme".into(), repo: "app".into(), number: 7 };
+        assert!(answer_is_for("https://github.com/acme/app/pull/7", "github.com", &asked));
+        // GitHub's canonical spelling of the same PR.
+        assert!(answer_is_for("https://github.com/Acme/App/pull/7", "github.com", &asked));
+        // A host re-homing the task, another PR, a renamed repo.
+        assert!(!answer_is_for("https://github.com/acme/app/pull/7", "ghe.acme.com", &asked));
+        assert!(!answer_is_for("https://github.com/acme/app/pull/8", "github.com", &asked));
+        assert!(!answer_is_for("https://github.com/acme/app-2/pull/7", "github.com", &asked));
+        assert!(!answer_is_for("file:///etc/passwd", "github.com", &asked));
+    }
+
+    #[test]
+    fn head_branch_reads_a_checkout_and_a_worktree_without_git() {
+        let dir = tempdir().unwrap();
+        let repo = dir.path();
+        git_init_with_commit(repo);
+        assert_eq!(head_branch(repo).as_deref(), Some("main"));
+        let wt = dir.path().join("wt");
+        git(&["worktree", "add", "-b", "feat/x", wt.to_str().unwrap()], repo).unwrap();
+        assert_eq!(head_branch(&wt).as_deref(), Some("feat/x"));
+        git(&["checkout", "--detach"], &wt).unwrap();
+        assert_eq!(head_branch(&wt), None);
+    }
+
     #[test]
     fn member_pr_lookups_labels_rows_with_the_live_branch() {
         with_scratch_data_dir(|_| {
@@ -35325,7 +36660,7 @@ mod tests {
                 },
             ];
             crate::save_task(&ws).unwrap();
-            let rows = member_pr_lookups("t1").unwrap();
+            let rows = member_pr_lookups("t1", false).unwrap().unwrap();
             assert_eq!(rows.len(), 1);
             assert_eq!(rows[0].dir_name, "api");
             assert_eq!(rows[0].branch, "feat-live");
@@ -38643,6 +39978,20 @@ filename f.rs
         list.iter().map(|t| t.id.as_str()).collect()
     }
 
+    // GH #458: a task nobody pinned writes no `pinned` key at all, so its
+    // file is byte-for-byte what it was before the field existed, and a file
+    // from before the field reads as unpinned.
+    #[test]
+    fn pinned_is_omitted_while_false_and_survives_a_round_trip() {
+        let plain = serde_json::to_value(Task { id: "a".into(), ..Default::default() }).unwrap();
+        assert!(plain.get("pinned").is_none(), "{plain}");
+        let pinned = Task { id: "a".into(), pinned: true, ..Default::default() };
+        let json = serde_json::to_string(&pinned).unwrap();
+        assert!(json.contains("\"pinned\":true"), "{json}");
+        assert!(serde_json::from_str::<Task>(&json).unwrap().pinned);
+        assert!(!serde_json::from_str::<Task>("{\"id\":\"a\"}").unwrap().pinned);
+    }
+
     // Nobody has dragged anything yet: every task carries `order: None`, and
     // the list must come back in exactly the creation order it had before
     // drag-to-reorder existed.
@@ -40799,5 +42148,56 @@ mod badge_record_tests {
             save_changed(&list, changed).unwrap();
             assert_eq!(stored("t"), b, "group writers");
         });
+    }
+}
+
+#[cfg(test)]
+mod server_spawn_tests {
+    use super::*;
+
+    #[test]
+    fn a_spawn_built_here_runs_by_name_on_a_box() {
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        // The program as named: a bare name is found on the box's PATH.
+        assert_eq!(server_argv("claude", &s(&["--resume", "x"])), s(&["claude", "--resume", "x"]));
+        assert_eq!(server_argv("codex", &[]), s(&["codex"]));
+        // A shell running a command: the box's own login shell, same flags.
+        let run = server_argv("/bin/zsh", &s(&["-lic", "npm run dev"]));
+        assert_eq!(run[..4], s(&["/bin/sh", "-c", "exec \"${SHELL:-/bin/sh}\" \"$@\"", "sh"])[..]);
+        assert_eq!(run[4..], s(&["-lic", "npm run dev"])[..]);
+    }
+
+    #[test]
+    fn every_task_spawn_claims_the_terminal_termic_parses() {
+        let args: SpawnArgs = serde_json::from_value(serde_json::json!({ "cwd": "/tmp", "cmd": "x", "args": [] })).unwrap();
+        let env = task_spawn_env(&args);
+        for (k, v) in TERMINAL_CLAIMS {
+            assert!(env.iter().any(|(ek, ev)| ek == k && ev == v), "{k} missing");
+        }
+        assert!(!env.iter().any(|(k, _)| k == "TERMIC_TASK_ID"), "no task, no id");
+    }
+}
+
+#[cfg(all(test, unix))]
+mod box_write_tests {
+    #[test]
+    fn a_box_write_keeps_the_mode_and_writes_through_a_symlink() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = std::env::temp_dir().join(format!("box-write-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let real = d.join("run.sh");
+        std::fs::write(&real, "old").unwrap();
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let link = d.join("link.sh");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let mut c = std::process::Command::new("/bin/sh").args(["-c", super::BOX_WRITE_SH, "sh"]).arg(&link).stdin(std::process::Stdio::piped()).spawn().unwrap();
+        std::io::Write::write_all(c.stdin.as_mut().unwrap(), b"new").unwrap();
+        drop(c.stdin.take());
+        assert!(c.wait().unwrap().success());
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink(), "the link stays a link");
+        assert_eq!(std::fs::read_to_string(&real).unwrap(), "new");
+        assert_eq!(std::fs::metadata(&real).unwrap().permissions().mode() & 0o777, 0o755);
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

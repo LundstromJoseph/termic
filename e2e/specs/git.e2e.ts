@@ -2564,6 +2564,9 @@ describe("pr card (#21)", () => {
           byTask: {
             ...s.byTask,
             [id!]: {
+              // `loading` is left as it is: a real lookup still in flight
+              // (leaving the Git tab starts one) must stay visible, see below.
+              ...s.byTask[id!],
               lookup: {
                 provider: "github",
                 remote_url: "https://github.com/acme/widgets.git",
@@ -2577,7 +2580,6 @@ describe("pr card (#21)", () => {
                   base: "main", head: "feat",
                 },
               },
-              loading: false,
               fetchedAt: Date.now(),
             },
           },
@@ -2587,21 +2589,34 @@ describe("pr card (#21)", () => {
       // is: `loadAll()` re-reads every task from disk on window focus and on
       // any archive, and the identity below lives only in memory, so a single
       // seed can be wiped between the write and the read.
+      //
+      // And not until no real lookup is in flight. One that started before
+      // the seed lands as "raced" (the seed replaced the lookup it began
+      // from): it keeps the seed but stamps `fetchedAt`, and the batch below
+      // then drops its own answer as older than that landing. On Windows the
+      // lookup's `git` spawn is slow enough to land inside the pass, every
+      // run. Once it has landed, the seed's fresh `fetchedAt` holds the
+      // store's refresh floor shut until the pass has run.
       await browser.waitUntil(async () => {
         await seed();
-        return await prState() === "merged";
+        const idle = await browser.execute(
+          (id) => !window.__termic!.usePr.getState().byTask[id!]?.loading, taskId);
+        return idle && await prState() === "merged";
       }, { timeout: 8_000, timeoutMsg: "the seeded state never reached the badge" });
 
       // Age the snapshot past the background cadence and run one pass, in a
       // single step so no real tick can slip in between and make the result
       // ambiguous. (One landing there would be the same feature working, but
-      // this case should prove it, not depend on luck.)
+      // this case should prove it, not depend on luck.) The seeded PR is
+      // merged, which the poller only rechecks hourly (SETTLED_STALE_MS in
+      // store/pr.ts), so it has to be older than that, not just the
+      // few-minute cadence an open PR gets.
       await browser.execute(async (id) => {
         const t = window.__termic!;
         t.usePr.setState((s: any) => ({
           byTask: {
             ...s.byTask,
-            [id!]: { ...s.byTask[id!], fetchedAt: Date.now() - 10 * 60_000 },
+            [id!]: { ...s.byTask[id!], fetchedAt: Date.now() - 2 * 60 * 60_000 },
           },
         }));
         await t.prStatusPassNow();

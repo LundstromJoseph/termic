@@ -17,7 +17,7 @@ import { initWindowlessMode } from "@/lib/windowlessMode";
 import { initModKeyClass } from "@/lib/modKeyClass";
 import { installRecentPlacesTracker } from "@/lib/recentPlacesTracker";
 import { initUserPresence } from "@/lib/userPresence";
-import { initWindowFocus } from "@/lib/windowFocus";
+import { initWindowFocus, pinWindowFocus } from "@/lib/windowFocus";
 
 // StrictMode disabled: it double-mounts effects in dev, which races our async
 // PTY spawn flow (first spawn gets killed by the strict teardown before its
@@ -44,7 +44,7 @@ logLine("[termic] boot build=resume-fix-v3-sidebar-bypass").catch(() => {});
 // release bundles: both flags are statically false there.
 if (import.meta.env.DEV || import.meta.env.VITE_E2E) {
   void (async () => {
-    const [app, ui, prefs, race, pr, ipc, core, runTabs, scriptRuns, prompts, agentRace, diffStat, issuePrompt, seedPrompt, signalLog, reviewComments, deepLink, previewBrowser, pendingTasks, archivingTasks, pinnedFolders, cmLanguage, cmAutocomplete, codeIntel, lspStatus, navHistory, pageSession, profiles, agentUsage, usageUnknownDismissed, scratchCli, i18nMod, scheduleRunner, guide, ptyActivity, todos, forgeLists] =
+    const [app, ui, prefs, race, pr, ipc, core, runTabs, scriptRuns, prompts, agentRace, diffStat, issuePrompt, seedPrompt, signalLog, reviewComments, deepLink, previewBrowser, pendingTasks, archivingTasks, pinnedFolders, cmLanguage, cmAutocomplete, codeIntel, lspStatus, navHistory, pageSession, profiles, agentUsage, usageUnknownDismissed, scratchCli, i18nMod, scheduleRunner, guide, ptyActivity, todos, forgeLists, forgeRate, draftTracker, idleBuildDirs, remote, secrets] =
       await Promise.all([
         import("@/store/app"),
         import("@/store/ui"),
@@ -83,6 +83,11 @@ if (import.meta.env.DEV || import.meta.env.VITE_E2E) {
         import("@/lib/ptyOutputActivity"),
         import("@/store/todos"),
         import("@/store/forgeLists"),
+        import("@/store/forgeRate"),
+        import("@/lib/draftTracker"),
+        import("@/lib/idleBuildDirs"),
+        import("@/lib/remote"),
+        import("@/store/secrets"),
       ]);
     (window as unknown as Record<string, unknown>).__termic = {
       useApp: app.useApp,
@@ -110,6 +115,12 @@ if (import.meta.env.DEV || import.meta.env.VITE_E2E) {
       // never sits over what another spec is driving; guide.e2e.ts turns it on
       // through this handle.
       useGuide: guide.useGuide,
+      // Remote control (docs/remote.md): other machines and the open remote
+      // task, so a spec can read what the sidebar is drawing from.
+      useRemote: remote.useRemote,
+      // Secrets roles as this window holds them: a spec that clears roles on
+      // disk waits for the reload (on Settings close) to land here.
+      useSecrets: secrets.useSecrets,
       // Plan usage (GH #277). Exposed so a spec can seed a reading rather than
       // wait for a real agent to report one, which no fixture agent does.
       useAgentUsage: agentUsage.useAgentUsage,
@@ -124,6 +135,15 @@ if (import.meta.env.DEV || import.meta.env.VITE_E2E) {
       useTodos: todos.useTodos,
       useForgeLists: forgeLists.useForgeLists,
       clearForgeLists: forgeLists.clearForgeLists,
+      // The GitHub rate ledger's mirror. Exposed so a spec can seed a pause:
+      // no fixture repo talks to GitHub, so nothing real would ever pause.
+      useForgeRate: forgeRate.useForgeRate,
+      // How long an untouched draft holds automatic sends. Two minutes in the
+      // app, which no spec can wait out.
+      setDraftStaleMs: draftTracker.setDraftStaleMs,
+      // One idle build-folder cleanup pass. Its real schedule is off in this
+      // binary (a 6-hour timer has nothing to drive in a spec).
+      runIdleBuildDirCleanup: idleBuildDirs.runIdleBuildDirCleanup,
       // The webview half of `termic scratchpad`. Exposed so a spec can land a
       // write in the SAME tick as an editor remount, which a round trip over
       // the control socket can only hit by luck (lib/scratchLive).
@@ -146,6 +166,8 @@ if (import.meta.env.DEV || import.meta.env.VITE_E2E) {
       },
       ipc,
       invoke: core.invoke,
+      // Presence a spec states holds against the desktop's own focus events.
+      pinWindowFocus,
       runTabs,
       scriptRuns: scriptRuns.useScriptRuns,
       // Prompt library (localStorage-backed): exposed so the reorder-drag spec

@@ -312,10 +312,10 @@ describe("MCP endpoint: files, discovery, and the Phase A boundary", () => {
     const names = a.result.tools.map((t: any) => t.name);
     expect(names).toEqual([
       "task_list", "task_status", "task_new", "task_review", "task_send", "task_wait",
-      "task_result", "task_log", "task_diff", "task_open", "task_rename", "task_group",
+      "task_result", "task_log", "task_diff", "task_open", "task_rename", "task_pin", "task_group", "task_run",
       "scratchpad_new", "scratchpad_write", "scratchpad_read", "scratchpad_list",
       "scratchpad_remove", "scratchpad_clear",
-      "task_apply", "task_archive", "task_tab", "task_tab_close", "task_prop",
+      "task_apply", "task_archive", "task_stop", "task_tab", "task_tab_close", "task_prop", "task_view",
       "task_badge_set", "task_badge_remove", "task_badge_list",
       "present_new", "present_comment", "present_reply", "present_show", "present_list",
       "present_claim", "present_resolve", "present_unresolve", "present_update", "present_delete", "task_agents",

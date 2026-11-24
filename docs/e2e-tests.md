@@ -53,12 +53,25 @@ npm run test:e2e      # wdio run ./wdio.conf.ts (skip the rebuild while iteratin
 test time). Rebuild it after any Rust or frontend change. Screenshots land in
 `.e2e/artifacts/` (gitignored). Do NOT build the e2e binary with a bare
 `cargo build` — that bakes in the dev-server URL and the window comes up blank
-(`about:blank`); always go through `e2e:build` / `make e2e`.
+(`about:blank`); always go through `e2e:build` / `make e2e`. `cargo test`
+(and `cargo test --workspace`) also rewrites `target/debug/termic`, without
+the `e2e` feature: the next run then fails before any spec with "Embedded
+WebDriver server did not become ready", because that binary has no WebDriver
+plugin. Run `e2e:build` again after a `cargo test`.
 
 The e2e binary is built with `VITE_E2E=1`, which exposes `window.__termic`
 (stores + ipc + invoke) so specs can read real app state and drive real IPC.
 That flag is unset in normal `npm run build`, so real release bundles still
 tree-shake `__termic` out.
+
+Two knobs for chasing a failure:
+
+- `TERMIC_E2E_SPECS=git,editor` runs just those spec files. A CI job started
+  by hand (`gh workflow run test.yml --ref <branch>`) can then repeat the
+  specs it is chasing.
+- `TERMIC_E2E_WINDOW=WxH` sizes the window before each spec file, in PHYSICAL
+  pixels (`2048x1536` is a 1024x768 viewport on a Retina screen). Every run
+  logs `[e2e] viewport WxH on screen` so the size a failure saw is on record.
 
 Tests run **on a real Mac only** — they launch a GUI window.
 
@@ -149,7 +162,7 @@ so the spec asks for twice that on a 2x display.
 ## CI
 
 The suite runs on all three platforms for PRs and pushes to `main`: `e2e`
-(`macos-14`) and `e2e-linux` (WebKitGTK under Xvfb, `ubuntu-22.04`) in
+(`macos-26`; `macos-14` was retired in 2026-11) and `e2e-linux` (WebKitGTK under Xvfb, `ubuntu-22.04`) in
 `.github/workflows/test.yml`, and the Windows job (WebView2) in
 `.github/workflows/windows.yml`. Specs for a feature a platform does not have
 are excluded in `wdio.conf.ts` (Touch ID off macOS). None is a **required check yet**: they are there to
@@ -158,6 +171,49 @@ gitignored `.e2e/` fixture profile is recreated by `node scripts/e2e-seed.mjs`
 (templates in `scripts/e2e-seed/`); screenshots are skipped when `CI` is set
 (the `snap()` helper). Artifacts upload on failure. To promote it to required,
 add it to branch protection once it's proven stable over ~20-30 runs.
+
+### One app per spec file (macOS, Linux), and the freeze it fixed
+
+`@wdio/tauri-service`'s embedded driver starts the app ONCE, in its
+`onPrepare`, and reuses it for every spec file. It relaunches only an app
+that no longer answers, in `onWorkerStart`. Left alone, the whole suite runs
+in one process, and each file inherits every window, webview and in-memory
+state the files before it left. So `wdio.conf.ts`'s `onWorkerEnd` ends the
+app after every file: `termic quit` over the control socket (the same
+teardown as Cmd-Q), SIGKILL only if it is still there 10s later (the log
+says `the app did not quit`), then it deletes `.window-state-e2e.json` so
+the next app does not restore the last one's frame. The next file's
+`onWorkerStart` finds nothing answering and launches a fresh app.
+
+The quit is clean on purpose: a hard kill drops a localStorage write a spec's
+cleanup has just made, and the next file boots with another spec's pref. It
+is sent from `onWorkerEnd`, after the session is deleted, because quitting
+from the worker's `after` hook failed the file on the session delete.
+
+Not on Windows, which keeps one app for the run. There, after a clean quit
+the relaunched app's WebDriver did not come up within 60s (2 runs of 2),
+and `taskkill /F` lost the pref described above. Windows never froze.
+
+**The freeze.** On the `macos-26` runner the shared app froze for good in
+most full runs, almost always in `windowless.e2e.ts` near the end of the
+suite. Samples of the frozen app showed the main thread spending every
+display refresh in `RemoteScrollingCoordinatorProxyMac::displayDidRefresh`,
+waiting on WebKit's scrolling thread, which waits for a rendering update
+from WebContent, and two CVDisplayLink threads in an app that only ever
+needs one. The app sampled had been launched at the start of the job, 28
+minutes earlier, with six WebContent processes alive. Bisecting the suite
+found no single spec responsible: it needed enough of the suite before it,
+in whichever order. With one app per file, six full macOS runs had no
+freeze, where the shared app froze in almost every one.
+
+The kill and the `specFileRetries: 1` that used to recover from it are gone.
+`afterTest` still samples the app and WebKit (with
+`TERMIC_E2E_FAIL_CAPTURE`) and kills a frozen app on macOS CI, so the rest of
+the file fails in a second rather than 60s each. A frozen app now fails the
+run, which is the point: read the `FAIL-*-sample-*.txt` artifacts.
+
+`board.e2e.ts` and `windowless.e2e.ts` still sweep a task name their `before`
+creates, since a run killed mid-file leaves it live in the profile.
 
 ## Isolation
 
@@ -422,6 +478,35 @@ window still does not take focus.
 
 A window built by a NEW code path (a third `WebviewWindowBuilder`) has to call
 the helper too, or it is the one window that pops up.
+
+### CI screens are 1024x768, and the layout is a narrow one there
+
+The macOS and Windows runners have a 1024x768 screen, so the window opens at
+a 972px-wide viewport (logged as `[e2e] viewport`), where a desktop gets
+1500. Below 1100px the New Task picker stacks under the fields, and with the
+sidebar and right panel open the status bar is under 560px, where the cage
+chip drops its labels. Specs written on a big screen assumed the wide layout
+and failed every macOS and Windows run. Reproduce with
+`TERMIC_E2E_WINDOW=2048x1536`, and either assert the layout the width calls
+for or give the spec the room (hide the right panel, as `secrets-task` does).
+Text a narrow layout hides is gone from `innerText`; read `textContent` when
+the case is about which data landed, not about the layout.
+
+Three traps found the same day, each a flake that looked like a bug elsewhere:
+
+- **The first match in the DOM is not yours.** Every visited task stays
+  mounted, so `document.querySelector(".xterm-screen")` can return a hidden
+  task's terminal, 0x0 at the window's corner. A drag or a drop measured from
+  it lands outside the window. Scope to `[data-task-id="<id>"]` and pick a
+  visible one, as `clickFor` in `shortcuts-linux.e2e.ts` does.
+- **WebKit sends a synthetic mouse move at the real cursor** after a
+  re-render (a screenshot is enough). A drag held across a `snap()` received it
+  as part of the gesture, and the rule dropped back. App-side drags should
+  follow only the `pointerId` that started them (`RuleBlock.tsx`).
+- **An occluded window gets no scroll events.** Setting `scrollTop` moves the
+  pane but fires nothing, so a feature that listens for scroll never hears it.
+  Dispatch `new Event("scroll")` after setting it, as a reader's real scroll
+  would have sent one.
 
 ### The window may be occluded, and then nothing animates
 

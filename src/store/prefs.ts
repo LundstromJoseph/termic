@@ -2,6 +2,7 @@
 // Persisted to localStorage so they survive launches. Currently just the mono
 // font, but built for future things (themes, terminal opacity, etc.).
 
+import { LS_MUTED_NOTICES } from "@/lib/notices";
 import { SEATBELT_AVAILABLE } from "@/lib/platform";
 import { parseLauncherVisibility, type LauncherVisibility } from "@/lib/launcherUsage";
 import { create } from "zustand";
@@ -88,6 +89,8 @@ const LS_CONFIRM_ARCHIVE_TASK = "confirmBeforeArchiveTask";
 const LS_OFFER_TOUCH_ID_SUDO = "offerTouchIdForSudo";
 const LS_CONFIRM_ACCOUNT_RESTART = "confirmBeforeAccountRestart";
 const LS_ARCHIVE_DELETE_BRANCH = "archiveDeleteBranch";
+const LS_FREE_IDLE_BUILD_DIRS = "freeIdleBuildDirs";
+const LS_FREE_IDLE_BUILD_DIRS_DAYS = "freeIdleBuildDirsDays";
 const LS_WORKING_INDICATOR = "workingIndicator";
 const LS_PARTIAL_DONE_INDICATOR = "partialDoneIndicator";
 const LS_ATTENTION_INDICATOR = "attentionIndicator";
@@ -110,6 +113,7 @@ const LS_BOARD_ARCHIVE_LIMIT_MODE = scoped("boardArchiveLimitMode");
 const LS_BOARD_ARCHIVE_LIMIT = scoped("boardArchiveLimit");
 const LS_BOARD_PINNED_COLUMNS = scoped("boardPinnedColumns");
 const LS_SHOW_STATUS_SECTION = scoped("showStatusSection");
+const LS_SHOW_REMOTE = "showRemote";
 const LS_STATUS_SECTION_COLLAPSED = scoped("statusSectionCollapsed");
 const LS_SHOW_BOARD = scoped("showBoard");
 const LS_SHOW_TODOS = scoped("showTodos");
@@ -177,16 +181,16 @@ export const parseTerminalRenderer = (
 ): TerminalRendererKind =>
   v === "webgl" || v === "canvas" || v === "dom" ? v : fallback;
 
-export type BuiltinThemeMode = "auto" | "light" | "dark" | "claude" | "solarized" | "cobalt" | "matrix" | "rosepine";
+export type BuiltinThemeMode = "auto" | "light" | "dark" | "claude" | "solarized" | "cobalt" | "matrix" | "rosepine" | "monokai";
 /** The user's selection: a built-in mode, or a custom theme file id
  *  (`custom:<file-stem>`, see lib/customTheme.ts). */
 export type ThemeMode = BuiltinThemeMode | `custom:${string}`;
 /** What `applyTheme` resolves a BUILT-IN mode to: a concrete palette name.
  *  `auto` is never returned; it gets mapped to light/dark based on OS
  *  preference. Custom ids resolve to themselves (see resolveThemeFull). */
-export type ResolvedTheme = "light" | "dark" | "claude" | "solarized" | "cobalt" | "matrix" | "rosepine";
+export type ResolvedTheme = "light" | "dark" | "claude" | "solarized" | "cobalt" | "matrix" | "rosepine" | "monokai";
 
-const VALID_MODES: ReadonlyArray<BuiltinThemeMode> = ["auto", "light", "dark", "claude", "solarized", "cobalt", "matrix", "rosepine"];
+const VALID_MODES: ReadonlyArray<BuiltinThemeMode> = ["auto", "light", "dark", "claude", "solarized", "cobalt", "matrix", "rosepine", "monokai"];
 /** Defensive parse: localStorage may hold a theme id that's been
  *  removed in a later version. Fall back to "claude" (the default
  *  theme) instead of letting the unknown string flow through and
@@ -299,6 +303,21 @@ export const TERMINAL_THEMES: Record<ResolvedTheme, Record<string, string>> = {
     blue: "#9ccfd8",   magenta: "#c4a7e7", cyan: "#ebbcba",   white: "#e0def4",
     brightBlack: "#6e6a86", brightRed: "#eb6f92", brightGreen: "#31748f", brightYellow: "#f6c177",
     brightBlue: "#9ccfd8",  brightMagenta: "#c4a7e7", brightCyan: "#ebbcba", brightWhite: "#e0def4",
+  },
+  monokai: {
+    // Classic Monokai, ANSI mapped as Ghostty's "Monokai Classic" (blue is
+    // the orange, cyan the blue), so agent TUIs look the same in both.
+    // Brights equal normals except brightBlack. Orange cursor, matching the
+    // chrome accent.
+    background: "#272822",
+    foreground: "#f8f8f2",
+    cursor: "#fd971f",
+    cursorAccent: "#272822",
+    selectionBackground: "#49483e",
+    black: "#272822", red: "#f92672",     green: "#a6e22e", yellow: "#e6db74",
+    blue:  "#fd971f", magenta: "#ae81ff", cyan:  "#66d9ef", white:  "#fdfff1",
+    brightBlack: "#6e7066", brightRed: "#f92672", brightGreen: "#a6e22e", brightYellow: "#e6db74",
+    brightBlue:  "#fd971f", brightMagenta: "#ae81ff", brightCyan: "#66d9ef", brightWhite: "#fdfff1",
   },
 };
 
@@ -548,6 +567,8 @@ interface PrefsState {
   /** Send OS notifications when an inactive tab's agent settles (output
    *  stopped changing). OFF by default — too noisy for many users. */
   desktopNotifications: boolean;
+  /** In-app notices turned off (lib/notices.ts keys). */
+  mutedNotices: string[];
   /** Play a selectable notification sound when an inactive agent finishes
    *  a turn. OFF by default. */
   completionSound: boolean;
@@ -595,6 +616,11 @@ interface PrefsState {
    *  the answer. Never applies to main-checkout entries, which have no
    *  worktree branch to delete. */
   archiveDeleteBranch: boolean;
+  /** Free regenerable build folders (node_modules, cargo target, ...) in the
+   *  worktrees of open tasks idle for `freeIdleBuildDirsDays`. ON by
+   *  default. See src/lib/idleBuildDirs.ts. */
+  freeIdleBuildDirs: boolean;
+  freeIdleBuildDirsDays: number;
   /** Show a spinner on an agent's tab (and sidebar icon) WHILE it's
    *  working. ON by default (an explicit off in localStorage is kept). The
    *  "working" workState is always tracked internally to drive work-done
@@ -859,6 +885,10 @@ interface PrefsState {
    *  status section"). Off by default: it pays off with many parallel tasks
    *  and is clutter with two. */
   showStatusSection: boolean;
+  /** Settings > Appearance > Remote in the sidebar: the REMOTE section (or,
+   *  with nothing in it, the footer's globe). On by default; off for
+   *  someone who never uses servers, phones or paired computers. */
+  showRemote: boolean;
   /** Whether the sidebar's STATUS section is collapsed in place. */
   statusSectionCollapsed: boolean;
   /** The Kanban entry in the sidebar's primary nav, the only way into the
@@ -1072,6 +1102,7 @@ interface PrefsState {
    *  when the save fails, leaving the theme mode untouched. */
   pickImportedTheme:  (id: `custom:${string}`) => Promise<void>;
   setDesktopNotifications: (v: boolean) => void;
+  setNoticeMuted: (key: string, muted: boolean) => void;
   setCompletionSound: (v: boolean) => void;
   setCompletionSoundId: (id: CompletionSoundId) => void;
   setSettledHighlight: (v: boolean) => void;
@@ -1080,6 +1111,8 @@ interface PrefsState {
   setOfferTouchIdForSudo: (v: boolean) => void;
   setConfirmBeforeAccountRestart: (v: boolean) => void;
   setArchiveDeleteBranch: (v: boolean) => void;
+  setFreeIdleBuildDirs: (v: boolean) => void;
+  setFreeIdleBuildDirsDays: (days: number) => void;
   setWorkingIndicator: (v: boolean) => void;
   setPartialDoneIndicator: (v: boolean) => void;
   setAttentionIndicator: (v: boolean) => void;
@@ -1099,6 +1132,7 @@ interface PrefsState {
   setBoardArchiveLimit: (n: number) => void;
   setBoardPinnedColumns: (cols: readonly BoardStateColumn[]) => void;
   setShowStatusSection: (v: boolean) => void;
+  setShowRemote: (v: boolean) => void;
   setStatusSectionCollapsed: (v: boolean) => void;
   setShowBoard: (v: boolean) => void;
   setShowTodos: (v: boolean) => void;
@@ -1155,7 +1189,10 @@ export function parseScheduledNav(raw: string): ScheduledNavMode {
 export type { LauncherVisibility } from "@/lib/launcherUsage";
 export type NewTaskButtonMode = "empty" | "auto" | "always";
 export function parseNewTaskButton(raw: string): NewTaskButtonMode {
-  return raw === "empty" || raw === "always" ? raw : "auto";
+  // Default "always": the button under a project's tasks is the visible way
+  // to start one (the header's `+` is hover-only beside it). "empty" (only
+  // where a project has none yet) is the opt-out in Settings.
+  return raw === "auto" || raw === "empty" ? raw : "always";
 }
 /** Whether a project draws the "New task" button under its tasks. */
 export function newTaskButtonShown(mode: NewTaskButtonMode, taskCount: number, projectCount: number): boolean {
@@ -1340,6 +1377,10 @@ function readStoredPrefs() {
   const initialShowAllFonts = lsGetBool(LS_SHOW_ALL_FONTS, APPEARANCE_DEFAULTS.showAllInstalledFonts);
   const initialTheme        = parseThemeMode(lsGet(LS_THEME, "claude"));
   const initialDesktopNotif = lsGetBool(LS_DESKTOPNOTIF, false);
+  const initialMutedNotices = (() => {
+    try { const v = JSON.parse(lsGet(LS_MUTED_NOTICES, "[]")); return Array.isArray(v) ? v.filter((k): k is string => typeof k === "string") : []; }
+    catch { return []; }
+  })();
   const initialCompletionSound = readCompletionSoundEnabled();
   const initialCompletionSoundId = readCompletionSoundId();
   // WIP feature - the "agent has settled" heuristic produces false
@@ -1402,6 +1443,7 @@ function readStoredPrefs() {
   })();
   const initialBoardPinnedColumns = parseBoardPinnedColumns(lsGet(LS_BOARD_PINNED_COLUMNS, ""));
   const initialShowStatusSection = lsGet(LS_SHOW_STATUS_SECTION, "") === "1";
+  const initialShowRemote = lsGetBool(LS_SHOW_REMOTE, true);
   const initialStatusSectionCollapsed = lsGet(LS_STATUS_SECTION_COLLAPSED, "") === "1";
   const initialShowBoard = lsGet(LS_SHOW_BOARD, "") !== "0";
   const initialShowTodos = lsGet(LS_SHOW_TODOS, "") !== "0";
@@ -1460,6 +1502,7 @@ function readStoredPrefs() {
     language: parseLanguagePref(lsGet(LS_LANGUAGE, "system")),
     themeMode: initialTheme,
     desktopNotifications: initialDesktopNotif,
+    mutedNotices: initialMutedNotices,
     completionSound: initialCompletionSound,
     completionSoundId: initialCompletionSoundId,
     settledHighlight: initialSettledHighlight,
@@ -1468,6 +1511,8 @@ function readStoredPrefs() {
     offerTouchIdForSudo: initialOfferTouchIdForSudo,
     confirmBeforeAccountRestart: initialConfirmAccountRestart,
     archiveDeleteBranch: initialArchiveDeleteBranch,
+    freeIdleBuildDirs: lsGetBool(LS_FREE_IDLE_BUILD_DIRS, true),
+    freeIdleBuildDirsDays: Math.max(1, Math.min(365, Math.round(lsGetNum(LS_FREE_IDLE_BUILD_DIRS_DAYS, 14)))),
     workingIndicator: initialWorkingIndicator,
     partialDoneIndicator: initialPartialDoneIndicator,
     attentionIndicator: initialAttentionIndicator,
@@ -1511,6 +1556,7 @@ function readStoredPrefs() {
     boardArchiveLimit: initialBoardArchiveLimit,
     boardPinnedColumns: initialBoardPinnedColumns,
     showStatusSection: initialShowStatusSection,
+    showRemote: initialShowRemote,
     statusSectionCollapsed: initialStatusSectionCollapsed,
     showBoard: initialShowBoard,
     showTodos: initialShowTodos,
@@ -1738,7 +1784,13 @@ export const usePrefs = create<PrefsState>(set => ({
     s.setTerminalLetterSpacing(d.terminalLetterSpacing);
     s.setTerminalScrollback(d.terminalScrollback);
     s.setTerminalOptionAsMeta(d.terminalOptionAsMeta);
-    s.setTerminalGpuEnabled(d.terminalGpuEnabled);
+    // Forget the renderer choice: with nothing stored the next launch takes
+    // the default, so a later change of default reaches this profile too.
+    try {
+      localStorage.removeItem(LS_TERMINAL_RENDERER);
+      localStorage.removeItem(LS_TERMINAL_GPU);
+    } catch {}
+    usePrefs.setState({ terminalRenderer: "webgl", terminalGpuEnabled: true });
     s.setShareShellHistory(d.shareShellHistory);
     s.setEditorFontSize(d.editorFontSize);
     s.setUiScale(d.uiScale);
@@ -1820,6 +1872,13 @@ export const usePrefs = create<PrefsState>(set => ({
     try { localStorage.setItem(LS_DESKTOPNOTIF, v ? "1" : "0"); } catch {}
     set({ desktopNotifications: v });
   },
+  setNoticeMuted: (key, muted) => {
+    const cur = usePrefs.getState().mutedNotices;
+    if (cur.includes(key) === muted) return;
+    const next = muted ? [...cur, key] : cur.filter((k: string) => k !== key);
+    try { localStorage.setItem(LS_MUTED_NOTICES, JSON.stringify(next)); } catch {}
+    set({ mutedNotices: next });
+  },
   setCompletionSound: (v) => {
     try { localStorage.setItem(LS_COMPLETION_SOUND, v ? "1" : "0"); } catch {}
     set({ completionSound: v });
@@ -1854,6 +1913,15 @@ export const usePrefs = create<PrefsState>(set => ({
   setArchiveDeleteBranch: (v) => {
     try { localStorage.setItem(LS_ARCHIVE_DELETE_BRANCH, v ? "1" : "0"); } catch {}
     set({ archiveDeleteBranch: v });
+  },
+  setFreeIdleBuildDirs: (v) => {
+    try { localStorage.setItem(LS_FREE_IDLE_BUILD_DIRS, v ? "1" : "0"); } catch {}
+    set({ freeIdleBuildDirs: v });
+  },
+  setFreeIdleBuildDirsDays: (days) => {
+    const clamped = Math.max(1, Math.min(365, Math.round(days)));
+    try { localStorage.setItem(LS_FREE_IDLE_BUILD_DIRS_DAYS, String(clamped)); } catch {}
+    set({ freeIdleBuildDirsDays: clamped });
   },
   setWorkingIndicator: (v) => {
     try { localStorage.setItem(LS_WORKING_INDICATOR, v ? "1" : "0"); } catch {}
@@ -1938,6 +2006,11 @@ export const usePrefs = create<PrefsState>(set => ({
   // The status-section setters bail on an unchanged value (returning `s` is
   // a no-op notify): a fold click re-renders the section, and a repeated one
   // should not.
+  setShowRemote: (v) => set(s => {
+    if (s.showRemote === v) return s;
+    try { localStorage.setItem(LS_SHOW_REMOTE, v ? "1" : "0"); } catch {}
+    return { showRemote: v };
+  }),
   setShowStatusSection: (v) => set(s => {
     if (s.showStatusSection === v) return s;
     try { localStorage.setItem(LS_SHOW_STATUS_SECTION, v ? "1" : "0"); } catch {}
@@ -2234,6 +2307,7 @@ export function applyTheme(mode: ThemeMode) {
   html.classList.toggle("cobalt",    resolved === "cobalt");
   html.classList.toggle("matrix",    resolved === "matrix");
   html.classList.toggle("rosepine",  resolved === "rosepine");
+  html.classList.toggle("monokai",   resolved === "monokai");
   if (custom) {
     applyCustomVars(html, custom.ui);
     // Color-scheme tells the browser to use light/dark form controls +

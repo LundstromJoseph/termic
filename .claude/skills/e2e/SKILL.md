@@ -40,10 +40,15 @@ make e2e_visible                        # make e2e, with the window on screen
 TERMIC_E2E_VISIBLE=1 npm run test:e2e   # same, without the rebuild
 ```
 
+CI runs on a 1024x768 screen (a 972px viewport). Before calling a UI spec
+done, run it narrow too: `TERMIC_E2E_WINDOW=2048x1536 npm run test:e2e`
+(physical pixels, so 1024x768 on Retina). `TERMIC_E2E_SPECS=a,b` limits a run
+to those spec files. See "CI screens are 1024x768" in docs/e2e-tests.md.
+
 Rebuild (`npm run e2e:build`, or `make e2e`) **after any Rust or frontend
 change** — the frontend is embedded in the e2e binary. Screenshots land in
 `.e2e/artifacts/` (gitignored, local only — no-op in CI via `snap()`). Runs
-locally and in a non-required `macos-14` CI job (see docs/e2e-tests.md).
+locally and in a non-required `macos-26` CI job (see docs/e2e-tests.md).
 
 Never build the e2e binary with a bare `cargo build` — that produces a binary
 that points at the (unrunning) dev server and the window comes up blank. Always
@@ -224,9 +229,13 @@ teardown (see `git.e2e.ts` commit-push), or later specs lose their base. A
 genuinely remote-less repo falls back to local `main` via `resolve_base_ref`
 (lib.rs); the no-remote race + New Task cases in `task.e2e.ts` cover it.
 
-Each spec **file** gets its own app launch (one window per file, not per
-`it`); tests within a file share that window and run sequentially, so order
-them so earlier state doesn't break later ones, or reset between them.
+Each spec **file** gets its own app launch on macOS and Linux (one window
+per file, not per `it`): `wdio.conf.ts` quits the app after every file,
+because the WebDriver service would otherwise reuse one app for the whole
+run. Windows keeps one app for the run, so a file there still sees what the
+files before it left (see docs/e2e-tests.md). Tests within a file share that
+window and run sequentially, so order them so earlier state doesn't break
+later ones, or reset between them.
 
 **Leave the fixture the way you found it, including UNTRACKED files.** The
 seed self-heals tracked paths (`git checkout HEAD -- .`) and deliberately does

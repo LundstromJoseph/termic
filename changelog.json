@@ -1,6 +1,31 @@
 {
   "versions": [
     {
+      "version": "2.0.3",
+      "date": "2026-11-24",
+      "summary": "Remote control: your phone, your own servers, and your other computers."
+    },
+    {
+      "version": "1.25.7",
+      "date": "2026-11-23",
+      "summary": "Two new features: a phone app to remote-control Termic, and agents on your own servers."
+    },
+    {
+      "version": "1.24.6",
+      "date": "2026-11-20",
+      "summary": "Monokai theme, window titles that name your task, idle tasks free their build folders."
+    },
+    {
+      "version": "1.24.3",
+      "date": "2026-11-17",
+      "summary": "One Run button for every run command, agents start your dev server, pinned tasks."
+    },
+    {
+      "version": "1.23.0",
+      "date": "2026-11-13",
+      "summary": "Agents pair computers for you, faster PR badges, easy-to-send crash logs."
+    },
+    {
       "version": "1.22.1",
       "date": "2026-11-11",
       "summary": "Secrets for agents, a sectioned New Task dialog, and accounts that share your MCP servers."

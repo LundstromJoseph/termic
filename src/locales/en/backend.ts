@@ -57,9 +57,10 @@ export default {
     commentsNotifyOther: "{{count}} new comments on {{noun}} {{ref}}, queued for the agent",
     commentsNoAgentOne: "{{count}} new comment on {{provider}} {{ref}}. No running agent to hand them to.",
     commentsNoAgentOther: "{{count}} new comments on {{provider}} {{ref}}. No running agent to hand them to.",
-    mergedAutoToast: "{{label}} merged. Archiving \"{{name}}\"",
     mergedAutoNotify: "{{label}} merged, archiving",
-    mergedAskToast: "{{label}} merged. Archive \"{{name}}\"?",
+    mergedTitle: "{{label}} merged",
+    mergedAskBody: "Archive \"{{name}}\"?",
+    mergedAutoBody: "Archiving \"{{name}}\"",
     mergedAskNotify: "{{label}} merged. Archive \"{{name}}\"?",
     archiveAction: "Archive",
   },
@@ -136,6 +137,12 @@ export default {
     notRunning: "That agent is no longer running.",
     sentTo: "Sent \"{{title}}\" to {{label}}.",
     startFailed: "Couldn't start the agent to run \"{{title}}\".",
+  },
+
+  buildDirs: {
+    freedToast_one: "Freed {{size}} from {{count}} idle task",
+    freedToast_other: "Freed {{size}} from {{count}} idle tasks",
+    restoreToast: "Build folders in {{name}} were freed on {{date}}. Reinstall dependencies if something is missing.",
   },
 
   runTabs: {

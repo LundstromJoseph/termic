@@ -2,7 +2,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { appendFileSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
-import { createServer } from "node:net";
+import { homedir } from "node:os";
+import { createConnection, createServer } from "node:net";
 
 // End-to-end config for the termic app. WebdriverIO drives the REAL macOS
 // WKWebView window via @wdio/tauri-service's embedded WebDriver provider
@@ -37,11 +38,62 @@ export const dataDir = path.join(repoRoot, ".e2e", "profile");
 const timingLog = path.join(repoRoot, ".e2e", "timings.txt");
 const artifactsDir = path.join(repoRoot, ".e2e", "artifacts");
 
+/** The macOS runner's WebKit freeze: see "The macOS CI freeze" in
+ *  docs/e2e-tests.md. A spec file that hit it is rerun once in a fresh app. */
+const macCi = process.platform === "darwin" && !!process.env.CI;
+
+/** Whether the page still answers a trivial script within `ms`. */
+async function pageAnswers(ms: number): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<false>(resolve => { timer = setTimeout(() => resolve(false), ms); });
+  try {
+    return await Promise.race([browser.execute(() => true).then(() => true, () => false), timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** Every pid matching `pattern` (pgrep -f), or none. */
+function pids(pattern: string): string[] {
+  try { return execFileSync("pgrep", ["-f", pattern], { encoding: "utf8" }).trim().split("\n").filter(Boolean); } catch { return []; }
+}
+
+/** The e2e build's own window-state file (`window_state_filename` in lib.rs),
+ *  under the app config dir tauri's window-state plugin writes to. */
+const windowStateFile = path.join(
+  process.platform === "darwin"
+    ? path.join(homedir(), "Library", "Application Support")
+    : process.env.XDG_CONFIG_HOME || path.join(homedir(), ".config"),
+  "com.simion.termic",
+  ".window-state-e2e.json",
+);
+
+/** Ask the app to quit over its control socket (`termic quit`). Resolves
+ *  once the request is answered or refused; never throws. */
+function quitApp(): Promise<void> {
+  return new Promise(resolve => {
+    try {
+      const token = readFileSync(path.join(dataDir, "cli-token"), "utf8").trim();
+      const c = createConnection(path.join(dataDir, "termic.sock"));
+      const done = () => { clearTimeout(t); c.destroy(); resolve(); };
+      const t = setTimeout(done, 5_000);
+      c.on("connect", () => c.write(JSON.stringify({ id: "e2e-quit", token, cmd: "quit", commit: true }) + "\n"));
+      c.on("data", done);
+      c.on("error", done);
+      c.on("close", done);
+    } catch { resolve(); }
+  });
+}
+
 export const config: WebdriverIO.Config = {
   runner: "local",
   tsConfigPath: path.join(repoRoot, "e2e", "tsconfig.json"),
 
-  specs: [path.join(repoRoot, "e2e", "specs", "**", "*.e2e.ts")],
+  // TERMIC_E2E_SPECS=git,editor runs just those files: a CI job started by
+  // hand on a branch can then repeat the specs it is chasing, not all 49.
+  specs: process.env.TERMIC_E2E_SPECS
+    ? process.env.TERMIC_E2E_SPECS.split(",").map(n => path.join(repoRoot, "e2e", "specs", `${n.trim()}.e2e.ts`))
+    : [path.join(repoRoot, "e2e", "specs", "**", "*.e2e.ts")],
   // Specs for features a platform does not have: Touch ID for sudo is
   // macOS only.
   exclude: [
@@ -86,8 +138,42 @@ export const config: WebdriverIO.Config = {
   waitforTimeout: 15_000,
   waitforInterval: 100,
 
+  // A fresh app for every spec file, on macOS and Linux. The embedded driver
+  // starts the app ONCE in onPrepare and reuses it for every file; it
+  // relaunches only one that no longer answers (onWorkerStart). So without
+  // this the whole suite ran in one process for 30 minutes, every file
+  // inheriting the windows, webviews and state of the ones before it, and on
+  // the macOS runner that long-lived app is what WebKit's display-refresh
+  // freeze needed (docs/e2e-tests.md).
+  //
+  // `termic quit` first, the same teardown as Cmd-Q, and SIGKILL only for an
+  // app that will not go: a hard kill can drop the localStorage write a
+  // spec's cleanup just made. From here, not the worker's `after` hook: the
+  // session is already deleted, so the exit cannot fail the file.
+  //
+  // Not on Windows, which keeps one app for the run (it never froze there).
+  // After a clean quit the relaunched app's WebDriver did not come up within
+  // 60s (2 runs of 2), and taskkill /F instead lost a pref a spec's cleanup
+  // had just written, so the next file booted with it.
+  async onWorkerEnd() {
+    if (process.platform === "win32") return;
+    await quitApp();
+    for (let i = 0; i < 100 && pids(appBinary).length; i++) await new Promise(r => setTimeout(r, 100));
+    if (pids(appBinary).length) console.log("[e2e] the app did not quit within 10s, killing it");
+    for (const pid of pids(appBinary)) {
+      try { process.kill(Number(pid), "SIGKILL"); } catch { /* gone */ }
+    }
+    // Gone before the next file's health check, or it finds the dying one.
+    for (let i = 0; i < 100 && pids(appBinary).length; i++) await new Promise(r => setTimeout(r, 100));
+    // The clean quit saved the window's frame, and the next app would restore
+    // it: a file that left the window 200000px wide handed that to the next.
+    rmSync(windowStateFile, { force: true });
+  },
   async onPrepare() {
     mkdirSync(artifactsDir, { recursive: true });
+    // The first file's app, too, starts from the default frame: a frame an
+    // earlier run left (200000px wide in the one seen) failed that file.
+    rmSync(windowStateFile, { force: true });
     // a run launched from an agent tab inherits that tab's TERMIC_* (task,
     // tab, pty, sandbox mode). They describe the outer app, not the one under
     // test, and the app and every termic-cli a spec runs would act on them.
@@ -95,6 +181,20 @@ export const config: WebdriverIO.Config = {
     // knobs and stay.
     for (const k of Object.keys(process.env)) {
       if (k.startsWith("TERMIC_") && !k.startsWith("TERMIC_E2E_")) delete process.env[k];
+    }
+    // The termic-server builds the app installs from (TERMIC_SERVER_BIN_DIR,
+    // which the loop above just dropped): remote.e2e.ts's real-box cases name
+    // theirs; otherwise .e2e/server-bin, empty unless the upgrade case stages
+    // one, so no run installs whatever a local release build left behind.
+    process.env.TERMIC_SERVER_BIN_DIR = process.env.TERMIC_E2E_SERVER_BIN_DIR ?? path.join(repoRoot, ".e2e", "server-bin");
+    // remote.e2e.ts's local-server cases: a stand-in for ssh that serves the
+    // host termic-e2e-local from a real termic-server built into the debug
+    // target (and passes any other host to the real ssh). Not on Windows,
+    // where termic-server does not run.
+    if (process.platform !== "win32") {
+      process.env.TERMIC_SSH_BIN = path.join(repoRoot, "e2e", "fixtures", "fake-ssh.sh");
+      process.env.TERMIC_E2E_LOCAL_BOX ??= path.join(repoRoot, ".e2e", "local-box");
+      process.env.TERMIC_E2E_SERVER_DIR ??= path.join(repoRoot, "src-tauri", "target", "debug");
     }
     // the embedded WebDriver defaults to 4445 for every run, so two agents
     // running e2e at once drive each other's app. A free port per run; the
@@ -192,24 +292,135 @@ export const config: WebdriverIO.Config = {
    *  which case costs the minutes is how you end up optimising a 300ms
    *  sleep in a seven minute file. Off by default: it writes a file and
    *  nobody needs it on a normal run. */
+  // TERMIC_E2E_WINDOW=WxH sizes the window before a spec file runs, so a
+  // run on a big desktop can reproduce a CI runner's small screen.
+  async before() {
+    const want = process.env.TERMIC_E2E_WINDOW?.match(/^(\d+)x(\d+)$/);
+    if (want) await browser.setWindowSize(Number(want[1]), Number(want[2]));
+    const vp = await browser.execute(() => `${window.innerWidth}x${window.innerHeight} on ${screen.width}x${screen.height}`);
+    console.log(`[e2e] viewport ${vp}`);
+  },
+  // Windows only: a page whose window is not the foreground one gets no
+  // focus/blur events from el.focus()/el.blur(), so every blur-commit case
+  // fails. Seen once late in a CI run (four specs, cases passing between);
+  // what took the foreground is not established, so say when it happens,
+  // and take it back so the cases after it test the app, not the desktop.
+  async beforeTest(test) {
+    if (process.platform !== "win32") return;
+    const focused = await browser.execute(() => document.hasFocus()).catch(() => null);
+    if (focused !== false) return;
+    // Take the foreground back rather than let every focus-dependent case
+    // after it fail: whatever stole it is not ours, and a case that needs
+    // focus is testing the app, not the runner's desktop.
+    const thief = foregroundWindow();
+    const how = bringAppToFront();
+    if (how.includes("left alone")) { console.log(`[e2e] page lost focus before "${test.title}" to ${thief}; ${how}`); return; }
+    const back = await browser.waitUntil(() => browser.execute(() => document.hasFocus()), { timeout: 3_000, interval: 100 })
+      .then(() => true, () => false);
+    console.log(`[e2e] page lost focus before "${test.title}" to ${thief}; ${how}; focus ${back ? "restored" : "NOT restored"}`);
+  },
   async afterTest(test, _context, result) {
     // Opt-in failure capture (`TERMIC_E2E_FAIL_CAPTURE=1`, set by the Windows
     // workflow): a screenshot and the visible text of the window at the
     // moment a case failed, into the artifacts dir CI uploads. On a runner
     // nobody can look at, it is the only record of what the screen showed.
-    if (process.env.TERMIC_E2E_FAIL_CAPTURE && !(result as { passed?: boolean }).passed) {
+    const failed = !(result as { passed?: boolean }).passed;
+    // A failure that left the page unable to answer at all is the freeze.
+    const frozen = failed && !(await pageAnswers(5_000));
+    if (process.env.TERMIC_E2E_FAIL_CAPTURE && failed) {
       const slug = `${test.parent} ${test.title}`.replace(/[^A-Za-z0-9]+/g, "-").slice(0, 120);
       try { await browser.saveScreenshot(path.join(artifactsDir, `FAIL-${slug}.png`)); } catch { /* no display */ }
-      try {
-        const text = await browser.execute(() => document.body?.innerText?.slice(0, 20_000) ?? "");
-        writeFileSync(path.join(artifactsDir, `FAIL-${slug}.txt`), String(text));
-      } catch { /* app gone */ }
+      // The whole screen on macOS too: a system prompt (Keychain, a privacy
+      // ask) sits outside the webview, and it is what can stop every app
+      // after it from answering the driver.
+      if (process.platform === "darwin") {
+        try { execFileSync("screencapture", ["-x", path.join(artifactsDir, `FAIL-${slug}-screen.png`)], { timeout: 10_000 }); } catch { /* no permission */ }
+      }
+      if (process.platform === "win32") {
+        const focused = await browser.execute(() => document.hasFocus()).catch(() => null);
+        writeFileSync(path.join(artifactsDir, `FAIL-${slug}-focus.txt`), `hasFocus=${focused}\nforeground=${foregroundWindow()}\n`);
+      }
+      if (!frozen) {
+        try {
+          const text = await browser.execute(() => document.body?.innerText?.slice(0, 20_000) ?? "");
+          writeFileSync(path.join(artifactsDir, `FAIL-${slug}.txt`), String(text));
+        } catch { /* app gone */ }
+      } else if (process.platform === "darwin") {
+        // Frozen: every thread of the app and of WebKit's WebContent and GPU
+        // processes, since the thread that would log why is the stuck one.
+        for (const [tag, pattern] of [["app", appBinary], ["webkit", "com.apple.WebKit.(WebContent|GPU)"]]) {
+          for (const pid of pids(pattern)) {
+            try { execFileSync("sample", [pid, "2", "-file", path.join(artifactsDir, `FAIL-${slug}-sample-${tag}-${pid}.txt`)], { timeout: 30_000, stdio: "ignore" }); } catch { /* gone */ }
+          }
+        }
+      }
+    }
+    // A frozen app on the macOS runner never comes back, and each case left
+    // would wait out its full 60s on it. Killing it fails them in a second.
+    // Not retried: the freeze it was built for needed one app living through
+    // the whole suite, which onWorkerEnd now prevents, so a freeze here is
+    // news (docs/e2e-tests.md).
+    if (macCi && frozen) {
+      console.log(`[e2e] app frozen after "${test.title}", killing it`);
+      for (const pid of pids(appBinary)) {
+        try { process.kill(Number(pid), "SIGKILL"); } catch { /* gone */ }
+      }
     }
     if (!process.env.TERMIC_E2E_TIMING) return;
     const ms = (result as { duration?: number }).duration ?? 0;
     appendFileSync(timingLog, `${String(ms).padStart(7)}  ${test.parent} > ${test.title}\n`);
   },
 };
+
+/** Title and process of the Windows foreground window, for a lost-focus report. */
+function foregroundWindow(): string {
+  const ps = `Add-Type @'
+using System; using System.Runtime.InteropServices; using System.Text;
+public class Fg {
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint p);
+}
+'@
+$h = [Fg]::GetForegroundWindow(); $s = New-Object Text.StringBuilder 512
+[void][Fg]::GetWindowText($h, $s, 512); $p = 0; [void][Fg]::GetWindowThreadProcessId($h, [ref]$p)
+"$s | pid $p $((Get-Process -Id $p -ErrorAction SilentlyContinue).ProcessName)"`;
+  try {
+    return execFileSync("powershell", ["-NoProfile", "-NonInteractive", "-Command", ps], { timeout: 15_000, encoding: "utf8" }).trim();
+  } catch (e) { return `unknown (${String(e).slice(0, 200)})`; }
+}
+
+/** Put the app's window back in the foreground (Windows). The Alt tap is
+ *  what makes it work from a background process: Windows refuses
+ *  SetForegroundWindow to a process that did not receive the last input
+ *  event, and a synthetic key press counts as one. */
+function bringAppToFront(): string {
+  const exe = path.resolve(appBinary).replace(/'/g, "''");
+  const ps = `Add-Type @'
+using System; using System.Runtime.InteropServices;
+public class Fr {
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int c);
+  [DllImport("user32.dll")] public static extern void keybd_event(byte k, byte s, uint f, UIntPtr e);
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint p);
+}
+'@
+$exe = '${exe}'
+$p = Get-Process | Where-Object { $_.MainWindowHandle -ne 0 -and ($_.Path -eq $exe -or $_.Path -eq "$exe.exe") } | Select-Object -First 1
+if (-not $p) { "no app window"; exit }
+# Focus that went to one of the app's OWN windows (the Activity window a
+# spec opened) is the spec's business: leave it, and never tap Alt into it.
+$fp = 0; [void][Fr]::GetWindowThreadProcessId([Fr]::GetForegroundWindow(), [ref]$fp)
+$fg = Get-Process -Id $fp -ErrorAction SilentlyContinue
+if ($fg -and ($fg.Path -eq $exe -or $fg.Path -eq "$exe.exe")) { "foreground is the app's own window, left alone"; exit }
+[Fr]::keybd_event(0x12, 0, 0, [UIntPtr]::Zero); [Fr]::keybd_event(0x12, 0, 2, [UIntPtr]::Zero)
+[void][Fr]::ShowWindow($p.MainWindowHandle, 9)
+"SetForegroundWindow=$([Fr]::SetForegroundWindow($p.MainWindowHandle))"`;
+  try {
+    return execFileSync("powershell", ["-NoProfile", "-NonInteractive", "-Command", ps], { timeout: 15_000, encoding: "utf8" }).trim();
+  } catch (e) { return `bringAppToFront failed (${String(e).slice(0, 200)})`; }
+}
 
 /** Pay the cold-start cost of `cmd.exe` + `node` before anything is timed.
  *

@@ -3,7 +3,7 @@
 export default {
   caffeinate: {
     title: "Caffeinate",
-    displayOn: "Keep display on", displayHintOff: "Off: the screen can still turn off and lock, but your computer stays awake and agents keep working.", displayHintOn: "The screen stays on too while caffeinate is active.",
+    restoreOnLaunch: "Turn back on when Termic restarts", restoreOnLaunchHint: "After a quit or an update, the last setting comes back. A timed one only if its end has not passed.", displayOn: "Keep display on", displayHintOff: "Off: the screen can still turn off and lock, but your computer stays awake and agents keep working.", displayHintOn: "The screen stays on too while caffeinate is active.",
     statusDisplayOn: "The display stays on.", statusDisplayOff: "The display can turn off. Your computer stays awake.",
     untilOff: "Until you turn it off", keepIndefinitely: "Keep awake until turned off", indefinite: "Until turned off",
     loading: "Connecting…", off: "Caffeinate is off", armed: "Your computer can sleep until an agent starts working.",
@@ -126,6 +126,7 @@ export default {
   // zh-CN locale intentionally keeps these in English.
   bugIssueTitle: "Bug: ",
   bugIssueBody: "What happened:\n\n\nSteps to reproduce:\n\n\nTermic version: ",
+  bugIssueCrashLog: "Crash log: Termic has selected panic.log in your file manager. Drag it into this issue.",
   contact: "Contact",
   contactSubject: "Hello from Termic",
   shortcuts: "Keyboard shortcuts",
@@ -141,6 +142,9 @@ export default {
   taskMenu: "Task menu",
   spotlightTip: "Spotlight: changes are synced with {{branch}}",
   menuNew: "New",
+  pinTask: "Pin",
+  unpinTask: "Unpin",
+  pinnedMark: "Pinned: stays listed whatever the filters say",
   stopSpotlight: "Stop spotlight",
   startSpotlight: "Start spotlight",
   sandboxSettings: "Sandbox settings",

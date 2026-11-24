@@ -209,6 +209,10 @@ export interface Project {
    *  list. No effect on paths, git, or workspaces. Missing/empty =
    *  ungrouped. */
   group?: string;
+  /** The server (servers.json id) it lives on, over SSH through
+   *  termic-server; `root_path` is then a path on that box. Absent for a
+   *  project on this machine (docs/remote.md, Servers). */
+  server?: string;
   /** Personal (local, projects.json) extra run commands surfaced in the
    *  RunControls dropdown and launched as terminal tabs (GH #124). Separate
    *  from the single primary `run_script` (the Run button). The committed,
@@ -335,6 +339,10 @@ export interface Task {
    *  sort AFTER any ordered sibling — so untouched projects stay in creation
    *  order and a newly created task appends at the bottom. */
   order?: number;
+  /** Pinned in the sidebar (GH #458): the sidebar query and the project's
+   *  filter never hide it, and its project and group stay listed with it.
+   *  Absent (not false) on a task nobody pinned. Written by `taskSetPinned`. */
+  pinned?: boolean;
   /** Sidebar task group (see `TaskGroup`). Absent on ungrouped tasks. */
   group?: TaskGroup;
   /** Id of the task whose agent created this one through the CLI or MCP.
@@ -476,6 +484,11 @@ export interface Task {
   pr_watch?: boolean;
   /** Newest comment timestamp (RFC3339 UTC) the watcher already handled. */
   pr_comments_seen_at?: string | null;
+  /** RFC3339, when the task was last made active (stamped at most hourly). */
+  last_active_at?: string | null;
+  /** RFC3339, when the idle cleanup freed its build folders. Cleared on the
+   *  next open, which re-runs setup or says so. */
+  artifacts_freed_at?: string | null;
 }
 
 /** One durable agent tab persisted on a task. Mirror of
@@ -994,7 +1007,7 @@ export interface Settings {
   mcp_bind_address?: string;
   /** Port the MCP listener binds; 0 means chosen automatically. */
   mcp_port?: number;
-  /** "Share on this network" (Settings > Agent access): advertise this
+  /** "Share on this network" (Settings > Remote control): advertise this
    *  Termic over mDNS and run the peer listener so another Termic on the
    *  LAN can pair with it. Default off. See docs/peers.md. */
   lan_sharing_enabled?: boolean;
@@ -1534,6 +1547,48 @@ export interface ForgeCliStatus {
   hosts: string[];
 }
 
+/** One task's answer from `task_pr_status_batch`: its id beside the lookup. */
+export type TaskPrLookup = PrLookup & { id: string };
+
+/** GitHub rate ledger for one host. Mirrors `RateStatus` in forge_rate.rs. */
+export interface ForgeRateWindow {
+  limit: number;
+  remaining: number;
+  used: number;
+  /** Epoch seconds. */
+  reset_at: number;
+}
+export interface ForgeFeatureSpend {
+  /** "pr_status" | "lists" | "comments" */
+  feature: string;
+  cost: number;
+  /** The part of `cost` that is a guess (legacy CLI calls report none). */
+  estimated: number;
+}
+export interface ForgeBucketStatus {
+  bucket: "graphql" | "core";
+  /** GitHub's window as last reported (account-wide, includes agents and
+   *  the user's terminal). null when unknown or already reset. */
+  window: ForgeRateWindow | null;
+  /** Termic's own spend in the last hour. */
+  spent: number;
+  estimated: number;
+  /** Termic's own hourly cap for background work. */
+  cap: number;
+  by_feature: ForgeFeatureSpend[];
+}
+export interface ForgeRatePause {
+  /** Epoch seconds. */
+  until: number;
+  kind: "limited" | "floor" | "budget";
+}
+export interface ForgeRateStatus {
+  host: string;
+  buckets: ForgeBucketStatus[];
+  /** Background polling on this host is paused. */
+  paused: ForgeRatePause | null;
+}
+
 /** Normalized PR/MR snapshot. Mirrors `PrStatus` in forge.rs. */
 export interface PrStatus {
   provider: ForgeProvider;
@@ -1592,9 +1647,11 @@ export type IssueScope = "all" | "assigned" | "mentions";
 export interface IssueLookup {
   provider: ForgeProvider | null;
   remote_url: string;
-  status: "ok" | "no-remote" | "unsupported-remote" | "cli-missing" | "cli-unauthed" | "error";
+  status: "ok" | "no-remote" | "unsupported-remote" | "cli-missing" | "cli-unauthed" | "rate-limited" | "error";
   message: string;
   issues: ForgeIssue[];
+  /** "rate-limited" only: epoch seconds termic asks this host again. */
+  retry_at?: number | null;
 }
 
 /** One pull request offered by the New Task picker. Mirrors `ForgePr` in
@@ -1630,9 +1687,11 @@ export type PrScope = "mine" | "review" | "open";
 export interface PrPickList {
   provider: "github" | "gitlab" | "azure" | null;
   remote_url: string;
-  status: "ok" | "not-found" | "no-remote" | "unsupported-remote" | "cli-missing" | "cli-unauthed" | "error";
+  status: "ok" | "not-found" | "no-remote" | "unsupported-remote" | "cli-missing" | "cli-unauthed" | "rate-limited" | "error";
   message: string;
   prs: ForgePr[];
+  /** "rate-limited" only: epoch seconds termic asks this host again. */
+  retry_at?: number | null;
 }
 
 /** One PR poll round-trip: provider resolution + snapshot, or the exact
@@ -1641,9 +1700,11 @@ export interface PrPickList {
 export interface PrLookup {
   provider: ForgeProvider | null;
   remote_url: string;
-  status: "ok" | "no-remote" | "unsupported-remote" | "cli-missing" | "cli-unauthed" | "error";
+  status: "ok" | "no-remote" | "unsupported-remote" | "cli-missing" | "cli-unauthed" | "rate-limited" | "error";
   message: string;
   pr: PrStatus | null;
+  /** "rate-limited" only: epoch seconds termic asks this host again. */
+  retry_at?: number | null;
 }
 
 /** A multi-repo task member's PR poll: the `PrLookup` payload plus which

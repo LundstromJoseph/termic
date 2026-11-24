@@ -3,7 +3,7 @@
 export default {
   caffeinate: {
     title: "保持唤醒",
-    displayOn: "保持屏幕常亮", displayHintOff: "关闭时：屏幕仍可关闭和锁定，但电脑保持唤醒，智能体会继续工作。", displayHintOn: "保持唤醒期间屏幕也会保持开启。",
+    restoreOnLaunch: "Termic 重启后恢复", restoreOnLaunchHint: "退出或更新后，恢复上次的设置。定时设置仅在尚未到期时恢复。", displayOn: "保持屏幕常亮", displayHintOff: "关闭时：屏幕仍可关闭和锁定，但电脑保持唤醒，智能体会继续工作。", displayHintOn: "保持唤醒期间屏幕也会保持开启。",
     statusDisplayOn: "屏幕保持开启。", statusDisplayOff: "屏幕可以关闭，电脑保持唤醒。",
     untilOff: "直到你手动关闭", keepIndefinitely: "保持唤醒，直到手动关闭", indefinite: "直到手动关闭",
     loading: "正在连接…", off: "保持唤醒已关闭", armed: "智能体开始工作前，电脑可正常休眠。",
@@ -126,6 +126,7 @@ export default {
   // 因此 zh-CN 有意保留英文原文。
   bugIssueTitle: "Bug: ",
   bugIssueBody: "What happened:\n\n\nSteps to reproduce:\n\n\nTermic version: ",
+  bugIssueCrashLog: "Crash log: Termic has selected panic.log in your file manager. Drag it into this issue.",
   contact: "联系我们",
   contactSubject: "Hello from Termic",
   shortcuts: "键盘快捷键",
@@ -141,6 +142,9 @@ export default {
   taskMenu: "任务菜单",
   spotlightTip: "Spotlight：更改会与 {{branch}} 同步",
   menuNew: "新建",
+  pinTask: "固定",
+  unpinTask: "取消固定",
+  pinnedMark: "已固定：无论筛选条件如何都会保留显示",
   stopSpotlight: "停止 Spotlight",
   startSpotlight: "开始 Spotlight",
   sandboxSettings: "沙箱设置",

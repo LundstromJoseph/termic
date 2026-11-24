@@ -1,6 +1,6 @@
 import { execSync } from "node:child_process";
 import path from "node:path";
-import { archiveTask, clickWhenVisible, ensureActiveTask, openTask, requireTermicApi, snap, waitForAppShell, waitGone, waitVisible } from "../helpers";
+import { archiveTask, clickWhenVisible, cliRpc, ensureActiveTask, openTask, requireTermicApi, snap, waitForAppShell, waitGone, waitVisible } from "../helpers";
 
 // P0: the Run feature (#54/#124) launches commands in dedicated run tabs.
 // Guards a custom run: it opens a run tab whose PTY actually executes the
@@ -398,6 +398,82 @@ describe("sidebar run stop", () => {
   });
 });
 
+// With more than one thing to run, the top bar's Run is a single button that
+// opens the menu; with one, it runs at once next to a separate chevron.
+describe("run button", () => {
+  let taskId!: string;
+  const setProject = (patch: Record<string, unknown>) =>
+    browser.execute(async (p) => {
+      const t = window.__termic!;
+      const proj = t.useApp.getState().projects.find((x: any) => x.name === "fixture-repo");
+      await t.ipc.projectUpdate({ ...proj, ...p });
+      await t.useApp.getState().loadAll();
+    }, patch);
+  // The button the user sees: every visited task stays mounted, so scope to
+  // a rendered one.
+  const button = () =>
+    browser.execute(() => {
+      const shown = (sel: string) =>
+        [...document.querySelectorAll<HTMLElement>(sel)].find(e => e.getBoundingClientRect().width > 0) ?? null;
+      const run = shown('[data-testid="run-button"]');
+      return {
+        run: !!run,
+        menu: run?.getAttribute("aria-haspopup") ?? null,
+        chevron: !!shown('[data-testid="run-menu"]'),
+      };
+    });
+  after(async () => {
+    await browser.keys("Escape");
+    await setProject({ run_script: "", run_scripts: [] });
+    if (taskId) await archiveTask(taskId);
+  });
+
+  it("runs directly when there is only the run script", async () => {
+    await waitForAppShell();
+    await requireTermicApi();
+    await setProject({ run_script: "echo main-run", run_scripts: [] });
+    taskId = await openTask("e2e-run-button");
+    await ensureActiveTask(taskId);
+    await browser.waitUntil(async () => {
+      const b = await button();
+      return b.run && b.menu === null && b.chevron;
+    }, { timeout: 8_000, timeoutMsg: "expected a plain Run button beside a chevron" });
+  });
+
+  it("opens a menu of every run when there is more than one", async () => {
+    await setProject({ run_script: "echo main-run", run_scripts: [{ label: "e2e-extra", command: "echo extra" }] });
+    await browser.waitUntil(async () => {
+      const b = await button();
+      return b.run && b.menu === "menu" && !b.chevron;
+    }, { timeout: 8_000, timeoutMsg: "Run never became the menu trigger" });
+
+    // Radix opens on pointerdown, which a WebDriver click never emits in
+    // WebKit (see git.e2e.ts history scope), so dispatch the pair.
+    await browser.execute(() => {
+      const el = [...document.querySelectorAll<HTMLElement>('[data-testid="run-button"]')]
+        .find(e => e.getBoundingClientRect().width > 0)!;
+      const opts = { bubbles: true, cancelable: true, pointerType: "mouse", button: 0, isPrimary: true, pointerId: 1 } as any;
+      el.dispatchEvent(new PointerEvent("pointerdown", opts));
+      el.dispatchEvent(new PointerEvent("pointerup", opts));
+    });
+    await waitVisible('[data-testid="run-primary"]');
+    const items = await browser.execute(() =>
+      [...document.querySelectorAll('[role="menuitem"]')].map(e => e.textContent?.trim()));
+    expect(items).toContain("e2e-extra");
+    await snap("run-button-menu.png");
+
+    // The menu's Run launches the primary run, as the button used to.
+    await clickWhenVisible('[data-testid="run-primary"]');
+    await browser.waitUntil(
+      () => browser.execute((id) =>
+        (window.__termic!.useApp.getState().tabs[id] ?? []).some(
+          (t: any) => t.runTab?.member === "" && (t.runTab?.kind ?? "run") === "run"),
+        taskId),
+      { timeout: 15_000, timeoutMsg: "the menu's Run never opened the run tab" },
+    );
+  });
+});
+
 // P1: the Run commands manager (GH #124). Guards that it opens for a project
 // and closes. (Persisting a command edits projects.json; opening + rendering is
 // the robust check that the dialog is wired.)
@@ -432,5 +508,81 @@ describe("run config", () => {
       { timeout: 8_000, timeoutMsg: "run commands manager never opened" },
     );
     await snap("run-config.png");
+  });
+});
+
+// `termic run` / MCP `task_run`: an agent starts the task's dev server in the
+// SAME Run tab the Run button drives, so the user sees it and can stop it.
+// Over the real control socket: auth, task resolution, the webview RPC, the
+// launch path, and the PTY the tab spawns (read back through `logs --tab`).
+describe("termic run", () => {
+  let taskId!: string;
+  const setRunScript = (run_script: string) =>
+    browser.execute(async (s) => {
+      const t = window.__termic!;
+      const proj = t.useApp.getState().projects.find((x: any) => x.name === "fixture-repo");
+      await t.ipc.projectUpdate({ ...proj, run_script: s, run_scripts: [] });
+      await t.useApp.getState().loadAll();
+    }, run_script);
+  const ptyOf = (tabId: string) =>
+    browser.execute(
+      (id, tab) => (window.__termic!.useApp.getState().tabs[id] ?? []).find((t: any) => t.id === tab)?.ptyId ?? null,
+      taskId, tabId,
+    );
+  after(async () => {
+    await setRunScript("");
+    if (taskId) await archiveTask(taskId);
+  });
+
+  it("says when nothing is configured, and refuses to start it", async () => {
+    await waitForAppShell();
+    await requireTermicApi();
+    await setRunScript("");
+    taskId = await openTask("e2e-cli-run");
+    const status = await cliRpc({ cmd: "run", task: taskId, status: true });
+    expect(status.ok).toBe(true);
+    expect(status.data.targets).toEqual([]);
+    const start = await cliRpc({ cmd: "run", task: taskId });
+    expect(start.ok).toBe(false);
+    expect(start.error.message).toContain("no run script configured");
+  });
+
+  it("starts the run script in the task's Run tab, once", async () => {
+    await setRunScript("echo cli-run-ok; sleep 120");
+    const r = await cliRpc({ cmd: "run", task: taskId });
+    expect(r.ok).toBe(true);
+    const [target] = r.data.targets;
+    expect(target).toMatchObject({ script: "echo cli-run-ok; sleep 120", running: true, outcome: "started" });
+    expect(typeof target.tab_id).toBe("string");
+
+    await browser.waitUntil(async () => !!(await ptyOf(target.tab_id)), {
+      timeout: 20_000, timeoutMsg: "the Run tab never spawned its PTY",
+    });
+    let logs: any;
+    await browser.waitUntil(async () => {
+      logs = await cliRpc({ cmd: "logs", task: taskId, tab: target.tab_id });
+      return logs.ok && String(logs.data.data).includes("cli-run-ok");
+    }, { timeout: 20_000, interval: 250 }).catch(() => {
+      throw new Error(`the run script's output never reached its tab: ${JSON.stringify(logs).slice(0, 400)}`);
+    });
+
+    // Asking again leaves the running server alone: same tab, same process.
+    const pty = await ptyOf(target.tab_id);
+    const again = await cliRpc({ cmd: "run", task: taskId });
+    expect(again.data.targets[0]).toMatchObject({ tab_id: target.tab_id, outcome: "already_running" });
+    expect(await ptyOf(target.tab_id)).toBe(pty);
+  });
+
+  it("stops it, and status reads it as stopped", async () => {
+    const r = await cliRpc({ cmd: "run", task: taskId, stop: true });
+    expect(r.ok).toBe(true);
+    expect(r.data.targets[0]).toMatchObject({ running: false, outcome: "stopped" });
+    const tabId = r.data.targets[0].tab_id;
+    await browser.waitUntil(async () => !(await ptyOf(tabId)), {
+      timeout: 15_000, timeoutMsg: "the Run tab's PTY never exited",
+    });
+    const status = await cliRpc({ cmd: "run", task: taskId, status: true });
+    expect(status.data.targets[0]).toMatchObject({ tab_id: tabId, running: false });
+    expect(status.data.targets[0].outcome).toBeUndefined();
   });
 });

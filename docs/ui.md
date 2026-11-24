@@ -29,9 +29,9 @@ the inheritance override. See [customizations.md](customizations.md).
 
 Left rail + one content pane (`components/settings/Settings.tsx`). Three bands, hairline-separated, then the per-project list:
 
-1. **Opened by choice** (General, Appearance, Agents & Terminals)
+1. **Opened by choice** (General, Appearance, Agents & Terminals, then MCP & CLI, Remote control, Servers: how agents here drive Termic, what drives it over the network, and where a project's tasks run when not here)
 2. **Set once** (Tasks, Notifications, Prompts, Shortcuts, Profiles, Sync)
-3. **The perimeter**, what the app is allowed to do (Sandbox, Termic CLI)
+3. **The perimeter**, what the app is allowed to do (Sandbox, Secrets, Docker Sandbox)
 4. `PROJECTS`, the only band with a label, because it is a dynamic list needing an empty state
 
 The bands are what the app looks like and runs, then how it behaves while you work, then what it is allowed to do. Sandbox sits low because of the last one, not because it matters least. General leads by convention rather than by that rule: it is app-level and set-once, but every settings UI opens on General and fighting that expectation costs more than the inconsistency does.
@@ -179,9 +179,9 @@ carries the Layers icon (the ⋯ dots were rejected as a stray glyph).
 **The New task button under a project.** The dashed button the empty project
 shows sits BELOW the task rows, where a new task lands. The
 `newTaskButton` pref (Settings > Appearance, sidebar) decides when a project
-that has tasks shows it too: Empty projects (never), Auto (while there are
-two or fewer projects, the default: one long list puts the header's `+` far
-from where the task appears), or Always (`newTaskButtonShown` in
+that has tasks shows it too: Empty projects (never, the default: the
+header's `+` is how a task starts), Auto (while there are two or fewer
+projects), or Always (`newTaskButtonShown` in
 `store/prefs.ts`). Under tasks it draws as a lone centered `+` on a borderless row the height of a task row (`--task-row-h`)
 (`data-variant="quiet"`, labelled by its tooltip), so it does not read as
 one more task; the row highlights on hover and while its menu is open. The
@@ -709,6 +709,13 @@ same marks for the rows they hide: one of each that a member's row would
 draw, in the fixed order above (`groupBadgeKinds`, drawn by `WorkMarkList` in
 [src/components/sidebar/RollupMarks.tsx](../src/components/sidebar/RollupMarks.tsx)).
 Open, they carry none, because the rows show their own.
+
+Opening and shutting animates (240ms height and fade on the iOS curve,
+[src/components/ui/Expand.tsx](../src/components/ui/Expand.tsx)) for a
+project, a folder and each task group row. Shut content still unmounts:
+it is held only for the exit animation, the wrapper is `display:
+contents` at rest so it adds no box, and nothing animates on first mount
+or under reduced motion.
 
 A project's marks sit after its name, NOT in the action cluster on the right:
 the filter toggle and the cog there keep their space while invisible, which
@@ -1794,7 +1801,7 @@ menu's onSelect carries no user gesture in WKWebView.
 
 ## Find in terminal
 
-⌘F (Ctrl+Shift+F elsewhere) opens `TerminalFindBar` over any terminal: agent and shell tabs, and the footer shell. Every match gets a wash of the accent the moment the query changes; the current one gets a stronger wash and an accent outline (and xterm's selection colour, since the addon selects it), with a "3 of 12" count. Reopening on a kept query highlights again straight away.
+⌘F (Ctrl+Alt+F elsewhere) opens `TerminalFindBar` over any terminal: agent and shell tabs, and the footer shell. Every match gets a wash of the accent the moment the query changes; the current one gets a stronger wash and an accent outline (and xterm's selection colour, since the addon selects it), with a "3 of 12" count. Reopening on a kept query highlights again straight away.
 
 - The highlights are xterm decorations, which only take `#RRGGBB`. `lib/terminalFind.ts` resolves `--color-accent` and blends it into the terminal's background, so no hex lives outside the theme.
 - While a decorated query is live the addon re-searches 200ms after new output. Closing the bar clears the decorations, which also stops that, so a streaming agent does not keep paying for a search nobody is looking at.
@@ -3121,3 +3128,39 @@ installed and supported from the store (`agentHooksInstalled`,
 `agentHooksSupported`), the same read a live tab uses, so the block, the cards
 and the terminals cannot disagree. The link out of Notifications does not gate
 on which agents are supported; the cards are the authority on that.
+
+## Notifications (toasts)
+
+`useUI().pushToast(msg, kind, opts)` raises a card in the bottom-right stack
+(`src/components/ui/Toaster.tsx`). The card is `ToastFrame`: an icon tile and
+the text on the left, and on the right edge a column of buttons one under the
+other (Dismiss on top, then the actions), as macOS draws a notification with
+actions. `opts.title` puts a bold
+heading over the message, `opts.icon` replaces the kind's icon (a merge
+notice carries a merge icon, never the warning sign), and `opts.action` /
+`opts.actions` add buttons, the first in accent. A click runs the callback
+and dismisses the card. Dismiss heads every card's column; there is no X. `sticky` cards never time out; the rest go
+after `ttlMs` (3.2s by default), with the time left drawn as a faint fill
+draining out of the Dismiss cell (`termic-toast-countdown`, its
+`animation-play-state` paused whenever the card's timer is).
+
+**Muting.** A toast that passes `opts.notice` (a key from `lib/notices.ts`)
+gets a round "..." on its top-right corner (on hover) whose
+menu holds "Don't show this again", and a muted key
+is never pushed (`isNoticeMuted`, read from storage so the UI store does not
+import prefs). Settings > Notifications opens with **In-app notices**: every
+key, drawn as the real `ToastFrame` with sample text beside its switch. A new
+notice that should be mutable needs a key in `NOTICES`, a label and a sample
+in `NotificationsSection.tsx`, and `notice:` at its call site. Whether a PR
+merge is acted on at all stays per project (`on_pr_merge`).
+
+**Stack.** Collapsed, the newest card sits in front and two older ones peek
+out below it. Hovering the stack, or opening a card's menu (it renders
+outside the stack, so moving onto it is a mouseleave), fans it out, shows
+Clear all, and pauses every timer; each resumes with what it had left. Cards
+slide in from the right and back out: a dismissed card stays mounted for the
+220ms exit, so `toasts` in the store and the DOM disagree for that beat. Only
+`transform` and `opacity` animate. Covered by `e2e/specs/toasts.e2e.ts`,
+which hovers with synthetic `mouseover`/`mouseout` and opens the menu with a
+synthetic `pointerdown`, because the macOS e2e window is hidden and a real
+pointer never reaches it.

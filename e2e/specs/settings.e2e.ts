@@ -131,6 +131,48 @@ describe("settings", () => {
   // a shell starts, so the only thing the UI owns is the pref and its switch.
   // This pins both, and restores the default so the rest of the run (and the
   // next one, since the profile is shared) sees an untouched profile.
+  // The app theme has a home in Settings, not only behind the sidebar footer's
+  // palette button: on Linux that palette was reported closing the instant it
+  // opened, which left no way to change the theme at all. A plain <select>
+  // has no popup to lose.
+  it("changes the app theme from Appearance > Interface", async () => {
+    await waitForAppShell();
+    await requireTermicApi();
+    await browser.execute(() => window.__termic!.useApp.getState().openSettings("appearance"));
+    await waitVisible('[data-appearance-tab="interface"]');
+    await browser.execute(() =>
+      (document.querySelector('[data-appearance-tab="interface"]') as HTMLElement).click());
+    const SELECT = '[data-testid="settings-app-theme"]';
+    await waitVisible(SELECT);
+    await snap("settings-app-theme.png");
+
+    const original = await browser.execute(() => window.__termic!.usePrefs.getState().themeMode);
+    const target = original === "solarized" ? "cobalt" : "solarized";
+    // Every built-in is listed, grouped by scheme like the palette.
+    const options = await browser.execute((sel) =>
+      [...(document.querySelector(sel) as HTMLSelectElement).options].map(o => o.value), SELECT);
+    expect(options).toEqual(expect.arrayContaining(["auto", "light", "dark", "solarized", "cobalt"]));
+
+    try {
+      await browser.execute((sel, v) => {
+        const el = document.querySelector(sel) as HTMLSelectElement;
+        Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")!.set!.call(el, v);
+        el.dispatchEvent(new Event("change", { bubbles: true }));
+      }, SELECT, target);
+      await browser.waitUntil(
+        async () => (await browser.execute(() => window.__termic!.usePrefs.getState().themeMode)) === target,
+        { timeout: 8_000, timeoutMsg: "picking a theme in Appearance never changed the theme" },
+      );
+      // What the user sees: the theme's class on the document.
+      expect(await browser.execute((m) => document.documentElement.classList.contains(m), target)).toBe(true);
+      // The select follows the store, so it reads the pick back.
+      expect(await browser.execute((sel) =>
+        (document.querySelector(sel) as HTMLSelectElement).value, SELECT)).toBe(target);
+    } finally {
+      await browser.execute((m) => window.__termic!.usePrefs.getState().setThemeMode(m), original);
+    }
+  });
+
   it("shares shell history across terminals from Appearance", async () => {
     await waitForAppShell();
     await requireTermicApi();
@@ -245,10 +287,14 @@ describe("settings rail", () => {
     ["general", "General", "Repos directory"],
     ["appearance", "Appearance", "Terminal font"],
     ["agents", "Agents & Terminals", "Copy on select"],
-    // Agent access, right under Agents: the CLI, MCP and other computers
-    // (LAN pairing, docs/peers.md) on one page. Its marker is the MCP
-    // master toggle, the tab it opens on.
-    ["cli", "Agent access", "Enable MCP endpoint"],
+    // MCP & CLI, right under Agents: how agents on this computer drive
+    // Termic, one page. Its marker is the MCP master toggle, the tab it
+    // opens on.
+    ["cli", "MCP & CLI", "Enable MCP endpoint"],
+    // Remote control (docs/remote.md): phones and other computers.
+    ["remote", "Remote control", "Mobile remote control"],
+    // Servers: where a project's tasks run over SSH, its own page.
+    ["servers", "Servers", "Add a server"],
     ["tasks", "Tasks", "Branch prefix"],
     ["notifications", "Notifications", "Desktop notifications"],
     ["prompts", "Prompts", "Prompts"],
@@ -667,7 +713,7 @@ describe("settings rail", () => {
     const badgeOf = (title: string) => browser.execute((tt) =>
       [...document.querySelectorAll("h1")].find((h) => h.textContent === tt)
         ?.parentElement?.querySelector("span")?.textContent ?? null, title);
-    await clickRail("Agent access");
+    await clickRail("MCP & CLI");
     await waitForText("Enable MCP endpoint");
     expect(await badgeOf("MCP endpoint")).toBe(null);
     await clickPresent('[data-testid="access-tab-cli"]');
@@ -685,7 +731,7 @@ describe("settings rail", () => {
     // The seeded profile enables the endpoint, so the section must show
     // the real bound URL (mcp_status reads the live handle) plus a
     // registration command per client.
-    await clickRail("Agent access");
+    await clickRail("MCP & CLI");
     await waitForText("Connect an agent");
     // One client at a time, Claude Code first, its command folded away.
     expect(await paneText()).toContain("Add to Claude Code");
@@ -696,7 +742,14 @@ describe("settings rail", () => {
     let pane = "";
     for (const c of ["claude", "codex", "other"]) {
       await clickPresent(`[data-testid="mcp-client-${c}"]`);
-      if (c !== "other") await clickPresent('[data-testid="mcp-show-block"]');
+      if (c !== "other") {
+        await clickPresent('[data-testid="mcp-show-block"]');
+        // the block draws once its command is built, which is async (the
+        // CLI sidecar's path on Windows) and can land after the click.
+        const marker = c === "claude" ? "claude mcp add-json" : "[mcp_servers.termic]";
+        await browser.waitUntil(async () => (await paneText()).includes(marker),
+          { timeout: 8_000, timeoutMsg: `the ${c} block never rendered` });
+      }
       if (c === "other") {
         await browser.waitUntil(
           async () => (await paneText()).includes("http://127.0.0.1:"),
@@ -736,11 +789,10 @@ describe("settings rail", () => {
     expect(pane).not.toContain(token);
   });
 
-  // Agent access is two tabs: MCP first, with pairing at its top, and the
-  // CLI. The three sections stacked read as one wall of prose, and pairing
-  // sat at the bottom of it where nobody found it.
-  it("opens on MCP with pairing first, and keeps the CLI on its own tab", async () => {
-    await clickRail("Agent access");
+  // Agent access is two tabs: MCP first, and the CLI. Pairing other
+  // computers lives in Remote now, with phones and servers.
+  it("opens on MCP, keeps the CLI on its own tab, and has no pairing", async () => {
+    await clickRail("MCP & CLI");
     await waitForText("Enable MCP endpoint");
     const order = () => browser.execute(() => {
       const p = (document.querySelector('[data-testid="settings-pane"]') as HTMLElement).innerText;
@@ -752,7 +804,7 @@ describe("settings rail", () => {
       [...document.querySelectorAll('[data-testid^="access-tab-"]')]
         .filter((b) => b.getAttribute("aria-selected") === "true")
         .map((b) => b.getAttribute("data-testid")));
-    expect(await order()).toEqual(["Share on this network", "Enable MCP endpoint"]);
+    expect(await order()).toEqual(["Enable MCP endpoint"]);
     expect(await selected()).toEqual(["access-tab-mcp"]);
     expect(await textOf('[data-testid="access-tab-mcp"]')).toContain("orchestrate new tasks");
     await snap("agent-access-mcp.png");
@@ -770,7 +822,7 @@ describe("settings rail", () => {
     // Task PTYs carry TERMIC_CLI / TERMIC_TASK_ID (lib.rs), so an unsandboxed
     // agent can spawn sibling tasks. The page has to say so: it is the least
     // guessable thing the CLI does.
-    await clickRail("Agent access");
+    await clickRail("MCP & CLI");
     await clickPresent('[data-testid="access-tab-cli"]');
     await waitForText("Agents can drive it too");
     const pane = await paneText();
@@ -782,7 +834,7 @@ describe("settings rail", () => {
     // index.css turns selection off app-wide, so these copy-me commands have to
     // opt back in. Read off the command text, not the `data-selectable`
     // attribute, so only losing selectability fails.
-    await clickRail("Agent access");
+    await clickRail("MCP & CLI");
     await clickPresent('[data-testid="access-tab-cli"]');
     await waitForText("Getting started");
     const selectable = await browser.execute(() => {
@@ -1245,7 +1297,9 @@ describe("settings navigation", () => {
       "Task settings",
       "Notification settings",
       "Sandbox settings",
-      "Agent access settings",
+      "MCP & CLI settings",
+      "Remote control settings",
+      "Servers settings",
     ]) {
       expect(labels.some((l) => l.includes(needle))).toBe(true);
     }
@@ -3775,10 +3829,12 @@ describe("extra named ports settings", () => {
     );
     await waitVisible('[data-testid="extra-named-ports-input"]');
     await typePorts("API_PORT\nDB_PORT");
-    // The field autosaves (500ms debounce) into projects.json.
+    // The field autosaves (500ms debounce) into projects.json. 20s, not 8:
+    // the Windows runner once missed 8s on 1.25.4's commit and passed on a
+    // rerun, with nothing in the save path changed.
     await browser.waitUntil(
       async () => JSON.stringify(await stored()) === JSON.stringify(["API_PORT", "DB_PORT"]),
-      { timeout: 8_000, timeoutMsg: "typed port names never autosaved to the project" },
+      { timeout: 20_000, timeoutMsg: "typed port names never autosaved to the project" },
     );
     await snap("extra-named-ports.png");
   });
@@ -4477,6 +4533,15 @@ describe("cloned agents inherit rather than copy", () => {
       timeout: 10_000, timeoutMsg: "cloning claude never added an agent",
     });
     cloneId = ((await agentIds()) as string[]).find(i => !before.includes(i))!;
+    // The panel mirrors the clone into the store at once but writes it to disk
+    // on a 500ms debounce. Moving on before that lands lets the pending save
+    // overwrite the next case's agentsSave with the clone's original fields,
+    // so the override is gone from disk and the remounted panel never offers
+    // a reset. Reproduced locally by reading settings_load after the write.
+    await browser.waitUntil(() => browser.execute(async (id) => {
+      const s = await window.__termic!.invoke("settings_load") as { agents: { id: string }[] };
+      return s.agents.some(a => a.id === id);
+    }, cloneId), { timeout: 10_000, timeoutMsg: "the clone never reached disk" });
 
     const stored = await record(cloneId) as Record<string, unknown>;
     expect(stored.extends).toBe("claude");
@@ -4526,9 +4591,8 @@ describe("cloned agents inherit rather than copy", () => {
     await browser.execute(() => window.__termic!.useApp.getState().openSettings("general"));
     // Wait for the panel to actually GO before asking for it back: two store
     // writes back to back can land in one render, and then nothing remounts.
-    // This case has failed in CI on Linux and on macOS with the reset button
-    // absent. The cause was not reproduced, so this and the retried click
-    // below close the two windows the steps left open rather than a proven one.
+    // (The reset button going missing in CI was the clone's debounced save,
+    // handled in the first case.)
     await browser.waitUntil(
       () => browser.execute(() => !document.querySelector('[data-agent-id][data-kind="agent"]')),
       { timeout: 10_000, timeoutMsg: "the agents panel never unmounted, so it cannot have reloaded" });
@@ -4813,5 +4877,144 @@ describe("agent state section", () => {
       if ((await tracked()) === "0") await clickWhenVisible(card(PLAIN, '[data-testid="agent-state-switch"]'));
     }
     await waitVisible(source(PLAIN));
+  });
+});
+
+// The GitHub API budget: a top-bar pill that appears ONLY while background
+// GitHub polling is paused, and the Settings > General block with the
+// numbers. No fixture repo talks to GitHub, so the ledger is seeded through
+// the store's mirror (the Rust side is unit-tested in forge_rate.rs).
+//
+// The mirror is HELD on the seed for the whole describe: the app inherits
+// this machine's `gh` login, so the launch probe, the block's own probe and
+// any real `gh` call feed the real ledger, whose events would replace the
+// seed mid-case (a flake) and put the machine's real hostnames into the
+// screenshot (a leak, see CLAUDE.md "Fixtures"). The forge CLI status is
+// held too, for the same reason: the block above the budget prints the
+// signed-in `gh` account and its hosts. Cases: no pill with no pause; a
+// pause shows the pill with its kind; the pill opens Settings scrolled to
+// the block, which shows GitHub's window, termic's spend by feature and the
+// pause, and no real account; a pause whose time has passed shows no pill.
+describe("GitHub API budget", () => {
+  const PILL = '[data-testid="forge-rate-pill"]';
+  const BLOCK = '[data-testid="forge-rate-block"]';
+  const host = (paused: null | { until: number; kind: string }) => ({
+    host: "github.com",
+    buckets: [
+      {
+        bucket: "graphql",
+        window: { limit: 5000, remaining: 4512, used: 488, reset_at: Math.floor(Date.now() / 1000) + 1800 },
+        spent: 42, estimated: 12, cap: 1000,
+        by_feature: [
+          { feature: "pr_status", cost: 30, estimated: 0 },
+          { feature: "lists", cost: 12, estimated: 12 },
+        ],
+      },
+      { bucket: "core", window: null, spent: 0, estimated: 0, cap: 300, by_feature: [] },
+    ],
+    paused,
+  });
+  // What `gh auth status` would say, in placeholders.
+  const FORGES = [{
+    id: "gh", provider: "github", found: true, path: "/usr/local/bin/gh", version: "2.60.0",
+    authed: true, account: "alice", hosts: ["github.com", "ghe.acme.com"],
+  }];
+  // `refreshForges` is the only writer of `forges`, so swapping it for a
+  // no-op holds them without touching usePr's setState (the PR store keeps
+  // working for everything else).
+  const holdForges = () =>
+    browser.execute((forges) => {
+      const w = window as unknown as { __forgesHeld?: { forges: unknown; refreshForges: unknown } };
+      const pr = window.__termic!.usePr;
+      if (!w.__forgesHeld) {
+        const st = pr.getState();
+        w.__forgesHeld = { forges: st.forges, refreshForges: st.refreshForges };
+      }
+      pr.setState({ forges, refreshForges: async () => {} });
+    }, FORGES);
+  const releaseForges = () =>
+    browser.execute(() => {
+      const w = window as unknown as { __forgesHeld?: { forges: unknown; refreshForges: unknown } };
+      if (!w.__forgesHeld) return;
+      window.__termic!.usePr.setState(w.__forgesHeld);
+      delete w.__forgesHeld;
+    });
+  // Real writes (the event listener's, the block's refresh) go nowhere
+  // while held; only `seed` writes, through the store's real setState.
+  const seed = (paused: null | { until: number; kind: string }) =>
+    browser.execute((h) => {
+      const w = window as unknown as { __forgeRateHeld?: { set: (p: unknown) => void; refresh: unknown } };
+      const store = window.__termic!.useForgeRate;
+      if (!w.__forgeRateHeld) {
+        w.__forgeRateHeld = { set: store.setState, refresh: store.getState().refresh };
+        store.setState = () => {};
+      }
+      w.__forgeRateHeld.set({ hosts: [h], refresh: async () => {} });
+    }, host(paused));
+  const release = () =>
+    browser.execute(() => {
+      const w = window as unknown as { __forgeRateHeld?: { set: (p: unknown) => void; refresh: unknown } };
+      const held = w.__forgeRateHeld;
+      if (!held) return;
+      window.__termic!.useForgeRate.setState = held.set;
+      held.set({ hosts: [], refresh: held.refresh });
+      delete w.__forgeRateHeld;
+    });
+  const inTenMinutes = () => Math.floor(Date.now() / 1000) + 600;
+
+  before(async () => {
+    await waitForAppShell();
+    await requireTermicApi();
+    await holdForges();
+  });
+  after(async () => {
+    await release();
+    await releaseForges();
+    await browser.execute(() => window.__termic!.useApp.getState().closeSettings());
+    await dismissOverlays();
+  });
+
+  it("shows no pill while nothing is paused", async () => {
+    await seed(null);
+    await waitGone(PILL);
+  });
+
+  it("shows the pill, with its kind, while background polling is paused", async () => {
+    await seed({ until: inTenMinutes(), kind: "floor" });
+    await waitVisible(PILL);
+    expect(await browser.execute((s) => document.querySelector(s)?.getAttribute("data-kind"), PILL)).toBe("floor");
+    expect(await textOf(PILL)).toContain("GitHub polling paused until");
+    await snap("forge-rate-pill.png");
+  });
+
+  it("opens Settings on the budget block, with GitHub's window, termic's spend and the pause", async () => {
+    await clickWhenVisible(PILL);
+    await waitVisible(BLOCK);
+    // Scrolled to: the block's top is on screen, not wherever General
+    // happened to open.
+    await browser.waitUntil(() => browser.execute((s) => {
+      const r = document.querySelector(s)!.getBoundingClientRect();
+      return r.top >= 0 && r.top < window.innerHeight;
+    }, BLOCK), { timeout: 5000, timeoutMsg: "the budget block was never scrolled into view" });
+    const text = await textOf(BLOCK);
+    expect(text).toContain("4,512 of 5,000 left");
+    expect(text).toContain("Termic this hour: 42 of 1,000");
+    expect(text).toContain("(12 estimated)");
+    expect(text).toContain("PR status 30");
+    expect(text).toContain("Limit not reported yet");
+    await waitVisible('[data-testid="forge-rate-paused"]');
+    // The account line above the block is the placeholder, never the
+    // machine's real `gh` login.
+    const page = await browser.execute(() => document.body.innerText);
+    expect(page).toContain("alice");
+    await snap("forge-rate-settings.png");
+  });
+
+  it("shows no pill for a pause whose time has already passed", async () => {
+    // A seed that is already over, not a visible pill expiring: the lift
+    // timer that drops a live pill is unit-tested in forgeRate.test.ts.
+    await browser.execute(() => window.__termic!.useApp.getState().closeSettings());
+    await seed({ until: Math.floor(Date.now() / 1000) - 5, kind: "limited" });
+    await waitGone(PILL);
   });
 });

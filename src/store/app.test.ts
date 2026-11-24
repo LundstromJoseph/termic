@@ -129,6 +129,21 @@ describe("setWorkState", () => {
     useUI.getState().setWindowless(false);
   });
 
+  it("markSeenRemotely: a phone reading the task clears done, keeps the active tab, bails when nothing changes", () => {
+    const taskId = "ws-phone";
+    const done = makeTermTab({ workState: "done", workDoneAt: Date.now() - 1_000 });
+    const other = makeTermTab({ workState: "idle" });
+    addTab(taskId, other);
+    addTab(taskId, done);
+    useApp.getState().setActiveTabId(taskId, other.id);
+    useApp.getState().markSeenRemotely(taskId);
+    expect(getTabWorkState(taskId, done.id)).toBe("idle");
+    expect(useApp.getState().activeTab[taskId]).toBe(other.id);
+    const before = useApp.getState();
+    useApp.getState().markSeenRemotely(taskId);
+    expect(useApp.getState()).toBe(before);
+  });
+
   it("sticky done: a busy signal right after the done is ignored", () => {
     const taskId = "ws1";
     // Claude flickers ✳ ↔ spinner for a few frames after answering; that is
@@ -2025,6 +2040,49 @@ describe("recentTasks", () => {
     vi.mocked(ipc.tasksList).mockResolvedValueOnce([task("a")]);
     await useApp.getState().loadAll();
     expect(useApp.getState().recentTasks).toBe(before);
+  });
+
+  it("an older loadAll that resolves last does not put stale tasks back", async () => {
+    const ipc = await import("@/lib/ipc");
+    let resolveOld!: (v: import("@/lib/types").Task[]) => void;
+    let resolveNew!: (v: import("@/lib/types").Task[]) => void;
+    vi.mocked(ipc.tasksList)
+      .mockReturnValueOnce(new Promise(r => { resolveOld = r; }))
+      .mockReturnValueOnce(new Promise(r => { resolveNew = r; }));
+    const older = useApp.getState().loadAll();
+    const newer = useApp.getState().loadAll();
+    resolveNew([task("fresh")]);
+    await newer;
+    resolveOld([task("stale")]);
+    await older;
+    expect(useApp.getState().tasks.map(t => t.id)).toEqual(["fresh"]);
+  });
+
+  // The spawn-links e2e flake (task.e2e.ts, Linux CI): `termic new --parent`
+  // saves the child and then the parent as two files. A reload that read
+  // between the two writes holds the child already in the group and the
+  // parent not; landing after the reload that read both, it left the parent
+  // out of the group it founded, for good ("the parent never joined the
+  // group its child founded").
+  it("a reload read mid-way through a spawn link does not leave the parent out of its group", async () => {
+    const ipc = await import("@/lib/ipc");
+    type T = import("@/lib/types").Task;
+    const g = { id: "orch", name: null, color: "teal" } as unknown as NonNullable<T["group"]>;
+    const parent = (grouped: boolean) => ({ ...task("orch"), group: grouped ? g : undefined }) as T;
+    const child = { ...task("near"), group: g, spawned_by: "orch" } as T;
+    let resolveMidway!: (v: T[]) => void;
+    let resolveFinal!: (v: T[]) => void;
+    vi.mocked(ipc.tasksList)
+      .mockReturnValueOnce(new Promise(r => { resolveMidway = r; }))
+      .mockReturnValueOnce(new Promise(r => { resolveFinal = r; }));
+    const midway = useApp.getState().loadAll();   // e.g. a window focus, mid-write
+    const final = useApp.getState().loadAll();    // the CLI's own reload, after both
+    resolveFinal([parent(true), child]);
+    await final;
+    resolveMidway([parent(false), child]);
+    await midway;
+    const orch = useApp.getState().tasks.find(t => t.id === "orch");
+    expect(orch?.group?.id).toBe("orch");
   });
 });
 

@@ -207,8 +207,9 @@ Each of these is a deliberate choice; the reasoning lives next to the code.
   pastes its path, which the agent attaches (`windowsPasteText` in
   `src/lib/clipboardImage.ts`). The agents bind their own image paste to
   Alt+V on Windows, because Ctrl+V never reaches them.
-  Ctrl+Shift+F in a terminal opens that terminal's find, as in Windows
-  Terminal, rather than find-in-files, which has the same keys there.
+  Ctrl+Shift+F is find-in-files everywhere, terminals included, as in
+  VS Code; a terminal's own find is Ctrl+Alt+F (plain Ctrl+F is readline's
+  forward-char).
   Ctrl+Shift+W closes the tab from inside a terminal, for the same reason:
   close-tab is Ctrl+W, and in a terminal that is the shell's
   delete-previous-word. Outside a terminal Ctrl+W closes as before. The same
@@ -242,6 +243,17 @@ Each of these is a deliberate choice; the reasoning lives next to the code.
 - **AltGr** never fires a Ctrl+Alt shortcut.
 - **Closing the window quits**, as Windows users expect. The macOS
   close-to-menu-bar behaviour is macOS-only.
+- **Remote control** ([remote.md](remote.md)). A Windows desktop hosts its
+  own tasks for phones and paired computers like any other, and adds
+  servers with Windows' built-in OpenSSH (`ssh.exe`, `ssh-keyscan`,
+  `ssh-keygen`), every call without a console window
+  (`remote_client::tool`). A missing OpenSSH Client is one sentence naming
+  the Optional features switch. The QR code's address list includes
+  adapters without multicast (`mdns::windows_addrs(false)`), which is how a
+  Tailscale address reaches the phone. `termic-server` itself is unix only
+  (Linux and macOS servers); its crate builds on Windows as a stub so the
+  workspace does. Checked with `cargo check --workspace --all-targets
+  --target x86_64-pc-windows-gnu`; not yet driven on a real Windows machine.
 
 ## Releases and updates
 

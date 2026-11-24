@@ -175,8 +175,11 @@ start another agent beside you (`tab`); launch new tasks with their own agents \
 another project is linked to yours instead), a block you name for the \
 batch of work with `group --name`; prompt another task's agent (`send`, \
 typed at once even mid-turn, or with --queue after its turn ends) and \
-read what it produced (`logs`, `result`); retitle your own task \
-(`rename`); label your own tab with what you are working on, shown on \
+read what it produced (`logs`, `result`); start your task's dev server \
+with `run` when it has a run script configured (it runs in the task's Run \
+tab, where the user sees and stops it; `run --status` shows the script) \
+rather than launching your own npm run dev or similar in a shell; retitle \
+your own task (`rename`);label your own tab with what you are working on, shown on \
 the task's sidebar row (`prop ticket ABC-1`); put a coloured status badge \
 under your task's name (`badge set ci passing --color good`); show the user \
 a commit range as a review and discuss it in comment threads (`present new \
@@ -211,7 +214,8 @@ Quick start, from inside a task (your own task is the default target):
   termic scratchpad write <id> --append -c \"<text>\"      update it (omit -c to read stdin)
   termic new <name> -p \"<prompt>\"                        launch a new task with its agent
   termic group --name \"<what this batch is>\"              name the group your new tasks join
-  termic prop ticket ABC-1                                label your tab on the sidebar row"
+  termic prop ticket ABC-1                                label your tab on the sidebar row
+  termic run                                              start the dev server (the configured run script)"
     };
 }
 
@@ -815,8 +819,8 @@ target closed underneath the session (agent exited or task archived)."
 escapes intact; long tails are trimmed to fit the 1 MB reply line once \
 JSON-escaped) to stdout; --shell reads the aux terminal instead, --tab \
 reads one strip tab (a tab id, a 1-based index into status's tab list, or \
-a title; agent tabs only, since shell and terminal tabs retain no output). \
-This is the rendered terminal stream, useful for a quick look; for the \
+a title; agent tabs, or a run tab's id from `run`, since shell and terminal \
+tabs retain no output). This is the rendered terminal stream, useful for a quick look; for the \
 agent's structured answer prefer `termic result` or the RESULT.md file \
 convention. A note goes to stderr when older output was already dropped. \
 Without <TASK>, resolves from the current directory.
@@ -1177,6 +1181,29 @@ disabled, 6 refused, 8 the app exited mid-command."
         #[arg(short, long)]
         yes: bool,
     },
+    /// Pin or unpin a task in the sidebar, so it stays listed whatever the filters say.
+    #[command(after_help = "Does what the sidebar row's Pin does: a pinned task stays listed whatever \
+the sidebar's search and project filter say, and its project and group stay with it. \
+It does not move the row.
+
+Without <TASK>, targets your own task ($TERMIC_TASK_ID), then the current directory.
+
+Prints the result on stdout. With --output-format json, one object: \
+{\"task\": {...}, \"pinned\"}.
+
+Exit codes: 0 done, 1 error (unknown or ambiguous task), 4 app not running, \
+5 CLI disabled, 6 refused, 8 connection lost.")]
+    Pin {
+        /// Task name, task id, or qualified project/name. Omitted:
+        /// $TERMIC_TASK_ID, then the current directory.
+        task: Option<String>,
+        /// Unpin instead.
+        #[arg(long)]
+        off: bool,
+        /// Project name, to disambiguate. Requires a task name.
+        #[arg(long, requires = "task")]
+        project: Option<String>,
+    },
     /// Rename a task: the sidebar label only; branch and directory stay.
     #[command(
         allow_missing_positional = true,
@@ -1368,6 +1395,52 @@ Exit codes: 0 ok, 1 error (unknown task, unknown colour, archived task, \
         leave: bool,
     },
 
+    /// Start, stop or show a task's run (or setup) script in its Run tab.
+    #[command(
+        after_help = "Starts the run script configured for the task (Settings, Repositories, \
+or `scripts.run` in `.termic.yaml`) in the task's Run tab: the same tab the \
+app's Run button drives, where the user sees its output and can stop it. \
+When the task has one, use this to start its dev server instead of running \
+`npm run dev` or similar in your own shell. A script already running is left \
+alone; stop it first to restart it. --setup does the same for the setup \
+script. A multi-repo task runs every member with a run script, or only \
+--member's.
+
+--status starts nothing: it shows each configured script and whether it is \
+running. --stop stops it. Read its output with `logs --tab <tab id>`.
+
+Without <TASK>, targets your own task ($TERMIC_TASK_ID), then the current \
+directory.
+
+With --output-format json, one object: {\"task\", \"which\", \"targets\": \
+[{\"member\", \"script\", \"tab_id\", \"running\", \"outcome\"}]}, outcome one \
+of started, already_running, stopped, not_running (absent for --status).
+
+Exit codes: 0 ok, 1 error (unknown or archived task, no script configured, \
+unknown member), 4 app not running, 5 CLI disabled, 6 refused, 8 connection \
+lost."
+    )]
+    Run {
+        /// Task name, task id, or qualified project/name. Omitted:
+        /// $TERMIC_TASK_ID, then the current directory.
+        task: Option<String>,
+        /// Project name, to disambiguate. Requires a task name.
+        #[arg(long, requires = "task")]
+        project: Option<String>,
+        /// The setup script instead of the run script.
+        #[arg(long)]
+        setup: bool,
+        /// Stop it.
+        #[arg(long, conflicts_with = "status")]
+        stop: bool,
+        /// Only show what is configured and running.
+        #[arg(long)]
+        status: bool,
+        /// A multi-repo task's member repo (its directory name).
+        #[arg(long)]
+        member: Option<String>,
+    },
+
     /// Archive a task: SIGKILL its live agents, remove its worktree.
     #[command(
         after_help = "Kills the task's live agent PTYs FIRST, then archives: the worktree \
@@ -1391,6 +1464,25 @@ TTY without --yes), 4 app not running, 5 CLI disabled, 6 refused, \
         /// Skip the confirmation prompt (required non-interactively).
         #[arg(short, long)]
         yes: bool,
+    },
+
+    /// Stop a task's agent; the task, worktree and session stay.
+    #[command(
+        after_help = "Ends the task's running agent processes (SIGTERM, then SIGKILL). Nothing \
+else changes: `send` or `open` starts the agent again, resuming its session.
+
+Prints what was stopped on stdout. With --output-format json, one object: \
+{\"task_id\", \"name\", \"project\", \"stopped_agents\"}.
+
+Exit codes: 0 stopped (also when nothing was running), 1 unknown or ambiguous \
+task, 4 app not running, 5 CLI disabled, 6 refused, 8 connection lost."
+    )]
+    Stop {
+        /// Task name, task id, or qualified project/name.
+        task: String,
+        /// Project name, to disambiguate.
+        #[arg(long)]
+        project: Option<String>,
     },
 
     /// Manage registered projects.
@@ -1912,6 +2004,11 @@ repository, missing directory), 4 app not running, 5 CLI disabled, \
         /// support main-checkout tasks (worktrees need git).
         #[arg(long)]
         non_git: bool,
+        /// Clone this git URL into PATH first (PATH must not exist yet),
+        /// then register it. With --peer, the clone happens on that machine:
+        /// how a repo gets onto a termic-server box.
+        #[arg(long, value_name = "URL")]
+        clone: Option<String>,
     },
     /// List registered projects with live-task counts.
     #[command(
@@ -1966,21 +2063,23 @@ Exit codes: 0 success, 1 error, 4 app not running, 5 CLI disabled, 6 refused, \
     List,
     /// Start pairing with a machine in sight (its name or id) or at an address.
     #[command(
-        after_help = "The other machine must be in pairing mode: a person there clicks Pair a \
-computer (Settings > Agent access), and its screen shows four digits. This pairs with that \
-code, so an agent needs the person to read it out. The target is a name or id from `peer \
+        after_help = "Run it without a code first: the other machine then shows four digits on \
+its screen (or a person there clicks Pair a computer in Settings > Agent access). Run it again \
+with those digits to pair. An agent asks the user to read the code out; it never sees it \
+otherwise. The target is a name or id from `peer \
 list` (in pairing mode it is marked ready), or an address (192.168.1.20, or \
 192.168.1.20:23620) for a network that hides machines from each other. Sharing must be on on \
 both. Both machines may then drive each other's agents; narrow it in Settings.
 
-Exit codes: 0 paired, 1 error (not in sight, unreachable), 4 app not running, 5 CLI \
-disabled, 6 wrong code or not in pairing mode, 8 connection lost."
+Exit codes: 0 paired (without a code: the code is on its screen), 1 error (not in sight, \
+unreachable), 4 app not running, 5 CLI disabled, 6 wrong code or not in pairing mode, 8 \
+connection lost."
     )]
     Pair {
         /// Name or id from `peer list`, or ip / ip:port.
         target: String,
-        /// The four digits the other machine shows in pairing mode.
-        code: String,
+        /// The four digits the other machine shows. Leave it out to make it show them.
+        code: Option<String>,
     },
     /// Forget a paired machine here and tell it to forget this one.
     #[command(
@@ -2740,6 +2839,24 @@ outside.",
         Cmd::Archive { task, project, yes } => {
             execute_archive(&mut conn, &token, format, task, project.as_deref(), *yes, &paths)
         }
+        Cmd::Stop { task, project } => {
+            let data = client::request(&mut conn, proto::Command::Stop { task: task.clone(), project: project.clone() }, &token)?;
+            render(&cli.cmd, format, data).map(Output::ok)
+        }
+        Cmd::Pin { task, off, project } => {
+            let target = task.clone().or_else(|| own_env("TERMIC_TASK_ID"));
+            let data = client::request(
+                &mut conn,
+                proto::Command::Pin {
+                    task: target,
+                    project: project.clone(),
+                    pinned: !off,
+                    cwd: std::env::current_dir().ok().map(|p| p.to_string_lossy().into_owned()),
+                },
+                &token,
+            )?;
+            render(&cli.cmd, format, data).map(Output::ok)
+        }
         Cmd::Rename { task, name, project } => {
             // Explicit task wins; otherwise the caller's own task
             // ($TERMIC_TASK_ID, injected into every agent shell). The id
@@ -2818,6 +2935,22 @@ outside.",
                     caller_task: parent_task_from_env(),
                     join: join.clone(),
                     leave: *leave,
+                },
+                &token,
+            )?;
+            render(&cli.cmd, format, data).map(Output::ok)
+        }
+        Cmd::Run { task, project, setup, stop, status, member } => {
+            let data = client::request(
+                &mut conn,
+                proto::Command::Run {
+                    task: task.clone().or_else(|| own_env("TERMIC_TASK_ID")),
+                    project: project.clone(),
+                    setup: *setup,
+                    stop: *stop,
+                    status: *status,
+                    member: member.clone(),
+                    cwd: std::env::current_dir().ok().map(|p| p.to_string_lossy().into_owned()),
                 },
                 &token,
             )?;
@@ -3029,7 +3162,7 @@ fn run_new_wire(
             // a busy webview must not turn a confirmed registration
             // into a false "connection lost".
             fresh.set_read_timeout(client::PROJECT_ADD_READ_TIMEOUT);
-            let add = proto::Command::ProjectAdd { path: root, non_git: false };
+            let add = proto::Command::ProjectAdd { path: root, non_git: false, clone: None };
             client::request(&mut fresh, add, token)?;
             run_streamed(&mut fresh, wire, token, format).map_err(StreamError::into_cli)?
         }
@@ -3701,11 +3834,31 @@ fn execute_peer(
         }
         PeerCmd::Pair { target, code } => {
             let data = run_streamed(conn, proto::Command::PeerPair { target: target.clone(), code: code.clone() }, token, format)?;
-            let proto::ReplyData::PeerPair(p) = data else {
-                return Err(CliError::new(exit_code::ERROR, "unexpected reply to peer pair"));
-            };
-            Ok(Output::ok(final_stdout(format, &output::peer_paired_text(&p), &p)))
+            match data {
+                proto::ReplyData::PeerPair(p) => Ok(Output::ok(final_stdout(format, &output::peer_paired_text(&p), &p))),
+                proto::ReplyData::PeerCodeShown(c) => {
+                    let text = format!("{} is showing a pairing code. Run `termic peer pair \"{}\" <code>` with it.", c.name, target.trim());
+                    Ok(Output::ok(final_stdout(format, &text, &c)))
+                }
+                _ => Err(CliError::new(exit_code::ERROR, "unexpected reply to peer pair")),
+            }
         }
+    }
+}
+
+/// A path on ANOTHER machine (`--peer`), which this one cannot resolve:
+/// sent as typed, so it must be absolute or start at the home directory.
+fn remote_path(path: &str) -> Result<&str, CliError> {
+    // Judged by the OTHER machine's rules, which may be Windows: a drive
+    // path (C:\repo, C:/repo) or a UNC share (\\host\share) is as complete
+    // as /home/alice/repo, whatever this machine is. Home is ~/ everywhere:
+    // that is the form the receiving machine expands, Windows included.
+    let b = path.as_bytes();
+    let drive = b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'\\' || b[2] == b'/');
+    if path.starts_with('/') || path.starts_with("~/") || path.starts_with("\\\\") || drive {
+        Ok(path)
+    } else {
+        Err(CliError::new(exit_code::ERROR, format!("with --peer, give the path on that machine in full (/home/alice/repo, ~/repo or C:\\repo), not {path}")))
     }
 }
 
@@ -3724,18 +3877,28 @@ fn execute_project(
             };
             Ok(Output::ok(final_stdout(format, &output::project_list_text(&l.projects), &l)))
         }
-        ProjectCmd::Add { path, non_git } => {
+        ProjectCmd::Add { path, non_git, clone } => {
             // Canonicalize CLIENT-side: the server must never resolve a
-            // relative path against ITS cwd.
-            let abs = std::fs::canonicalize(path).map_err(|e| {
-                CliError::new(exit_code::ERROR, format!("cannot resolve {path} ({e})"))
-            })?;
+            // relative path against ITS cwd. Under --peer the path names a
+            // folder on THAT machine, which this one cannot see: it goes as
+            // typed, and must be absolute (or ~/...) for the same reason.
+            let abs = if client::peer().is_some() {
+                std::path::PathBuf::from(remote_path(path)?)
+            } else if clone.is_some() {
+                // The clone creates it: absolute, but nothing to canonicalize yet.
+                std::env::current_dir().map_err(|e| CliError::new(exit_code::ERROR, e.to_string()))?.join(path)
+            } else {
+                std::fs::canonicalize(path).map_err(|e| {
+                    CliError::new(exit_code::ERROR, format!("cannot resolve {path} ({e})"))
+                })?
+            };
             conn.set_read_timeout(client::PROJECT_ADD_READ_TIMEOUT);
             let data = client::request(
                 conn,
                 proto::Command::ProjectAdd {
                     path: abs.to_string_lossy().into_owned(),
                     non_git: *non_git,
+                    clone: clone.clone(),
                 },
                 token,
             )?;
@@ -4383,11 +4546,26 @@ pub fn render(cmd: &Cmd, format: OutputFormat, data: proto::ReplyData) -> Result
         (Cmd::Status { .. }, _) => Err(unexpected("status")),
         (Cmd::Open { .. }, _) => Err(unexpected("open")),
         (Cmd::Rename { .. }, _) => Err(unexpected("rename")),
+        (Cmd::Stop { .. }, proto::ReplyData::Stop(st)) => Ok(match format {
+            OutputFormat::Json | OutputFormat::StreamJson => output::json(&st),
+            OutputFormat::Text => format!("stopped {}/{} ({} agent{} ended)", st.project, st.name, st.stopped_agents, if st.stopped_agents == 1 { "" } else { "s" }),
+        }),
+        (Cmd::Stop { .. }, _) => Err(unexpected("stop")),
+        (Cmd::Pin { .. }, proto::ReplyData::Pin(p)) => Ok(match format {
+            OutputFormat::Json | OutputFormat::StreamJson => output::json(&p),
+            OutputFormat::Text => format!("{} {}/{}", if p.pinned { "pinned" } else { "unpinned" }, p.task.project, p.task.name),
+        }),
+        (Cmd::Pin { .. }, _) => Err(unexpected("pin")),
         (Cmd::Group { .. }, proto::ReplyData::Group(g)) => Ok(match format {
             OutputFormat::Json | OutputFormat::StreamJson => output::json(&g),
             OutputFormat::Text => output::group_text(&g),
         }),
         (Cmd::Group { .. }, _) => Err(unexpected("group")),
+        (Cmd::Run { .. }, proto::ReplyData::Run(r)) => Ok(match format {
+            OutputFormat::Json | OutputFormat::StreamJson => output::json(&r),
+            OutputFormat::Text => output::run_text(&r),
+        }),
+        (Cmd::Run { .. }, _) => Err(unexpected("run")),
         (Cmd::Prop { value, .. }, proto::ReplyData::Prop(p)) => Ok(match format {
             OutputFormat::Json | OutputFormat::StreamJson => output::json(&p),
             OutputFormat::Text => output::prop_text(&p, value.is_some()),
@@ -4405,6 +4583,21 @@ pub fn render(cmd: &Cmd, format: OutputFormat, data: proto::ReplyData) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_peer_project_path_goes_as_typed_and_must_be_absolute() {
+        assert_eq!(remote_path("/home/alice/repo").ok(), Some("/home/alice/repo"));
+        assert_eq!(remote_path("~/repo").ok(), Some("~/repo"));
+        assert!(remote_path("repo").is_err());
+        assert!(remote_path("./repo").is_err());
+        // The other machine may be Windows, whatever this one is.
+        for p in [r"C:\src\repo", "C:/src/repo", r"\\nas\share\repo"] {
+            assert_eq!(remote_path(p).ok(), Some(p), "{p}");
+        }
+        assert!(remote_path(r"src\repo").is_err());
+        assert!(remote_path("C:repo").is_err());
+        assert!(remote_path(r"~\repo").is_err(), "the host expands ~/ only");
+    }
 
     #[test]
     fn clap_definition_is_coherent() {
@@ -5275,6 +5468,24 @@ mod tests {
     }
 
     #[test]
+    fn run_flags_and_text() {
+        let bare = Cli::try_parse_from(["termic", "run"]).unwrap();
+        assert!(matches!(&bare.cmd, Cmd::Run { task: None, setup: false, stop: false, status: false, member: None, .. }));
+        let full = Cli::try_parse_from(["termic", "run", "fix-x", "--setup", "--stop", "--member", "api"]).unwrap();
+        assert!(matches!(&full.cmd, Cmd::Run { task: Some(t), setup: true, stop: true, member: Some(m), .. } if t == "fix-x" && m == "api"));
+        // --stop and --status are two different calls.
+        assert!(Cli::try_parse_from(["termic", "run", "--stop", "--status"]).is_err());
+
+        let d = |targets| proto::RunData { task: "web/x".into(), which: "run".into(), targets };
+        assert_eq!(output::run_text(&d(vec![])), "web/x has no run script configured");
+        let t = proto::RunTarget {
+            member: "api".into(), script: "npm run dev".into(), tab_id: Some("t1".into()),
+            running: true, outcome: Some("already_running".into()),
+        };
+        assert_eq!(output::run_text(&d(vec![t])), "web/x (api): run already running, tab t1: npm run dev");
+    }
+
+    #[test]
     fn rename_positional_rules() {
         // One positional is the NAME (task falls back to $TERMIC_TASK_ID
         // then cwd); two are TASK + NAME. allow_missing_positional does
@@ -5301,6 +5512,21 @@ mod tests {
         assert!(Cli::try_parse_from(["termic", "rename"]).is_err());
         // --project only disambiguates an explicit task name.
         assert!(Cli::try_parse_from(["termic", "rename", "new", "--project", "web"]).is_err());
+    }
+
+    #[test]
+    fn pin_parses_and_renders() {
+        let Cmd::Pin { task, off, project } = Cli::try_parse_from(["termic", "pin", "fix-login"]).unwrap().cmd else { panic!("not pin") };
+        assert_eq!((task.as_deref(), off, project), (Some("fix-login"), false, None));
+        let Cmd::Pin { task, off, .. } = Cli::try_parse_from(["termic", "pin", "--off"]).unwrap().cmd else { panic!("not pin") };
+        assert_eq!((task, off), (None, true));
+        assert!(Cli::try_parse_from(["termic", "pin", "--project", "web"]).is_err(), "--project needs a task");
+        let cmd = Cmd::Pin { task: None, off: false, project: None };
+        let data = proto::ReplyData::Pin(proto::PinData {
+            task: proto::TaskSummary { id: "w1".into(), name: "fix-login".into(), project: "web".into(), ..Default::default() },
+            pinned: true,
+        });
+        assert_eq!(render(&cmd, OutputFormat::Text, data).unwrap(), "pinned web/fix-login");
     }
 
     #[test]
@@ -5581,8 +5807,9 @@ mod tests {
     #[test]
     fn peer_subcommands_parse() {
         let cli = Cli::try_parse_from(["termic", "peer", "pair", "192.168.1.20:23620", "4821"]).unwrap();
-        assert!(matches!(&cli.cmd, Cmd::Peer(PeerCmd::Pair { target, code }) if target == "192.168.1.20:23620" && code == "4821"));
-        assert!(Cli::try_parse_from(["termic", "peer", "pair", "laptop"]).is_err(), "pair needs the code");
+        assert!(matches!(&cli.cmd, Cmd::Peer(PeerCmd::Pair { target, code }) if target == "192.168.1.20:23620" && code.as_deref() == Some("4821")));
+        let cli = Cli::try_parse_from(["termic", "peer", "pair", "laptop"]).unwrap();
+        assert!(matches!(&cli.cmd, Cmd::Peer(PeerCmd::Pair { code: None, .. })), "no code: ask it to show one");
         assert!(Cli::try_parse_from(["termic", "peer", "list"]).is_ok());
         assert!(Cli::try_parse_from(["termic", "peer", "unpair", "laptop", "--yes"]).is_ok());
         assert!(Cli::try_parse_from(["termic", "peer", "rename", "laptop", ""]).is_ok(), "empty clears");

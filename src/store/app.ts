@@ -87,7 +87,7 @@ interface View {
    *  and panel state all stay intact while it's open. */
   settingsOpen?: boolean;
   /** When the Settings overlay is open, which section is selected. */
-  settingsTab?: "general" | "tasks" | "notifications" | "sandbox" | "secrets" | "docker" | "cli" | "appearance" | "agents" | "prompts" | "repositories" | "shortcuts" | "profiles" | "sync" | "mcp" | "peers";
+  settingsTab?: "general" | "tasks" | "notifications" | "sandbox" | "secrets" | "docker" | "cli" | "appearance" | "agents" | "prompts" | "repositories" | "shortcuts" | "profiles" | "sync" | "mcp" | "peers" | "remote" | "servers";
   /** When viewing a repository's settings, which project id is active. */
   settingsRepoId?: string;
   /** DOM id to scroll into view + briefly highlight once the settings
@@ -380,6 +380,9 @@ export interface AppState {
   /** Optimistically set a task's YOLO flag in the store. The caller
    *  persists via ipc.taskSetYolo. */
   setTaskYolo: (taskId: string, yolo: boolean) => void;
+  /** Mirror a task's pin (GH #458) after, or just before, `ipc.taskSetPinned`.
+   *  Bails on an unchanged value: `tasks` feeds every sidebar row (bear trap 8). */
+  setTaskPinned: (taskId: string, pinned: boolean) => void;
   /** Mirror a task's recurring schedule (GH #300) after `taskSetSchedule`
    *  landed. Bails on an unchanged record (bear trap 8): `tasks` feeds every
    *  sidebar row. The schedule runner is the only caller. */
@@ -488,6 +491,10 @@ export interface AppState {
    *  `Tab.unread.repeat` and lib/attentionNotify.ts (GH #276). */
   markAttention: (taskId: string, tabId: string, reason: "bell" | "idle" | "exit" | "done" | "attention", message?: string, repeat?: boolean) => void;
   clearAttention: (taskId: string, tabId: string) => void;
+  /** A phone looked at the task (its chat or terminal): what its agents
+   *  finished is read, as a desktop visit reads it, without moving this
+   *  window's active tab. Bails when nothing changes. */
+  markSeenRemotely: (taskId: string) => void;
   /** Per-tab work-progress state. Idempotent — writing the same value is
    *  a no-op so we don't churn React for every OSC 9;4 the agent emits. */
   setWorkState: (taskId: string, tabId: string, state: "idle" | "working" | "done", reason?: string) => void;
@@ -814,6 +821,9 @@ function automaticTabTitle(t: TerminalTab, task: Task | undefined, agents: AppSt
   return agentDisplayName(t.cli, agents);
 }
 
+let loadAllSeq = 0;
+let loadAllLatest: Promise<void> = Promise.resolve();
+
 export const useApp = create<AppState>((set, get) => ({
   projects: [],
   tasks: [],
@@ -859,7 +869,9 @@ export const useApp = create<AppState>((set, get) => ({
         : Object.fromEntries(Object.entries(s.spotlightTaskId).filter(([k]) => k !== projectId)),
     })),
 
-  loadAll: async () => {
+  loadAll: () => {
+    const seq = ++loadAllSeq;
+    return (loadAllLatest = (async () => {
     // Pull projects + tasks + settings (for the agent registry).
     // Agents drive spawn args via spawnArgsForCli, so this list must be
     // fresh whenever the user edits Settings → Agents and immediately
@@ -869,6 +881,10 @@ export const useApp = create<AppState>((set, get) => ({
       ipc.tasksList(),
       ipc.settingsLoad().catch(() => ({ agents: [] } as Partial<import("@/lib/types").Settings>)),
     ]);
+    // Overlapping calls can resolve out of order. A newer one read the disk
+    // later, so landing this older read would put stale tasks back over it;
+    // wait for the newer one instead, so our caller still sees fresh state.
+    if (seq !== loadAllSeq) return loadAllLatest;
     // The disk copy of a main checkout's branch is only rewritten when the
     // task opens, so keep the live one refreshMainCheckoutBranches already
     // read, or every window focus repaints the stale branch for a beat.
@@ -956,6 +972,7 @@ export const useApp = create<AppState>((set, get) => ({
     void import("@/lib/lsp/autoStart")
       .then(m => m.syncAutoStart())
       .catch(() => {});
+    })());
   },
 
   // The hook set is versioned (`SCHEMA_VERSION` in agent_hooks.rs) and the
@@ -2265,6 +2282,11 @@ export const useApp = create<AppState>((set, get) => ({
   setTaskYolo: (taskId, yolo) => set(s => ({
     tasks: s.tasks.map(w => w.id === taskId ? { ...w, yolo } : w),
   })),
+  setTaskPinned: (taskId, pinned) => set(s => {
+    const cur = s.tasks.find(w => w.id === taskId);
+    if (!cur || !!cur.pinned === pinned) return s;
+    return { tasks: s.tasks.map(w => w.id === taskId ? { ...w, pinned: pinned || undefined } : w) };
+  }),
   setTaskSchedule: (taskId, schedule) => set(s => {
     const cur = s.tasks.find(w => w.id === taskId);
     if (!cur || sameSchedule(cur.schedule, schedule)) return s;
@@ -3072,6 +3094,27 @@ export const useApp = create<AppState>((set, get) => ({
         } as Tab
       : t);
     return { tabs: { ...s.tabs, [taskId]: next } };
+  }),
+
+  markSeenRemotely: (taskId) => set(s => {
+    const list = s.tabs[taskId];
+    if (!list) return s;
+    let changed = false;
+    const next = list.map(t => {
+      if (t.type !== "terminal") return t;
+      const patch: Partial<TerminalTab> = {};
+      if (t.workState === "done") {
+        patch.workState = "idle";
+        patch.workProgress = null;
+        patch.workProgressKind = null;
+        patch.workClearedAt = Date.now();
+      }
+      if (unreadClearsOnSight(t.unread)) patch.unread = null;
+      if (!Object.keys(patch).length) return t;
+      changed = true;
+      return { ...t, ...patch };
+    });
+    return changed ? { tabs: { ...s.tabs, [taskId]: next } } : s;
   }),
 
   clearAttention: (taskId, tabId) => set(s => {
