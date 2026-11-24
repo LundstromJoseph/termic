@@ -4,7 +4,7 @@ All notable changes to Termic, newest first. This file is the human-authored
 source of truth: the in-app Update card and the /changelog page on termic.dev
 are generated from it. See the `release` skill for how entries are added.
 
-## [2.0.2] - 2026-11-24
+## [2.0.3] - 2026-11-24
 
 Remote control: your phone, your own servers, and your other computers.
 
@@ -21,7 +21,7 @@ Remote control: your phone, your own servers, and your other computers.
 
 ### Paired computers
 - Pair two computers running Termic and agents on either can start and drive tasks on the other. A paired computer's tasks show in your sidebar under REMOTE, filed as it files them, following your sidebar settings.
-- Open one of its tasks and work in its terminal from here. One screen shows a terminal at a time: the others say it is in use elsewhere, with Continue here to take it back.
+- Open one of its tasks and work in its terminal from here. One screen shows a terminal at a time: the others say which phone or computer has it, with Continue here to take it back.
 - Stop a task from here and it stops there too; Reopen starts it again in its last session.
 - Copy and paste cross over: what an agent copies lands on your clipboard here, and Ctrl+V with an image attaches it to the agent there, as a local paste does. On a server, the image is put on the server for the agent.
 - Its terminal takes your keys as a local one does: Shift+Enter adds a line, ⌘⌫ and ⌘←/⌘→ edit the line, and app shortcuts reach the app.
@@ -32,7 +32,7 @@ Remote control: your phone, your own servers, and your other computers.
 - Settings is reorganised around it: MCP & CLI, Remote control (phones and paired computers) and Servers. Remote is marked experimental, and Settings, Appearance turns the REMOTE section off for anyone who does not use it.
 - `termic pin` (MCP `task_pin`) pins or unpins a task.
 - Caffeinate: the mug is filled while it keeps your computer awake, and "Turn back on when Termic restarts" brings it back after a quit or an update.
-- Sidebar: projects, folders and task groups animate open and shut. The New task button under a project's tasks shows only for a project with none yet.
+- Sidebar: projects, folders and task groups animate open and shut. Its settings in Appearance are grouped by the part of the sidebar they change.
 - The sidebar scrolls without a visible scrollbar.
 - No more "Message queue finished" notice, and archiving from a merged PR's notice no longer adds a second "Archived" one.
 
@@ -43,6 +43,9 @@ Remote control: your phone, your own servers, and your other computers.
 - A task started with a prompt (New task with a prompt, a PR review, a race) comes back in its Claude session after a restart, instead of a fresh one.
 - With two profile windows open, a running task no longer reads as inactive to `termic status` and MCP.
 - Windows and Linux: closing the last window while agents run asks first, instead of the window vanishing and Cancel leaving Termic with no window.
+- A merged pull request in one profile no longer offers to archive its task in another profile's window.
+- The phone no longer shows a message as Queued after the agent has already read it.
+- Linux: fixed one cause of Termic not starting again by itself after an update.
 
 ## [1.25.7] - 2026-11-23
 
