@@ -298,6 +298,7 @@ export default {
     resumeFailedSaid: " {{agent}} said: \"{{why}}\"",
     moreAgentsTip: "More agents than fit here. Widen the window, or switch tabs to see them.",
     elsewhere: "This terminal is in use on another screen.",
+    elsewhereOn: "This terminal is in use on {{name}}.",
     continueHere: "Continue here",
     yoloRestartTitle: "Restart {{agent}} to {{action}} YOLO?",
     yoloEnable: "enable",

@@ -97,6 +97,10 @@ interface Props { task: Task; tab: TerminalTab; active: boolean; }
 // Seconds a finished "Run setup" tab lingers before auto-closing (counter in
 // the "Setup finished." banner; click closes immediately).
 const SETUP_AUTO_CLOSE_S = 5;
+/** Continue here: the overlay lifts once the agent's output has been quiet
+ *  this long after the resize, or after RECLAIM_MAX_MS whatever happens. */
+const RECLAIM_QUIET_MS = 200;
+const RECLAIM_MAX_MS = 1_000;
 
 // How long after an interrupt keystroke the TITLE may end a turn. Wide enough
 // for the agent to tear down and repaint (claude took 40-110ms, measured on
@@ -3538,20 +3542,49 @@ const captureArmedRef = useRef(false);
       else if (!on) overlay.remove();
       if (term.element) term.element.style.display = on ? "none" : "";
     };
+    // Continue here resizes BEHIND the overlay and lifts it once the agent
+    // has redrawn at this size (output quiet for RECLAIM_QUIET_MS, at most
+    // RECLAIM_MAX_MS). Lifted at once, the pane showed the other screen's
+    // frame stretched to this width until the agent's redraw landed.
+    let reclaimTimers: ReturnType<typeof setTimeout>[] = [];
+    let reclaimSub: { dispose(): void } | null = null;
+    const endReclaim = () => {
+      reclaimTimers.forEach(clearTimeout);
+      reclaimTimers = [];
+      reclaimSub?.dispose();
+      reclaimSub = null;
+    };
     const reclaim = () => {
       if (!remoteSized) return;
       remoteSized = false;
-      showElsewhere(false);
+      endReclaim();
+      if (term.element) term.element.style.display = "";
       try { fit.fit(); } catch {}
-      term.refresh(0, term.rows - 1);
-      term.focus();
+      const lift = () => {
+        endReclaim();
+        if (remoteSized) return; // taken again meanwhile
+        showElsewhere(false);
+        term.refresh(0, term.rows - 1);
+        term.focus();
+      };
+      let quiet: ReturnType<typeof setTimeout> | undefined;
+      reclaimSub = term.onWriteParsed(() => {
+        if (quiet) clearTimeout(quiet);
+        quiet = setTimeout(lift, RECLAIM_QUIET_MS);
+        reclaimTimers.push(quiet);
+      });
+      reclaimTimers.push(setTimeout(lift, RECLAIM_MAX_MS));
     };
     overlayBtn.addEventListener("click", reclaim);
-    const unlistenSized = listen<{ ptyId: string; cols: number; rows: number }>("termic://pty-resized", ({ payload }) => {
+    const unlistenSized = listen<{ ptyId: string; cols: number; rows: number; by?: string | null }>("termic://pty-resized", ({ payload }) => {
       if (!payload || payload.ptyId !== ptyRef.current) return;
       const own = fit.proposeDimensions();
       remoteSized = !(own && own.cols === payload.cols && own.rows === payload.rows);
+      overlayText.textContent = payload.by
+        ? i18n.t("task:terminal.elsewhereOn", { name: payload.by })
+        : i18n.t("task:terminal.elsewhere");
       if (term.cols !== payload.cols || term.rows !== payload.rows) term.resize(payload.cols, payload.rows);
+      if (remoteSized) endReclaim();
       showElsewhere(remoteSized);
     });
     const ro = new ResizeObserver((entries) => {
@@ -3573,6 +3606,7 @@ const captureArmedRef = useRef(false);
       cancelled = true;
       ro.disconnect();
       void unlistenSized.then(u => u());
+      endReclaim();
       overlay.remove();
       // This PTY's conversation is over (closed, or restarted into a new one),
       // so its context reading describes nothing any more.

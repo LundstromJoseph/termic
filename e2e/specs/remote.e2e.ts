@@ -280,14 +280,19 @@ describe("Phones and servers", () => {
     await browser.waitUntil(async () => { const v = await pane(); return v.hidden && v.overlay; },
       { timeout: 10_000, timeoutMsg: "this pane did not hide behind the overlay" });
     await snap("terminal-elsewhere.png");
+    // It says who has it, not just "another screen".
+    expect(await browser.execute((id) => document.querySelector(`[data-terminal-host="${id}"] [data-testid="terminal-elsewhere"]`)!.textContent, tab))
+      .toContain("My iPhone");
     // A click or a focus anywhere else does not take it back: two focused
     // screens traded the size on every touch when it did.
     await browser.execute((id) => document.querySelector(`[data-terminal-host="${id}"]`)!.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true })), tab);
     await browser.execute((id) => (document.querySelector(`[data-terminal-host="${id}"] textarea`) as HTMLTextAreaElement | null)?.focus(), tab);
     await browser.pause(400);
     expect(await pane()).toEqual({ hidden: true, overlay: true });
-    // Continue here does, and the terminal is back.
+    // Continue here does, and the terminal is back: drawn at once behind the
+    // overlay, which lifts only after the agent's redraw (no stretched frame).
     await browser.execute((id) => (document.querySelector(`[data-terminal-host="${id}"] [data-testid="terminal-continue-here"]`) as HTMLElement).click(), tab);
+    expect(await pane()).toEqual({ hidden: false, overlay: true });
     await browser.waitUntil(async () => { const v = await pane(); return !v.hidden && !v.overlay; },
       { timeout: 10_000, timeoutMsg: "Continue here did not take the size back" });
     p.close();

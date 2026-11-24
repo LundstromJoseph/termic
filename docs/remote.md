@@ -177,7 +177,12 @@ another screen" with **Continue here**, the only thing that sends
 `term_size` again (`RemoteTerminal`; the phone's `TerminalView` does the
 same). The host's own pane learns of an outside resize from
 `termic://pty-resized` (emitted by the host's `pty_set_size`) and shows
-the same overlay (`TerminalPane`). A viewer learns of a resize from
+the same overlay (`TerminalPane`), naming the screen that took it: the
+event's `by` is the stream client's name (the phone's or computer's),
+`termic attach` for the CLI, absent for a size handed back. Its Continue
+here resizes behind the overlay and lifts it once the agent's output has
+been quiet 200ms (1s at most): lifted at once, the pane showed the other
+screen's frame stretched to its own width until the agent redrew. A viewer learns of a resize from
 `term_resize`, which the host's forwarder sends when it sees a new PTY
 size; it looks per output chunk, so every resize also sends the PTY's
 watchers an empty chunk (`PtyFeed::nudge`). Without it, a phone watching

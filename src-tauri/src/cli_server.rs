@@ -540,7 +540,7 @@ fn run_attach_session(
                     }
                     "resize" => {
                         if let (Some(rows), Some(cols)) = (frame.rows, frame.cols) {
-                            let _ = host.pty_set_size(&pty_id, rows, cols);
+                            let _ = host.pty_set_size(&pty_id, rows, cols, Some("termic attach"));
                         }
                     }
                     "detach" => break,
@@ -723,8 +723,10 @@ pub(crate) trait CliHost: Send + Sync {
     fn pty_size(&self, _pty_id: &str) -> Option<(u16, u16)> {
         None
     }
-    /// Resize a PTY (the attach `resize` path, opt-in client-side).
-    fn pty_set_size(&self, pty_id: &str, rows: u16, cols: u16) -> Result<(), String>;
+    /// Resize a PTY (the attach `resize` path, opt-in client-side). `by` names
+    /// the screen that took the size (a phone's or computer's name), shown on
+    /// the pane it took it from; None for a size handed back.
+    fn pty_set_size(&self, pty_id: &str, rows: u16, cols: u16, by: Option<&str>) -> Result<(), String>;
     /// Put a PNG on this computer's clipboard (a paired computer's paste).
     fn set_clipboard_image(&self, _png: &[u8]) -> Result<(), String> {
         Err("this host has no clipboard".into())
@@ -4759,13 +4761,13 @@ impl CliHost for TauriHost {
     fn pty_size(&self, pty_id: &str) -> Option<(u16, u16)> {
         crate::pty_size_inner(&self.app.state::<crate::PtyManager>(), pty_id)
     }
-    fn pty_set_size(&self, pty_id: &str, rows: u16, cols: u16) -> Result<(), String> {
+    fn pty_set_size(&self, pty_id: &str, rows: u16, cols: u16, by: Option<&str>) -> Result<(), String> {
         crate::pty_resize_inner(&self.app.state::<crate::PtyManager>(), pty_id, rows, cols)?;
         // Sized from outside this window (a phone, another computer, `termic
         // attach`): the pane showing this PTY scales its drawing to the new
         // size until someone works in it here, which takes the size back.
         use tauri::Emitter;
-        let _ = self.app.emit("termic://pty-resized", serde_json::json!({ "ptyId": pty_id, "cols": cols, "rows": rows }));
+        let _ = self.app.emit("termic://pty-resized", serde_json::json!({ "ptyId": pty_id, "cols": cols, "rows": rows, "by": by }));
         Ok(())
     }
     fn notify_detach(&self, task_id: &str, reason: &str) {
@@ -6849,7 +6851,7 @@ pub(crate) mod test_support {
         fn note_remote_interrupt(&self, task_id: &str, pty_id: &str) {
             self.remote_interrupts.lock().unwrap().push((task_id.to_string(), pty_id.to_string()));
         }
-        fn pty_set_size(&self, pty_id: &str, rows: u16, cols: u16) -> Result<(), String> {
+        fn pty_set_size(&self, pty_id: &str, rows: u16, cols: u16, _by: Option<&str>) -> Result<(), String> {
             self.resizes.lock().unwrap().push((pty_id.to_string(), rows, cols));
             Ok(())
         }

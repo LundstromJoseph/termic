@@ -273,7 +273,7 @@ fn handle(s: &Arc<Session>, msg: ClientMsg) {
                 if t.restore.is_none() {
                     t.restore = s.host.pty_size(&t.pty_id);
                 }
-                if s.host.pty_set_size(&t.pty_id, rows, cols).is_ok() {
+                if s.host.pty_set_size(&t.pty_id, rows, cols, Some(&s.client.name)).is_ok() {
                     // Say so now: the forwarder notices a new size only on the
                     // next output, and an idle agent prints none.
                     send(s, ServerMsg::TermResize { cols, rows });
@@ -487,7 +487,7 @@ fn open_term_or_wake(s: &Arc<Session>, task: &str, tab: Option<&str>, wake: bool
         Ok(a) => a,
         Err(e) => {
             if let Some((rows, cols)) = keep {
-                let _ = s.host.pty_set_size(&pty_id, rows, cols);
+                let _ = s.host.pty_set_size(&pty_id, rows, cols, None);
             }
             send(s, ServerMsg::TermClosed { reason: e });
             return;
@@ -505,7 +505,7 @@ fn close_term(s: &Session) {
     if let Some(t) = s.term.lock().unwrap().take() {
         let _ = t.tx.try_send(crate::PtyTapMsg::Detach(CLOSE_TAP.into()));
         if let Some((rows, cols)) = t.restore {
-            let _ = s.host.pty_set_size(&t.pty_id, rows, cols);
+            let _ = s.host.pty_set_size(&t.pty_id, rows, cols, None);
         }
     }
 }
