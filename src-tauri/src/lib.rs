@@ -29402,6 +29402,7 @@ pub fn run() {
                 // tells it to wait for us instead of deferring to us.
                 if *code == Some(tauri::RESTART_EXIT_CODE) {
                     std::env::set_var(cli_server::RELAUNCH_ENV, "1");
+                    cli_server::release_socket_for_restart();
                 }
             }
             // Dock-icon click on a windowless app (applicationShouldHandle-

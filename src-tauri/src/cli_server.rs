@@ -171,6 +171,26 @@ pub fn another_instance_running(deep_link: Option<&str>) -> bool {
     raise_owner(deep_link)
 }
 
+/// On a restart, stop being findable before the next process looks for us.
+///
+/// Unlinking the socket file makes every later connect fail, so the relaunched
+/// process finds no owner no matter how long this one takes to exit (a GTK
+/// teardown can outlast the 15s wait below, and then the new process deferred
+/// to a dying one and quit). Our listener keeps its now-unreachable inode
+/// until we are gone; the new process binds a fresh file.
+pub fn release_socket_for_restart() {
+    if let Ok(dir) = crate::global_dir() {
+        release_socket_at(&dir.join(proto::SOCKET_FILE));
+    }
+}
+
+fn release_socket_at(sock: &Path) {
+    #[cfg(unix)]
+    let _ = std::fs::remove_file(sock);
+    #[cfg(not(unix))]
+    let _ = sock;
+}
+
 /// Set by the exiting process when its exit is a restart, so the process it
 /// spawns knows the instance holding the socket is on its way out.
 pub const RELAUNCH_ENV: &str = "TERMIC_RELAUNCHED";
@@ -9376,6 +9396,16 @@ mod tests {
         let dynamic: Arc<dyn CliHost> = arc.clone();
         std::thread::spawn(move || serve_listener(listener, dynamic));
         (sock, dir, arc)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_restarting_owner_stops_answering_once_it_releases_its_socket() {
+        let (sock, _guard) = spawn_server(StubHost::default());
+        assert!(live_owner(&sock).is_some(), "the owner answers before the restart");
+        release_socket_at(&sock);
+        // Still running (its listener thread is alive), yet nobody can find it.
+        assert!(live_owner(&sock).is_none());
     }
 
     // The ordering `quit` depends on: the client must GET its reply, and only
