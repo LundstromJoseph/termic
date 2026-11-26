@@ -70,7 +70,6 @@ import { SudoTouchIdBanner } from "@/components/task/SudoTouchIdBanner";
 import { TerminalFindBar } from "@/components/task/TerminalFindBar";
 import { isTerminalFindCombo } from "@/lib/terminalFind";
 import * as ipc from "@/lib/ipc";
-import { wrapWithDotEnv, loadTaskDotEnv } from "@/lib/dotenv";
 import { maybeRebuildDockerImageForLaunch } from "@/lib/dockerDailyRebuild";
 import { commandShell, loginShell, loginShellArgs } from "@/lib/loginShell";
 import { usePrefs, useResolvedThemeFull, currentTerminalStack, currentTerminalTheme, currentColorFgBg, currentMinimumContrastRatio } from "@/store/prefs";
@@ -2832,10 +2831,6 @@ const captureArmedRef = useRef(false);
         let launchCmd = isCustom && tab.command ? tab.command
           : isRegistryTerminal ? terminalLaunchCommand(tab.cli, task)
           : undefined;
-        if (launchCmd) {
-          const cliOverrides = isAgent || isRegistryTerminal ? envForCli(tab.cli) : undefined;
-          launchCmd = wrapWithDotEnv(launchCmd, cliOverrides);
-        }
         // Spotlight: the host Run tab executes at the REPO ROOT while this
         // task is spotlighted (the root serves the synced changes).
         // Decided at spawn time, not tab-creation time, so restarting after
@@ -2897,8 +2892,6 @@ const captureArmedRef = useRef(false);
         // away from while this awaited.
         if (isAgent) await maybeRebuildDockerImageForLaunch(task);
         if (cancelled) return;
-        const taskDotEnv = !isAgent ? await loadTaskDotEnv(task?.path) : {};
-        if (cancelled) return;
         const uncaged = isShell || isRegistryTerminal || !!(tab as TerminalTab).runTab;
         // Uncaged spawns only: an agent may run in Docker, where the root is
         // not mounted and the var would name a missing path.
@@ -2910,12 +2903,11 @@ const captureArmedRef = useRef(false);
           cmd: spawnCmd,
           args: spawnArgs,
           // Order matters: base TERMIC_*/COLORFGBG block first, then
-          // task .env/.env.local variables, then the user's per-agent
-          // env block (Settings → Agents). The per-agent values win on
-          // key collision so a power user can override e.g. COLORFGBG or
-          // even TERMIC_PORT if they really want to. Rust merges this
-          // overlay AFTER the inherited parent env, so anything set
-          // here always trumps a system env.
+          // the user's per-agent env block (Settings → Agents). The
+          // per-agent values win on key collision so a power user can
+          // override e.g. COLORFGBG or even TERMIC_PORT if they really
+          // want to. Rust merges this overlay AFTER the inherited
+          // parent env, so anything set here always trumps a system env.
           env: {
             TERMIC_PORT: String(task.port),
             ...(projectRoot ? { TERMIC_PROJECT_ROOT: projectRoot } : {}),
@@ -2933,7 +2925,6 @@ const captureArmedRef = useRef(false);
             // at spawn, and subscribing would respawn live terminals on a
             // preference toggle. Rust turns it into the zsh startup shim.
             TERMIC_SHARE_HISTORY: usePrefs.getState().shareShellHistory ? "1" : "0",
-            ...taskDotEnv,
             // Registry entries (agents AND terminal-kind) carry a
             // user-configured env block; sentinel shell/custom tabs don't.
             ...(isAgent || isRegistryTerminal ? envForCli(tab.cli) : {}),

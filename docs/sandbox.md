@@ -534,7 +534,7 @@ caged-only vars out.
 **What always wins.** `Agent.pass_env` (the user passed that var to that
 agent) and the agent's own login var (`env_guard::own_login`, by base agent
 id, so a clone inherits it: `ANTHROPIC_API_KEY` for claude, `OPENAI_API_KEY`
-for codex, ...). The per-spawn overlay (`Agent.env`, a task's `.env`) is
+for codex, ...). The per-spawn overlay (`Agent.env`) is
 applied after the inherited env, so a value typed there arrives regardless.
 The broker's own `env -u` in `wrap_command` runs after all of this, so a
 brokered spawn never gets the real GitHub token even when it is passed
