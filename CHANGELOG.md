@@ -4,7 +4,50 @@ All notable changes to Termic, newest first. This file is the human-authored
 source of truth: the in-app Update card and the /changelog page on termic.dev
 are generated from it. See the `release` skill for how entries are added.
 
-## [2.0.3] - 2026-11-24
+## [2.1.2] - 2026-11-26
+
+Open files on your forge, answer waiting agents from a floating panel.
+
+### Features
+- Open or copy a file's link on GitHub, GitLab or Azure DevOps from any file menu or editor tab, including a permalink to the selected lines ([#467](https://github.com/simion/termic/issues/467)).
+- A needs-you panel: an optional window that floats over your other apps while an agent waits for you, with its question and a button per answer. Turn it on in Settings, Notifications ([#468](https://github.com/simion/termic/issues/468)).
+- An agent's reply to a task it started goes back to the tab that started it, in the CLI, MCP and split panes ([#470](https://github.com/simion/termic/pull/470)).
+- Links that lead out of a task open in the editor, read-only unless you granted that folder ([#469](https://github.com/simion/termic/pull/469)).
+- `termic run --script` and MCP `task_run` start a project's named run commands, not only its main run script.
+- Other computers are listed at the end of the project list, and clicking a switched-off computer connects it.
+- Picking a task in the sidebar takes its terminal back from your phone or another computer, with no Continue here to click.
+
+### Bug fixes
+- On Linux, a lost Super key release no longer turns every letter into a shortcut and every terminal deaf until you switch windows.
+- On macOS, installing an update no longer leaves Termic listed as "Running in Background" after you quit it.
+- The update notice after an update is easier to spot, and drops the release's age.
+- A server task started from the phone opens its terminal on the phone, instead of saying no agent is running there.
+- A server task no longer reads as Working after its agent has finished.
+
+## [2.0.12] - 2026-11-26
+
+Fixes for remote control, paired computers and the phone app.
+
+### Bug fixes
+- A paired computer's terminal works like a local one: links open on Cmd+click, and selecting text in its agent copies it here.
+- Paired computers' tasks and groups have the local right-click menus, and each remote project has its own New task button.
+- Pairing connects one way: the computer that asked connects, the other stays switched off until you turn it on. Drag paired computers to reorder them.
+- A paired computer's task waiting on a subagent or background shell shows the waiting ring, not a spinner.
+- A PR whose checks are still running no longer shows green in the sidebar.
+- The phone app can show what a tool call did, for Claude, Codex and Antigravity tasks: an edit's change, or a command's output.
+- The phone app no longer shows Claude's notes to itself (the summary after a compaction, skill text) as your messages.
+- Profile windows keep their window buttons in place after a rename.
+- A patch update shows as one quiet line with its version and age, instead of repeating the release's card.
+- Other computers live in a REMOTE drawer above the sidebar's footer: each computer's projects nest under it, idle ones in their own Inactive projects, and offline computers gather in one line. REMOTE has its own display options, and folds open and close with an animation.
+- Adding a project on a server uses the same Add project dialog, with the server's own repos folder, and a server project's New task button opens New task directly.
+- A paired computer's sidebar is folded the way it is on that computer.
+- An agent asking a question mid-turn shows as waiting, on the phone and in `termic list` and `termic wait`, instead of working.
+- The phone app shows which tool call is still running, keeps the working timer across reconnects, and no longer shows a subagent's report or a long pasted message as your own.
+- The Docker sandbox image builds even when an optional agent's download is slow.
+- REMOTE's New task option controls each project's New task row, the connect switch is back on each computer's row, and only unreachable computers gather under offline.
+- Closing the update card hides that version until the next launch, instead of for good, and the card no longer covers the end of the project list.
+
+## [2.0.5] - 2026-11-24
 
 Remote control: your phone, your own servers, and your other computers.
 
@@ -46,6 +89,9 @@ Remote control: your phone, your own servers, and your other computers.
 - A merged pull request in one profile no longer offers to archive its task in another profile's window.
 - The phone no longer shows a message as Queued after the agent has already read it.
 - Linux: fixed one cause of Termic not starting again by itself after an update.
+- Opening a task from a paired computer marks it read here, as opening it from your phone does.
+- The phone no longer shows every finished task as finished "now" after it reconnects.
+- A paired computer's terminal draws like a local one: an agent's tables and boxes join up, and images it shows appear.
 
 ## [1.25.7] - 2026-11-23
 

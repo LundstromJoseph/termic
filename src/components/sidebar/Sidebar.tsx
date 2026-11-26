@@ -1,6 +1,7 @@
 // Left sidebar: traffic-light spacer, toggle, primary nav, projects tree, footer.
 // Two layout flavors: full (220px) vs compact (56px, icon-only with tooltips).
 
+import { claimTerminal } from "@/lib/claimTerminal";
 import { ThemePicker } from "@/components/ThemePicker";
 import { CaffeinateControl } from "./CaffeinateControl";
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type FocusEvent as ReactFocusEvent } from "react";
@@ -19,7 +20,7 @@ import { stopRemoteAgent } from "@/components/remote/RemoteTaskView";
 import { LayoutGrid, History, Columns3, CalendarClock, ListTodo, FolderPlus, Settings, Plus, MoreHorizontal, Pin, PinOff, Archive, Layers, Moon, Cog, MoreVertical, GitBranch, GitBranchPlus, FolderGit2, ChevronRight, ChevronDown, Bug, Mail, Zap, X, Pencil, Copy, ChevronsDownUp, ChevronsUpDown, Check, AudioWaveform, Radio, SquareChevronRight, CircleStop, Trash2, Folder, FolderMinus, FolderOpen, Megaphone, Keyboard, Activity, Waypoints, Square, Play, GitPullRequest, SlidersHorizontal, CircleDot } from "lucide-react";
 import { DropdownRoot, DropdownTrigger, DropdownMenu, DropdownItem, DropdownSeparator, DropdownLabel, DropdownSub, DropdownSubTrigger, DropdownSubContent } from "@/components/ui/Dropdown";
 import { ContextMenuRoot, ContextMenuTrigger, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuLabel, ContextMenuSub, ContextMenuSubTrigger, ContextMenuSubContent } from "@/components/ui/ContextMenu";
-import { ProjectActionsMenuItems } from "./ProjectActionsMenuItems";
+import { ProjectActionsMenuItems, ProjectNewTaskRoot } from "./ProjectActionsMenuItems";
 import { NewTabMenuItems } from "@/components/task/NewTabMenuItems";
 import { newScratchTab, openOrCreateScopedScratchTab } from "@/lib/scratchTabs";
 import { UpdateCard } from "./UpdateCard";
@@ -119,6 +120,15 @@ export function Sidebar({ compact: compactProp }: { compact?: boolean } = {}) {
   // it FLIPS, so scrolling costs no re-render of the sidebar per frame.
   const projectsScrollRef = useRef<HTMLDivElement | null>(null);
   const [moreBelow, setMoreBelow] = useState(false);
+  // The floating update card's height, padded under the project list.
+  const [updateSlot, setUpdateSlot] = useState<HTMLDivElement | null>(null);
+  const [updateH, setUpdateH] = useState(0);
+  useEffect(() => {
+    if (!updateSlot) return;
+    const ro = new ResizeObserver(() => setUpdateH(updateSlot.offsetHeight));
+    ro.observe(updateSlot);
+    return () => ro.disconnect();
+  }, [updateSlot]);
   useEffect(() => {
     const el = projectsScrollRef.current;
     if (!el || !compact) { setMoreBelow(false); return; }
@@ -197,6 +207,12 @@ export function Sidebar({ compact: compactProp }: { compact?: boolean } = {}) {
   const showTodos = usePrefs(s => s.showTodos);
   const scheduledNav = usePrefs(s => s.scheduledNav);
   const newTaskButtonMode = usePrefs(s => s.newTaskButton);
+  const setNewTaskButton = usePrefs(s => s.setNewTaskButton);
+  // The New task row's labels are the Settings page's (same pref).
+  const { t: tSettings } = useTranslation("settings");
+  // A server project sits in REMOTE, whose own display menu says whether its
+  // New task row shows (RemoteMachines.tsx RemoteDisplayMenu).
+  const remoteNewTask = usePrefs(s => s.remoteDisplay.newTask);
   // A boolean out of the selector, so a task write that leaves the answer
   // alone re-renders nothing here.
   const hasSchedule = useApp(s => s.tasks.some(x => !!x.schedule && !x.archived));
@@ -1305,10 +1321,24 @@ export function Sidebar({ compact: compactProp }: { compact?: boolean } = {}) {
 
       {/* Projects section */}
       <div className="relative flex min-h-0 flex-1 flex-col">
+      {/* The project list and the update card floating over its end. The
+          card floats (it never pushes the list or the REMOTE drawer below
+          it), anchored to the list's bottom edge, which is the drawer's top,
+          so it covers neither the drawer nor the footer. Renders nothing in
+          compact mode or when there's no pending update / unseen release. */}
+      <div className="relative flex min-h-0 flex-1 flex-col">
+      <div className="pointer-events-none absolute inset-x-0 bottom-0 z-20">
+        <div ref={setUpdateSlot} className="pointer-events-auto">
+          <UpdateCard />
+        </div>
+      </div>
       <div
         ref={projectsScrollRef}
         // Scrolls (wheel, trackpad, keyboard) with no visible bar, compact or not.
         className={cn("no-scrollbar relative flex-1 overflow-y-auto min-h-0", compact ? "px-1.5 py-1.5" : "px-2 py-2")}
+        // Room under the last row for the floating update card, so the end of
+        // the list scrolls out from under it instead of hiding behind it.
+        style={updateH ? { paddingBottom: updateH + 8 } : undefined}
       >
         {/* Lines to the hovered task's parent and the tasks it spawned. The
             icon rail has no room for them. */}
@@ -1428,6 +1458,26 @@ export function Sidebar({ compact: compactProp }: { compact?: boolean } = {}) {
                     ))}
                   </DropdownSubContent>
                 </DropdownSub>
+                {/* The New task row under a project's tasks, as REMOTE's display
+                    menu has it for remote projects. Mirrored in Settings >
+                    Appearance > Sidebar, which writes the same pref. */}
+                <DropdownSub>
+                  <DropdownSubTrigger data-testid="sidebar-new-task-button" className="justify-between">
+                    <span>{tSettings("newTaskButton.label")}</span>
+                    <span className="flex items-center gap-2 text-[var(--color-fg-faint)]">
+                      {tSettings(`newTaskButton.${newTaskButtonMode}`)}
+                      <ChevronRight className="h-3.5 w-3.5 shrink-0" />
+                    </span>
+                  </DropdownSubTrigger>
+                  <DropdownSubContent>
+                    {(["empty", "auto", "always"] as const).map(m => (
+                      <DropdownItem key={m} data-testid={`sidebar-new-task-button-${m}`} onSelect={e => { e.preventDefault(); setNewTaskButton(m); }}>
+                        <span className="flex w-4 justify-center">{newTaskButtonMode === m && <Check className="h-3.5 w-3.5" />}</span>
+                        <span className="flex-1">{tSettings(`newTaskButton.${m}`)}</span>
+                      </DropdownItem>
+                    ))}
+                  </DropdownSubContent>
+                </DropdownSub>
                 {/* The branch text, a separate choice from the glyph above.
                     Mirrored in Settings > Appearance > Sidebar. */}
                 <DropdownSub>
@@ -1497,7 +1547,7 @@ export function Sidebar({ compact: compactProp }: { compact?: boolean } = {}) {
             )}
             {/* The ONE Add project button (GH #280 removed the footer copy):
                 it belongs next to the list it acts on. */}
-            <Tip content={t("addProjectTip")}><Button size="icon" variant="icon" data-testid="sidebar-add-project" data-guide="add-project" onClick={openNewProject}>
+            <Tip content={t("addProjectTip")}><Button size="icon" variant="icon" data-testid="sidebar-add-project" data-guide="add-project" onClick={() => openNewProject()}>
               <FolderPlus className={iconSize(compact)} /></Button></Tip>
           </div>
         </div>
@@ -1559,8 +1609,9 @@ export function Sidebar({ compact: compactProp }: { compact?: boolean } = {}) {
             // buttons for one menu one row apart was noise. Ignores the armed
             // inline row on purpose, so the header `+` does not change while
             // a name is being typed.
-            const bottomNewTask = !collapsed && !compact
-              && newTaskButtonShown(newTaskButtonMode, taskList.length, projects.length);
+            const bottomNewTask = !collapsed && !compact && (p.server
+              ? remoteNewTask !== "never"
+              : newTaskButtonShown(newTaskButtonMode, taskList.length, projects.length));
             // Only beside the quiet `+` under tasks. An empty project's dashed
             // "New task" box is its own thing, and its header `+` stays as it
             // always was (a hover-only one there also left e2e, which drives
@@ -1744,7 +1795,8 @@ export function Sidebar({ compact: compactProp }: { compact?: boolean } = {}) {
                           {/* Hover-only while the button under the tasks shows
                               (bottomNewTask): one always-visible `+` per project, and the
                               header's still a hover away for a long list. */}
-                          <DropdownRoot
+                          <ProjectNewTaskRoot
+                            projectId={p.id}
                             onOpenChange={(o) => setMenuOpenProjectId(o ? p.id : null)}
                           >
                             <Tip content={t("newTaskForProjectTip")}>
@@ -1823,7 +1875,7 @@ export function Sidebar({ compact: compactProp }: { compact?: boolean } = {}) {
                                 }}
                               />
                             </DropdownMenu>
-                          </DropdownRoot>
+                          </ProjectNewTaskRoot>
                           <ProjectFilterToggle
                             projectId={p.id}
                             active={filterOn}
@@ -2191,7 +2243,7 @@ export function Sidebar({ compact: compactProp }: { compact?: boolean } = {}) {
                     className="ml-3 mr-1 mb-px"
                     onClick={e => e.stopPropagation()}
                   >
-                    <DropdownRoot>
+                    <ProjectNewTaskRoot projectId={p.id}>
                       <DropdownTrigger asChild>
                         <button
                           data-testid={`project-empty-new-task-${p.id}`}
@@ -2232,7 +2284,7 @@ export function Sidebar({ compact: compactProp }: { compact?: boolean } = {}) {
                                 }}
                               />
                       </DropdownMenu>
-                    </DropdownRoot>
+                    </ProjectNewTaskRoot>
                   </div>
                 )}
 
@@ -2501,10 +2553,12 @@ export function Sidebar({ compact: compactProp }: { compact?: boolean } = {}) {
               {/* data-inactive-fold marks this as a separate drag domain:
                   rows here are ungrouped inactive projects, so drags across
                   the fold reorder only and never touch group labels. */}
-              {!queryOn && hideInactiveProjects && showInactive && (
-                <div data-inactive-fold className="flex flex-col gap-0.5">
-                  {inactiveProjects.map(renderProject)}
-                </div>
+              {!queryOn && hideInactiveProjects && (
+                <Expand open={showInactive}>
+                  <div data-inactive-fold className="flex flex-col gap-0.5">
+                    {inactiveProjects.map(renderProject)}
+                  </div>
+                </Expand>
               )}
               {/* What the filter took away, said once at the bottom instead
                   of as a row of empty project headers. */}
@@ -2535,11 +2589,18 @@ export function Sidebar({ compact: compactProp }: { compact?: boolean } = {}) {
                   )}
                 </div>
               )}
-              {!compact && <RemoteSidebarSection projects={activeProjects.filter(p => !!p.server)} renderProject={renderProject} />}
+              {/* Other computers, inline at the end of the list: local work
+                  keeps the top, and they scroll with it. */}
+              {!compact && (
+                <div data-testid="remote-inline" className="mt-4 empty:hidden">
+                  <RemoteSidebarSection projects={projects.filter(p => !!p.server)} renderProject={renderProject} isActive={projectIsActive} />
+                </div>
+              )}
             </>
           );
           })()}
         </div>
+      </div>
       </div>
         {/* The compact rail scrolls with no visible bar (a 10px bar is a sixth
             of a 56px rail), so the fade is what says there is more below. */}
@@ -2559,14 +2620,6 @@ export function Sidebar({ compact: compactProp }: { compact?: boolean } = {}) {
           time, and it would silently drift the moment either bar changed
           height. `bottom-full` is the same answer in both states. */}
       <div className="relative">
-        {/* UpdateCard floats above the bottom stack so it stays visible
-            regardless of scroll position. Renders nothing in compact mode or
-            when there's no pending update / unseen release. */}
-        <div className="pointer-events-none absolute inset-x-0 bottom-full z-20">
-          <div className="pointer-events-auto">
-            <UpdateCard />
-          </div>
-        </div>
 
         {/* The profile indicator, above the footer and below the project
             list. Renders nothing until a profile exists. */}
@@ -3361,6 +3414,8 @@ function TaskRow({ w, compact, dragging = false, dragTy = 0, onDragPointerDown, 
           // The click that trails a drop is not a selection.
           if (clickSuppressed?.current) { clickSuppressed.current = false; return; }
           setActive(w.id);
+          // Picked here, so used here: no "Continue here" to click.
+          claimTerminal(w.id);
           // Leave a paired computer's task open over the main area. Its own
           // close rule (RemoteGlobal) fires on a CHANGE of active task, so
           // clicking the task that was already active underneath did nothing.
@@ -3936,7 +3991,7 @@ function TaskRow({ w, compact, dragging = false, dragTy = 0, onDragPointerDown, 
       </div>
 
       {/* Tab children — terminal tabs only; edit/diff are transient file views */}
-      {!collapsed && terminalTabs.map(tab => {
+      <Expand open={!collapsed}>{terminalTabs.map(tab => {
         const isTabActive = isActive && tab.id === activeTabId;
         const isTabHot = isTabActive;
         const showBell    = attentionIndicator && tab.unread?.reason === "attention";
@@ -3975,6 +4030,7 @@ function TaskRow({ w, compact, dragging = false, dragTy = 0, onDragPointerDown, 
               // as seen, which must be this row's tab, not the one the task
               // last showed (a manual unread mark on that one would go).
               setActiveTabId(w.id, tab.id);
+              claimTerminal(w.id);
               setActive(w.id);
             }}
             onDoubleClick={(e) => {
@@ -4190,7 +4246,7 @@ function TaskRow({ w, compact, dragging = false, dragTy = 0, onDragPointerDown, 
             )}
           </div>
         );
-      })}
+      })}</Expand>
     </div>
   );
 }

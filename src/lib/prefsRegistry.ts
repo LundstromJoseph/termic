@@ -95,6 +95,7 @@ export const PREF_KEYS: readonly PrefKey[] = [
 
   // ── Notifications, indicators, confirm-before prompts ──
   { key: "desktopNotifications", scoped: false, class: "sync" },
+  { key: "attentionPanel", scoped: false, class: "sync" },
   { key: "mutedNotices", scoped: false, class: "sync" },
   { key: "completionSound", scoped: false, class: "sync" },
   { key: "completionSoundId", scoped: false, class: "sync" },
@@ -161,6 +162,7 @@ export const PREF_KEYS: readonly PrefKey[] = [
   { key: "showTodos", scoped: true, class: "sync" },
   { key: "scheduledNav", scoped: true, class: "sync" },
   { key: "newTaskButton", scoped: true, class: "sync" },
+  { key: "remoteDisplay", scoped: true, class: "sync" },
   { key: "launcherVisibility", scoped: true, class: "sync" },
   { key: "taskLocationIcon", scoped: true, class: "sync" },
   { key: "taskPrBadge", scoped: true, class: "sync" },
@@ -187,6 +189,7 @@ export const PREF_KEYS: readonly PrefKey[] = [
   { key: "sidebarWidth", scoped: false, class: "local", reason: "panel size" },
   { key: "termic.remoteFolded", scoped: false, class: "local", reason: "collapse state of other machines' sidebar sections, which are per machine" },
   { key: "termic.remoteHiddenProfiles", scoped: false, class: "local", reason: "which of a paired computer's profiles its sidebar section shows; keyed by that machine" },
+  { key: "termic.remoteMachineOrder", scoped: false, class: "local", reason: "the order paired computers were dragged into in the sidebar; machine ids" },
 
   // ── Task view layout ──
   { key: "rightPanelHidden", scoped: false, class: "local", reason: "collapse state" },
@@ -216,7 +219,7 @@ export const PREF_KEYS: readonly PrefKey[] = [
   { key: "reviewPrLast", scoped: false, class: "local", reason: "the last-used choices of a control (Review a PR)" },
 
   // ── App install state ──
-  { key: "updateDismissedVersion", scoped: false, class: "local", reason: "about the build installed here" },
+  { key: "updateDismissedVersion", scoped: false, class: "local", reason: "only removed at startup: an older build stored update dismissals here" },
   { key: "updateLastSeenVersion", scoped: false, class: "local", reason: "about the build installed here" },
   { key: "desktopEntryPrompted", scoped: false, class: "local", reason: "whether this machine was asked to install a desktop entry" },
 

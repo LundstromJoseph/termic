@@ -619,7 +619,11 @@ without being told. The CLI reads
 `$TERMIC_TASK_ID` itself, so an agent gets grouping without being told
 about it; `--no-group` opts out. MCP gets the same id from the
 `X-Termic-Task` header the installed headers helper sends from the
-agent's environment, so its `task_new` groups the same way (an explicit
+agent's environment (alongside `X-Termic-Tab` from `$TERMIC_TAB_ID` to record
+the initiating tab for child replies; on macOS/Linux, Settings > MCP detects
+older inline helpers without `X-Termic-Tab` via `claude_needs_update` /
+`codex_needs_update` so users know to re-add and restart running sessions), so
+its `task_new` groups the same way (an explicit
 `parentTask` overrides it). A worker that orchestrates in turn adds to
 the ROOT group: groups are flat on purpose, since a tree in a 260px
 sidebar is unreadable and "these belong to one job" is the question.
@@ -1778,6 +1782,46 @@ Theme comes from importing `@/store/prefs` (the module applies the persisted pal
 Prompts (⌥⌘P, the searchable palette over the same list) and the right-panel toggle (⌥⌘B) get the same treatment through the local `tipWithKey(text, id)` helper in `UnifiedBar.tsx`, which appends the live glyphs or nothing. Wrap the tooltip OUTSIDE a `DropdownTrigger asChild` (`<Tip><DropdownTrigger asChild><Button/></DropdownTrigger></Tip>`), and give that menu `onCloseAutoFocus={e => e.preventDefault()}` or the focus snapping back to the trigger re-fires the tooltip and leaves it stuck open.
 
 The palette button toggles on `pointerdown`, not `click`, and that is load-bearing: the palette is a non-modal Radix dialog whose dismissable layer closes it on document pointerdown, so a click handler reading `commandPaletteOpen` always sees `false` and reopens what the user just dismissed. `onClick` remains as the keyboard path (Enter / Space fire no pointer event) and no-ops when pointerdown already handled the press.
+
+## The needs-you panel (GH #468)
+
+A small always-on-top window (`attention.html`, its own Vite entry like
+Activity, and its own capability `capabilities/attention.json`, without
+which it could not `listen`) that lists every task waiting on you, each
+with the question its agent is asking and a button per answer. Off by
+default: Settings, Notifications, Needs-you panel (`attentionPanel` pref).
+
+- The MAIN window decides everything (`hooks/useAttentionPanel.ts`): the
+  list is the sidebar's "needs you" rule (`lib/attentionPanel.ts`,
+  `aggregateTabsState` = waiting), sent with `emitTo("attention", ...)`
+  only when it changes, and `attention_window` shows the panel only while
+  the list is non-empty. Nothing polls while nothing waits.
+- Shown without taking focus: macOS `orderFrontRegardless`, never
+  `show()`, which activates the window and pulls Termic up.
+- Questions are read off each agent's screen in Rust
+  (`attention_question`, the screen reader a phone's question comes
+  from), re-read every 1.5 s while the panel is up. An answer
+  (`attention_answer`) is bound to the question id and refused as stale
+  once the screen moved on. Options that only open the agent's text box
+  ("Type something") are not offered; Open brings the task up instead.
+- After an answer the panel tells the main window, which clears the
+  tab's attention as typing the answer would: the keys went to the PTY
+  from Rust, so no keystroke in the terminal did it.
+- The root window owns it; a profile window's tasks are not listed.
+
+## A file on its forge (GH #467)
+
+Every path menu built on `CopyPathItems` (file tree, Git panel, diff
+header, breadcrumb) and an editor tab's menu (`TabContextMenu`'s
+`filePath`) get a submenu named for the forge: GitHub, GitLab or Azure
+DevOps (`forge::provider_for_remote`). It opens or copies the file on the
+current branch and on the default branch, and with lines selected in the
+editor a permalink pinned to HEAD (`#L10-L24`; the selection is read when
+the menu opens, from `lib/editorSelection.ts`). `file_web_links` builds
+them from git's own view of the remote, no network: a branch or commit
+the remote does not have yet falls back to the default branch and the
+label says so ("Open on main (branch not pushed)"). No submenu for a
+remote no forge serves. URL shapes per forge: `forge::file_web_url`.
 
 ## Dropping a path into a terminal
 

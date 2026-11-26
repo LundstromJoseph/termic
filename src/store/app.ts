@@ -4,7 +4,7 @@
 import { create } from "zustand";
 import { logWorkState } from "@/lib/workStateLog";
 import { useUI } from "@/store/ui";
-import type { Project, Task, Tab, TerminalTab, DiffTab, PersistedTab, SplitTree, PaneLeaf, SplitDir, TaskSchedule, TaskBadge } from "@/lib/types";
+import type { Project, Task, Tab, TerminalTab, DiffTab, PersistedTab, SplitTree, PaneLeaf, SplitDir, TaskSchedule, TaskBadge, Agent } from "@/lib/types";
 import { sameBadges } from "@/lib/taskBadges";
 import { sameSchedule } from "@/lib/schedules/record";
 import {
@@ -819,6 +819,40 @@ function automaticTabTitle(t: TerminalTab, task: Task | undefined, agents: AppSt
   if (t.cli === "shell") return "Terminal";
   if (t.cli === "custom") return task?.name || "Command";
   return agentDisplayName(t.cli, agents);
+}
+
+/** Hydrate a runtime `TerminalTab` from a persisted durable tab record,
+ *  preserving its tab ID, CLI, session, agent args, props, and markers. */
+export function tabFromPersisted(
+  pt: PersistedTab,
+  agents: Agent[],
+  unattended = false,
+): TerminalTab {
+  return {
+    id: pt.id,
+    type: "terminal" as const,
+    cli: pt.cli,
+    // Honor a user rename; otherwise re-derive the display name (the
+    // agent's configured name may have changed since last launch). Run
+    // tabs keep their "Run" title — the generic custom-tab fallback
+    // would label them "Command".
+    title: pt.custom_title && pt.title ? pt.title
+      : pt.run_member != null ? (pt.run_member ? `Run · ${pt.run_member}` : "Run")
+      : agentDisplayName(pt.cli, agents),
+    customTitle: !!pt.custom_title,
+    is_default: !!pt.is_default,
+    ...(pt.command ? { command: pt.command } : {}),
+    ...(pt.session_id ? { sessionId: pt.session_id } : {}),
+    ...(pt.agent_args?.length ? { agentArgs: pt.agent_args } : {}),
+    ...(unattended ? { unattended: true } : {}),
+    ...(pt.pinned ? { pinned: true } : {}),
+    ...(pt.marked_unread ? { markedUnread: true } : {}),
+    ...(pt.scheduled?.length ? { queue: hydrateScheduled(pt.scheduled) } : {}),
+    ...(pt.props?.length ? { props: pt.props } : {}),
+    // idle: restored run tabs keep their spot but never auto-fire the
+    // script — the user presses play (RunPane placeholder / pill).
+    ...(pt.run_member != null ? { runTab: { member: pt.run_member, previewUrl: null, idle: true } } : {}),
+  };
 }
 
 let loadAllSeq = 0;
@@ -2049,31 +2083,9 @@ export const useApp = create<AppState>((set, get) => ({
       // spawns unattended so a startup update menu can't swallow the
       // injection that follows.
       const unattendedRestore = takeUnattendedSpawn(taskId);
-      const restoredMain: TerminalTab[] = clean.map(pt => ({
-        id: pt.id,
-        type: "terminal" as const,
-        cli: pt.cli,
-        // Honor a user rename; otherwise re-derive the display name (the
-        // agent's configured name may have changed since last launch). Run
-        // tabs keep their "Run" title — the generic custom-tab fallback
-        // would label them "Command".
-        title: pt.custom_title && pt.title ? pt.title
-          : pt.run_member != null ? (pt.run_member ? `Run · ${pt.run_member}` : "Run")
-          : agentDisplayName(pt.cli, s.agents),
-        customTitle: !!pt.custom_title,
-        is_default: !!pt.is_default,
-        ...(pt.command ? { command: pt.command } : {}),
-        ...(pt.session_id ? { sessionId: pt.session_id } : {}),
-        ...(pt.agent_args?.length ? { agentArgs: pt.agent_args } : {}),
-        ...(unattendedRestore && pt.is_default ? { unattended: true } : {}),
-        ...(pt.pinned ? { pinned: true } : {}),
-        ...(pt.marked_unread ? { markedUnread: true } : {}),
-        ...(pt.scheduled?.length ? { queue: hydrateScheduled(pt.scheduled) } : {}),
-        ...(pt.props?.length ? { props: pt.props } : {}),
-        // idle: restored run tabs keep their spot but never auto-fire the
-        // script — the user presses play (RunPane placeholder / pill).
-        ...(pt.run_member != null ? { runTab: { member: pt.run_member, previewUrl: null, idle: true } } : {}),
-      }));
+      const restoredMain: TerminalTab[] = clean.map(pt =>
+        tabFromPersisted(pt, s.agents, unattendedRestore && !!pt.is_default),
+      );
       // A task must always own at least one MAIN tab, and this path can
       // legitimately restore with none: main-panel shells are not durable (no
       // session to resume), so moving the only agent into a split pane and
@@ -2929,8 +2941,9 @@ export const useApp = create<AppState>((set, get) => ({
         // The recycled slot is now a DIFFERENT file: a syntax the user set
         // on the previous occupant (or one sniffed from its content) must
         // not carry over, or a preview tab silently mislabels every file
-        // that lands in it afterwards.
-        syntax: undefined, syntaxAuto: undefined,
+        // that lands in it afterwards. Same for `readOnly`, which the
+        // editor re-asks for the new file on load.
+        syntax: undefined, syntaxAuto: undefined, readOnly: undefined,
           ...revealPatch,
         } as unknown as Tab : t);
         if (data.background) return { tabs: { ...s.tabs, [taskId]: next } };
@@ -2972,8 +2985,9 @@ export const useApp = create<AppState>((set, get) => ({
         // The recycled slot is now a DIFFERENT file: a syntax the user set
         // on the previous occupant (or one sniffed from its content) must
         // not carry over, or a preview tab silently mislabels every file
-        // that lands in it afterwards.
-        syntax: undefined, syntaxAuto: undefined,
+        // that lands in it afterwards. Same for `readOnly`, which the
+        // editor re-asks for the new file on load.
+        syntax: undefined, syntaxAuto: undefined, readOnly: undefined,
         ...revealPatch,
       } as unknown as Tab : t);
       return { tabs: { ...s.tabs, [taskId]: next }, ...setActive(previewTab.id) };
@@ -3231,8 +3245,10 @@ export const useApp = create<AppState>((set, get) => ({
       if (effective !== "working") {
         patch.workProgress = null;
         patch.workProgressKind = null;
+        patch.workStartedAt = undefined;
       } else {
         patch.workDoneAt = undefined;
+        patch.workStartedAt = Date.now();
         // The agent went back to work after we called it done, so the bullet
         // this turn produced was wrong — drop it rather than leaving a "this
         // finished" mark on a tab that is visibly working. An `attention`

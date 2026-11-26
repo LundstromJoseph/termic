@@ -7,6 +7,7 @@
 // back to `tab.syntaxAuto` for the breadcrumb and the picker to read. Loading
 // a grammar is a chunk fetch, hence lib/langSwitch guarding every apply.
 
+import { registerEditorSelection } from "@/lib/editorSelection";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { EditTab, ScratchTab, ExternalTab, Task } from "@/lib/types";
@@ -18,7 +19,7 @@ import { basicSetup } from "codemirror";
 import { search } from "@codemirror/search";
 import { lintGutter, setDiagnostics } from "@codemirror/lint";
 import { indentUnit } from "@codemirror/language";
-import { taskFileRead, fileReadExternal, taskFileWrite, scratchRead, scratchWrite, scratchSetMeta, revealPath, scratchFileRead, scratchFileWrite } from "@/lib/ipc";
+import { taskFileRead, fileReadExternal, taskFileWrite, taskFileWritable, scratchRead, scratchWrite, scratchSetMeta, revealPath, scratchFileRead, scratchFileWrite } from "@/lib/ipc";
 import { langForId, langForPath } from "@/lib/languageExts";
 import { PLAIN_TEXT, effectiveLanguageId, normalizeLanguageId } from "@/lib/languages";
 import { detectSyntaxFromContent } from "@/lib/detectSyntax";
@@ -327,6 +328,7 @@ export function EditorPane({ task, tab, active, onContent }: {
   useEffect(() => {
     let alive = true;
     let detachScrollRestore: (() => void) | null = null;
+    let detachSelection: (() => void) | null = null;
     // Reset per-load state up front. This effect re-runs when the path
     // changes (preview tabs reuse one instance + swap tab.path), so a
     // stale error from a prior file — e.g. a binary like .DS_Store that
@@ -362,7 +364,7 @@ export function EditorPane({ task, tab, active, onContent }: {
         const pad = (tab.type === "scratch" && !tab.path) ? [scratchTarget, tab.scratchId] as const : null;
         if (pad) await padDiskSettled(...pad);
         let padGen = pad ? padDiskGen(...pad) : 0;
-        const [loaded, byPath] = await Promise.all([
+        const [loaded, byPath, writable] = await Promise.all([
           isScratchTree
             ? scratchFileRead(tab.scope ?? "global", tab.projectId, tab.path!)
             : tab.type === "scratch"
@@ -374,6 +376,11 @@ export function EditorPane({ task, tab, active, onContent }: {
                 : taskFileRead(task.id, tab.path),
           (tab.type === "edit" || tab.type === "external" || isScratchTree) && !tab.syntax
             ? langForPath(tab.path!) : Promise.resolve(null),
+          // Alongside the read, not after it: a file reached through a link
+          // termic can read but never write (the main checkout's `.claude`)
+          // opens read-only instead of failing on ⌘S. A failed ask leaves
+          // the buffer editable, and the write's own check still refuses.
+          tab.type === "edit" ? taskFileWritable(task.id, tab.path).catch(() => true) : Promise.resolve(true),
         ]);
         if (!alive || !hostRef.current) return;
         let content = loaded;
@@ -399,9 +406,19 @@ export function EditorPane({ task, tab, active, onContent }: {
         // re-render it triggers cannot interleave with this load. Bail when
         // unchanged: this runs on every load and every external reload, and an
         // unconditional write is the store churn bear trap 8 is about.
-        if (resolved.auto && resolved.auto !== tab.syntaxAuto) {
-          useApp.getState().patchTab(task.id, tab.id, { syntaxAuto: resolved.auto });
-        }
+        // Out-of-task files are read-only: an external one has no write path
+        // at all (GH #240), and an edit tab may resolve outside the task
+        // through a link `task_file_write` refuses. The tab carries the flag
+        // for the breadcrumb badge and the preview's edit affordances. Asked
+        // once per load, not on a disk reload: a link retargeted under an
+        // open tab takes effect on reopen, and a
+        // save in the meantime is still refused by `task_file_write` itself.
+        const readOnly = tab.type === "external" || !writable;
+        // one write for both fields, and none when neither changed.
+        const patch: Partial<EditTab> = {};
+        if (resolved.auto && resolved.auto !== tab.syntaxAuto) patch.syntaxAuto = resolved.auto;
+        if (tab.type === "edit" && !!tab.readOnly !== readOnly) patch.readOnly = readOnly || undefined;
+        if (Object.keys(patch).length) useApp.getState().patchTab(task.id, tab.id, patch);
 
         // Flip the tab's dirty dot on the first edit after a load/save. A
         // pad is seeded dirty and STAYS dirty for its whole life (nothing has
@@ -511,7 +528,7 @@ export function EditorPane({ task, tab, active, onContent }: {
             const p = tab.path;
             return () => scratchFileWrite(tab.scope ?? "global", tab.projectId, p, text).then(clean);
           }
-          if (tab.type !== "edit") return null;
+          if (tab.type !== "edit" || readOnly) return null;
           const path = tab.path;
           // ponytail: read-then-write, so a write landing between the two
           // still wins. The window is one IPC round trip, not a whole turn.
@@ -557,12 +574,12 @@ export function EditorPane({ task, tab, active, onContent }: {
             void useUI.getState().askScratchSave(task.id, tab.id);
             return true;
           }
-          // No uncontained WRITE pairs with the uncontained read that opened
-          // this buffer, deliberately: `task_file_write` refuses absolute
-          // paths. Swallow the key rather than let it reach a write that
-          // would throw from Rust. The buffer is `readOnly` too, so there is
-          // nothing unsaved to lose.
-          if (tab.type === "external") {
+          // No WRITE pairs with the read that opened a read-only buffer,
+          // deliberately: `task_file_write` refuses absolute paths and links
+          // out of the task it does not allow. Swallow the key rather than
+          // let it reach a write that would throw from Rust. The buffer is
+          // `readOnly` too, so there is nothing unsaved to lose.
+          if (readOnly) {
             useUI.getState().pushToast(t("editor.readOnlyToast"), "info");
             return true;
           }
@@ -636,12 +653,12 @@ export function EditorPane({ task, tab, active, onContent }: {
                 // framing from the message: this is code the user is reading,
                 // not a review of the agent's work.
                 { selection: "gutter", hoverGutter: false, source: "editor" }),
-              // Out-of-task files are read-only (GH #240). There is no write
-              // path for an absolute path, so an editable buffer could only
-              // ever invite work that cannot be saved.
-              ...(tab.type === "external"
-                ? [EditorView.editable.of(false), EditorState.readOnly.of(true)]
-                : []),
+              // Out-of-task files are read-only (GH #240, and `readOnly`
+              // above). An editable buffer could only ever invite work that
+              // cannot be saved. `readOnly` alone, not `editable.of(false)`:
+              // an uneditable content DOM cannot take focus, and every keymap
+              // (⌘S and its toast, ⌘F) binds there.
+              ...(readOnly ? [EditorState.readOnly.of(true)] : []),
               // Read off the file rather than assumed: two spaces is wrong for
               // most of what an agent writes (Python is 4, Go and Makefiles are
               // tabs, and a Makefile's tabs are the format). Its own
@@ -731,6 +748,15 @@ export function EditorPane({ task, tab, active, onContent }: {
         // Scroll position dies with the box when a hidden task/tab goes
         // display:none in WKWebView — record and re-apply it.
         detachScrollRestore = attachHiddenScrollRestore(view.scrollDOM);
+        // The selected lines, for a permalink from the tab or breadcrumb menu.
+        detachSelection = registerEditorSelection(tab.id, () => {
+          const sel = view.state.selection.main;
+          if (sel.empty) return null;
+          const doc = view.state.doc;
+          // A selection ending at the start of a line does not take that line.
+          const end = sel.to > sel.from && doc.lineAt(sel.to).from === sel.to ? sel.to - 1 : sel.to;
+          return [doc.lineAt(sel.from).number, doc.lineAt(end).number];
+        });
         setLoading(false);
         // A tab opened ACTIVE (⌘P on a file that was not open) mounts with the
         // view still loading, so the focus-on-active effect below finds no view
@@ -801,6 +827,7 @@ export function EditorPane({ task, tab, active, onContent }: {
       unregisterPadRef.current?.();
       unregisterPadRef.current = null;
       detachScrollRestore?.();
+      detachSelection?.();
       viewRef.current?.destroy();
       viewRef.current = null;
     };

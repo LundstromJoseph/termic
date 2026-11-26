@@ -86,6 +86,8 @@ export default {
     scratchHint: "Scratchpad, not saved to the project yet. {{combo}} picks a place for it.",
     setSyntaxTip: "Set syntax",
     readOnly: "Read-only",
+    readOnlyLinkTip: "Reached through a link out of the task. Termic reads it but does not write through this link.",
+    readOnlyExternalTip: "A file outside the task. Termic opens it to read, never to save.",
     copyPathTip: "Copy path",
     revealInFinderTip: "Reveal in {{manager}}",
     locateTip: "Locate in file tree",
@@ -105,6 +107,21 @@ export default {
     revealInManager: "Reveal in {{manager}}",
     copyRelative: "Copy path (relative)",
     copyAbsolute: "Copy path (absolute)",
+  },
+
+  // ForgeLinkItems (CopyPathItems.tsx): the file on GitHub, GitLab or Azure
+  // DevOps (GH #467). {{forge}} is the forge's name.
+  forgeLinks: {
+    openOn: "Open on {{forge}}",
+    copyLink: "Copy {{forge}} link",
+    openOnBranch: "Open on {{branch}}",
+    copyBranchLink: "Copy {{branch}} link",
+    openOnBranchFallback: "Open on {{branch}} ({{why}})",
+    copyBranchFallback: "Copy {{branch}} link ({{why}})",
+    openPermalink: "Open permalink",
+    copyPermalink: "Copy permalink",
+    notPushed: "branch not pushed",
+    commitNotPushed: "commit not pushed",
   },
 
   find: {

@@ -11,11 +11,11 @@
 // already has a terminal answering those, and a duplicate answer arrives as
 // typed garbage.
 
+import { onClaimTerminal } from "@/lib/claimTerminal";
+import { useArchivingTasks } from "@/store/archivingTasks";
 import { terminalKeysAfter, terminalKeysBefore } from "@/lib/terminalKeys";
 import { builtinBaseId } from "@/lib/agents";
 import * as ipc from "@/lib/ipc";
-import { ClipboardAddon } from "@xterm/addon-clipboard";
-import { Osc52Base64 } from "@/lib/osc52";
 import { attachCopyOnSelect } from "@/lib/terminalSelection";
 import { useEffect, useRef, useState } from "react";
 import { create } from "zustand";
@@ -29,7 +29,8 @@ import { Button } from "@/components/ui/Button";
 import { AppDialog } from "@/components/ui/Dialog";
 import i18n from "i18next";
 import { useUI } from "@/store/ui";
-import { usePrefs, currentTerminalStack, currentTerminalTheme } from "@/store/prefs";
+import { loadTerminalRenderer } from "@/lib/terminalRenderer";
+import { loadTerminalAddons, openTerminalLink, terminalLinkHandler, terminalLook, wireTerminalLinks } from "@/lib/terminalLook";
 import { cn } from "@/lib/utils";
 import {
   b64decodeBytes, b64encode, remoteCall, remoteTermClose, remoteTermOpen, remoteTermInput, remoteTermSize,
@@ -86,7 +87,7 @@ export function RemoteTaskView({ machineId, taskId }: { machineId: string; taskI
       <div className="flex h-10 shrink-0 items-center gap-2 border-b border-[var(--color-border-soft)] bg-[var(--color-bg-1)] px-3">
         <span className={cn("shrink-0", CLI_BRAND_COLOR[icon])}><CliIcon cli={icon} className="h-4 w-4" /></span>
         <span className="truncate text-[14px] font-medium text-[var(--color-fg)]">{task.name}</span>
-        <StateGlyph state={task.state} />
+        <StateGlyph state={task.state} delegated={task.tabs.find(x => x.delegated)?.delegated} />
         <span className="shrink-0 text-[12px] text-[var(--color-fg-faint)]">{t(`states.${task.state}`, { defaultValue: task.state })}</span>
         <span className="mx-1 h-4 w-px shrink-0 bg-[var(--color-border-soft)]" />
         <MIcon className="h-3.5 w-3.5 shrink-0 text-[var(--color-fg-dim)]" />
@@ -139,7 +140,7 @@ export function RemoteTaskView({ machineId, taskId }: { machineId: string; taskI
               >
                 {TabIcon ? <TabIcon className="h-3.5 w-3.5 shrink-0" /> : <span className={cn("shrink-0", CLI_BRAND_COLOR[ti])}><CliIcon cli={ti} className="h-3.5 w-3.5" /></span>}
                 <span className="truncate">{tab.title}</span>
-                {kind === "agent" && <StateGlyph state={tab.state} size={12} />}
+                {kind === "agent" && <StateGlyph state={tab.state} size={12} delegated={tab.delegated} />}
               </button>
             );
           })}
@@ -166,6 +167,10 @@ export async function archiveRemoteTask(machineName: string, machineId: string, 
     destructive: true,
   });
   if (!(typeof ok === "boolean" ? ok : ok.confirmed)) return;
+  // Archiving takes a while there (worktree, archive script): the row says
+  // so meanwhile, as a local task's row does, keyed by machine and task.
+  const key = remoteArchivingKey(machineId, task.id);
+  useArchivingTasks.getState().begin(key);
   try {
     const r = await remoteCall(machineId, req("archive", { task: task.id }), 330_000);
     if (!r.ok) throw new Error(r.error?.message ?? "archive failed");
@@ -173,8 +178,13 @@ export async function archiveRemoteTask(machineName: string, machineId: string, 
     close();
   } catch (e) {
     useUI.getState().pushToast(String(e), "error");
+  } finally {
+    useArchivingTasks.getState().end(key);
   }
 }
+
+/** The archiving store's key for a remote task (ids only unique per machine). */
+export const remoteArchivingKey = (machine: string, task: string) => `remote:${machine}:${task}`;
 
 function Gone({ message, onClose }: { message: string; onClose: () => void }) {
   const { t } = useTranslation("remote");
@@ -208,24 +218,27 @@ function RemoteTerminal({ machineId, taskId, tabId, agent }: { machineId: string
   useEffect(() => {
     const box = host.current;
     if (!box) return;
+    // The configured browser is per task on this machine; a remote task
+    // has none here, so links take the default opener.
+    const openLink = (uri: string) => openTerminalLink(uri, null, "remote");
     const term = new Terminal({
-      fontFamily: currentTerminalStack(),
-      fontSize: usePrefs.getState().terminalFontSize,
-      fontWeight: 400,
-      fontWeightBold: 700,
-      lineHeight: 1.0,
-      theme: currentTerminalTheme() as never,
+      ...terminalLook(),
+      linkHandler: terminalLinkHandler(openLink),
       scrollback: 5000,
-      allowProposedApi: true,
       cursorBlink: false,
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
-    // Copies the agent makes (OSC 52: Claude's "copied N chars") land on
-    // THIS computer's clipboard, as in a local terminal, with the same codec
-    // that repairs Claude's double-encoded payloads.
-    term.loadAddon(new ClipboardAddon(new Osc52Base64()));
+    // Drawn as a local terminal is: the agent's tables and boxes rely on
+    // xterm's own box-drawing glyphs (the WebGL renderer joins them cell to
+    // cell; the DOM renderer took them from the font, with gaps between
+    // rows) and on Unicode 11 widths (⌘ / ⌥ in a row moved its right border).
+    // Widths, the OSC 52 clipboard and inline images, as every terminal has.
+    loadTerminalAddons(term);
     term.open(box);
+    // Links, as in a local terminal: OSC 8 (Claude's), plain URLs, Cmd+click.
+    const disposeLinks = wireTerminalLinks(term, box, openLink);
+    const renderer = loadTerminalRenderer(term);
     const disposeCopyOnSelect = attachCopyOnSelect(term, box);
     let alive = true;
     // What this pane fits, and whether the PTY is at it (this window owns
@@ -320,6 +333,9 @@ function RemoteTerminal({ machineId, taskId, tabId, agent }: { machineId: string
     // screen has it: a click anywhere did before, and two focused screens
     // traded the size on every touch.
     continueHere.current = () => { claim(); term.focus(); };
+    // Picked in the sidebar: take it back as Continue here would (claim
+    // does nothing when this window already has the size).
+    const unclaim = onClaimTerminal(taskId, () => continueHere.current?.());
     // While this window owns the size it follows the pane (debounced: a
     // drag sends one size); otherwise a resize here only rescales.
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -346,10 +362,13 @@ function RemoteTerminal({ machineId, taskId, tabId, agent }: { machineId: string
       clearTimeout(timer);
       ro.disconnect();
       continueHere.current = null;
+      unclaim();
       sub.dispose();
       disposeCopyOnSelect();
       if (reopening.current) reopening.current = false;
       else void remoteTermClose(machineId).catch(() => {});
+      renderer.dispose();
+      disposeLinks();
       term.dispose();
     };
   }, [machineId, taskId, tabId, generation, agent]);

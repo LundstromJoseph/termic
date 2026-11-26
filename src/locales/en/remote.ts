@@ -60,6 +60,7 @@ export default {
     copied: "Link copied. It works once, within 5 minutes.",
   },
   servers: {
+    reposDir: "Repos folder",
     sectionTitle: "Servers",
     title: "Your servers",
     lead: "A dev box running termic-server, such as a Linux box at home or a cloud server: your repos are cloned there and your agents run there, so they keep working while this computer sleeps or is closed.",
@@ -113,7 +114,19 @@ export default {
     retry: "Try again",
     done: "Done",
   },
+  display: {
+    title: "Remote display",
+    newTask: "New task row under tasks",
+    connectSwitch: "Connect switch on the row",
+    counts: "Counts on folded computers",
+    inactive: "Inactive projects at bottom",
+    offlineGather: "Offline computers in one line",
+    offlineEach: "Each offline computer on its own line",
+  },
   sidebar: {
+    badgeExperimental: "Experimental",
+    offlineCount_one: "{{count}} offline",
+    offlineCount_other: "{{count}} offline",
     connect: "Connect",
     disconnect: "Disconnect",
     disconnected: "Disconnected",
@@ -175,6 +188,9 @@ export default {
     moveToGroup: "Move to group",
     newGroup: "New group",
     leaveGroup: "Remove from group",
+    newTab: "New tab",
+    sameAgent: "Same agent",
+    restartAgent: "Restart agent",
   },
   newTask: {
     fromBranch: "Starts from {{branch}}",

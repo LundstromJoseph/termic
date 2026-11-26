@@ -83,6 +83,8 @@ const LS_FOOTER_HIDDEN = "agentFooterHidden";
 const LS_CONFIRM_CODE_NAV = "confirmBeforeCodeIntel";
 const LS_THEME         = "themeMode";
 const LS_DESKTOPNOTIF  = "desktopNotifications";
+// The needs-you panel (GH #468): a floating window while a task waits.
+const LS_ATTENTION_PANEL = "attentionPanel";
 const LS_SETTLED_HIGHLIGHT = "settledHighlight";
 const LS_CONFIRM_CLOSE_AGENT_TAB = "confirmBeforeCloseAgentTab";
 const LS_CONFIRM_ARCHIVE_TASK = "confirmBeforeArchiveTask";
@@ -119,6 +121,7 @@ const LS_SHOW_BOARD = scoped("showBoard");
 const LS_SHOW_TODOS = scoped("showTodos");
 const LS_SCHEDULED_NAV = scoped("scheduledNav");
 const LS_NEW_TASK_BUTTON = scoped("newTaskButton");
+const LS_REMOTE_DISPLAY = scoped("remoteDisplay");
 const LS_LAUNCHER_VISIBILITY = scoped("launcherVisibility");
 const LS_TASK_LOCATION_ICON = scoped("taskLocationIcon");
 const LS_TASK_PR_BADGE = scoped("taskPrBadge");
@@ -567,6 +570,7 @@ interface PrefsState {
   /** Send OS notifications when an inactive tab's agent settles (output
    *  stopped changing). OFF by default — too noisy for many users. */
   desktopNotifications: boolean;
+  attentionPanel: boolean;
   /** In-app notices turned off (lib/notices.ts keys). */
   mutedNotices: string[];
   /** Play a selectable notification sound when an inactive agent finishes
@@ -906,6 +910,7 @@ interface PrefsState {
    *  fewer, where a long task list puts the header's `+` far from where the
    *  new task lands), or always. Auto by default. */
   newTaskButton: NewTaskButtonMode;
+  remoteDisplay: RemoteDisplay;
   /** Per new-task-menu entry: where it shows. Only overrides are stored;
    *  `launcherVisibilityOf` (lib/launcherUsage) supplies the defaults. */
   launcherVisibility: Record<string, LauncherVisibility>;
@@ -1102,6 +1107,7 @@ interface PrefsState {
    *  when the save fails, leaving the theme mode untouched. */
   pickImportedTheme:  (id: `custom:${string}`) => Promise<void>;
   setDesktopNotifications: (v: boolean) => void;
+  setAttentionPanel: (v: boolean) => void;
   setNoticeMuted: (key: string, muted: boolean) => void;
   setCompletionSound: (v: boolean) => void;
   setCompletionSoundId: (id: CompletionSoundId) => void;
@@ -1138,6 +1144,7 @@ interface PrefsState {
   setShowTodos: (v: boolean) => void;
   setScheduledNav: (m: ScheduledNavMode) => void;
   setNewTaskButton: (m: NewTaskButtonMode) => void;
+  setRemoteDisplay: (patch: Partial<RemoteDisplay>) => void;
   setLauncherVisibility: (id: string, v: LauncherVisibility | null) => void;
   setTaskLocationIcon: (m: TaskLocationIconMode) => void;
   setTaskPrBadge: (m: TaskPrBadgeMode) => void;
@@ -1195,6 +1202,40 @@ export function parseNewTaskButton(raw: string): NewTaskButtonMode {
   return raw === "auto" || raw === "empty" ? raw : "always";
 }
 /** Whether a project draws the "New task" button under its tasks. */
+/** How the sidebar's REMOTE drawer draws other computers, set from its own
+ *  display menu so remote rows can be quieter than local ones. */
+export interface RemoteDisplay {
+  /** A computer's and a project's New task "+": always, on hover, or never. */
+  /** Each project's New task row under its tasks. */
+  newTask: "always" | "never";
+  /** The connect switch on a computer's row (it is always in the ⋯ menu). */
+  /** The connect switch is on each computer's row unless hidden. Inverted
+   *  from the earlier off-by-default option, so a saved "off" does not stick. */
+  hideSwitch: boolean;
+  /** Working / done counts on a computer row that is folded. */
+  counts: boolean;
+  /** Offline and switched-off computers: one "N offline" line, or a line each. */
+  offline: "gather" | "each";
+  /** A computer's projects with nothing running fold into "Inactive projects". */
+  inactiveAtBottom: boolean;
+}
+export const REMOTE_DISPLAY_DEFAULT: RemoteDisplay = { newTask: "never", hideSwitch: false, counts: true, offline: "gather", inactiveAtBottom: false };
+export function parseRemoteDisplay(raw: string): RemoteDisplay {
+  try {
+    const v = JSON.parse(raw) as Partial<RemoteDisplay>;
+    const d = REMOTE_DISPLAY_DEFAULT;
+    return {
+      // Off by default; only an explicit "always" turns it on ("hover", the
+      // earlier default, reads as the default).
+      newTask: v.newTask === "always" ? "always" : d.newTask,
+      hideSwitch: typeof v.hideSwitch === "boolean" ? v.hideSwitch : d.hideSwitch,
+      counts: typeof v.counts === "boolean" ? v.counts : d.counts,
+      offline: v.offline === "each" || v.offline === "gather" ? v.offline : d.offline,
+      inactiveAtBottom: typeof v.inactiveAtBottom === "boolean" ? v.inactiveAtBottom : d.inactiveAtBottom,
+    };
+  } catch { return REMOTE_DISPLAY_DEFAULT; }
+}
+
 export function newTaskButtonShown(mode: NewTaskButtonMode, taskCount: number, projectCount: number): boolean {
   return taskCount === 0 || mode === "always" || (mode === "auto" && projectCount <= 2);
 }
@@ -1449,6 +1490,7 @@ function readStoredPrefs() {
   const initialShowTodos = lsGet(LS_SHOW_TODOS, "") !== "0";
   const initialScheduledNav = parseScheduledNav(lsGet(LS_SCHEDULED_NAV, ""));
   const initialNewTaskButton = parseNewTaskButton(lsGet(LS_NEW_TASK_BUTTON, ""));
+  const initialRemoteDisplay = parseRemoteDisplay(lsGet(LS_REMOTE_DISPLAY, ""));
   const initialLauncherVisibility = parseLauncherVisibility(lsGet(LS_LAUNCHER_VISIBILITY, ""));
   const initialTaskLocationIcon = parseTaskLocationIcon(lsGet(LS_TASK_LOCATION_ICON, ""));
   const initialTaskPrBadge = parseTaskPrBadge(lsGet(LS_TASK_PR_BADGE, ""));
@@ -1502,6 +1544,7 @@ function readStoredPrefs() {
     language: parseLanguagePref(lsGet(LS_LANGUAGE, "system")),
     themeMode: initialTheme,
     desktopNotifications: initialDesktopNotif,
+    attentionPanel: lsGetBool(LS_ATTENTION_PANEL, false),
     mutedNotices: initialMutedNotices,
     completionSound: initialCompletionSound,
     completionSoundId: initialCompletionSoundId,
@@ -1562,6 +1605,7 @@ function readStoredPrefs() {
     showTodos: initialShowTodos,
     scheduledNav: initialScheduledNav,
     newTaskButton: initialNewTaskButton,
+    remoteDisplay: initialRemoteDisplay,
     launcherVisibility: initialLauncherVisibility,
     taskLocationIcon: initialTaskLocationIcon,
     taskPrBadge: initialTaskPrBadge,
@@ -1872,6 +1916,11 @@ export const usePrefs = create<PrefsState>(set => ({
     try { localStorage.setItem(LS_DESKTOPNOTIF, v ? "1" : "0"); } catch {}
     set({ desktopNotifications: v });
   },
+  setAttentionPanel: (v) => {
+    if (v === usePrefs.getState().attentionPanel) return;
+    try { localStorage.setItem(LS_ATTENTION_PANEL, v ? "1" : "0"); } catch {}
+    set({ attentionPanel: v });
+  },
   setNoticeMuted: (key, muted) => {
     const cur = usePrefs.getState().mutedNotices;
     if (cur.includes(key) === muted) return;
@@ -2040,6 +2089,12 @@ export const usePrefs = create<PrefsState>(set => ({
     if (s.newTaskButton === m) return s;
     try { localStorage.setItem(LS_NEW_TASK_BUTTON, m); } catch {}
     return { newTaskButton: m };
+  }),
+  setRemoteDisplay: (patch) => set(s => {
+    const next = { ...s.remoteDisplay, ...patch };
+    if ((Object.keys(next) as (keyof RemoteDisplay)[]).every(k => next[k] === s.remoteDisplay[k])) return s;
+    try { localStorage.setItem(LS_REMOTE_DISPLAY, JSON.stringify(next)); } catch {}
+    return { remoteDisplay: next };
   }),
   // null drops the override, back to the entry's default.
   setLauncherVisibility: (id, v) => set(s => {

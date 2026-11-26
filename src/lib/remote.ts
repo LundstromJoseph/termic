@@ -1,3 +1,4 @@
+import type { DelegatedWork } from "./delegatedWork";
 // Remote control, the desktop's half (docs/remote.md): phones paired with
 // this computer, other machines this computer is connected to (paired
 // computers and SSH servers), and their tasks.
@@ -47,6 +48,8 @@ export interface RemoteTab {
   viewable?: boolean;
   /** What the tab's agent labelled it with (`termic prop`). */
   props?: { key: string; value: string }[];
+  /** Work its agent handed off and is waiting on; absent: none. */
+  delegated?: DelegatedWork | null;
 }
 
 /** A task group or a project folder. `color` is an accent KEY (accents.ts). */
@@ -54,6 +57,8 @@ export interface RemoteGroup {
   id: string;
   name: string;
   color?: string;
+  /** Folded shut in the host's own sidebar. */
+  collapsed?: boolean;
 }
 
 export interface RemotePr {
@@ -81,6 +86,8 @@ export interface RemoteTask {
   // How the host's sidebar files and marks it (absent from older hosts).
   group?: RemoteGroup;
   project_group?: RemoteGroup;
+  /** Its project is folded shut in the host's own sidebar. */
+  project_collapsed?: boolean;
   pinned?: boolean;
   project_order?: number;
   order?: number;
@@ -349,13 +356,55 @@ interface RemoteStore {
   alerts: RemoteAlert[];
   openTask(o: OpenRemote | null): void;
   toggleFold(id: string): void;
+  /** A fold here over what the host's own sidebar shows, with the host's
+   *  state it was made against: it holds until the host changes that fold
+   *  (hostFold). This window's session only, so a reconnect shows the
+   *  host's sidebar as it is. */
+  foldOver: Record<string, FoldOver>;
+  toggleHostFold(key: string, host: boolean): void;
+  /** Drop a fold made here once the host's state moved off the one it was
+   *  made against: kept, it came back the moment the host returned to it. */
+  dropStaleFold(key: string, host: boolean): void;
   /** Per machine, the host profiles this window leaves out of its sidebar. */
   hiddenProfiles: Record<string, string[]>;
   toggleProfile(machine: string, profile: string): void;
+  /** Paired computers in the order dragged in the sidebar (ids). */
+  machineOrder: string[];
+  setMachineOrder(ids: string[]): void;
+}
+
+export type FoldOver = { folded: boolean; host: boolean };
+
+/** Whether a paired computer's project, task group or folder is folded
+ *  here: as the host's own sidebar has it, unless it was folded or opened
+ *  here since. That holds only while the host keeps the state it was made
+ *  against; once the host changes that fold, the host's wins again. */
+export function hostFold(over: FoldOver | undefined, host: boolean): boolean {
+  return over && over.host === host ? over.folded : host;
 }
 
 const LS_REMOTE_FOLDED = "termic.remoteFolded";
 const LS_REMOTE_HIDDEN_PROFILES = "termic.remoteHiddenProfiles";
+const LS_REMOTE_MACHINE_ORDER = "termic.remoteMachineOrder";
+
+function loadMachineOrder(): string[] {
+  try {
+    const v = JSON.parse(localStorage.getItem(LS_REMOTE_MACHINE_ORDER) ?? "[]");
+    return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Machines in the dragged order: those in `order` first, as placed; any not
+ *  in it (paired since) after them, in the order they came. */
+export function orderMachines<T extends { id: string }>(list: T[], order: string[]): T[] {
+  const at = new Map(order.map((id, i) => [id, i] as const));
+  return list
+    .map((m, i) => ({ m, k: at.has(m.id) ? at.get(m.id)! : order.length + i }))
+    .sort((a, b) => a.k - b.k)
+    .map(x => x.m);
+}
 
 function loadHiddenProfiles(): Record<string, string[]> {
   try {
@@ -384,7 +433,9 @@ export const useRemote = create<RemoteStore>((set, get) => ({
   setDialog(d) { set(d); },
   open: null,
   folded: loadFolds(),
+  foldOver: {},
   hiddenProfiles: loadHiddenProfiles(),
+  machineOrder: loadMachineOrder(),
   alerts: [],
   setMachines(list) {
     if (sameList(get().machines, list)) return;
@@ -406,12 +457,28 @@ export const useRemote = create<RemoteStore>((set, get) => ({
     try { localStorage.setItem(LS_REMOTE_FOLDED, JSON.stringify(folded)); } catch { /* per-viewer convenience */ }
     set({ folded });
   },
+  toggleHostFold(key, host) {
+    const now = hostFold(get().foldOver[key], host);
+    set({ foldOver: { ...get().foldOver, [key]: { folded: !now, host } } });
+  },
+  dropStaleFold(key, host) {
+    const over = get().foldOver[key];
+    if (!over || over.host === host) return;
+    const { [key]: _gone, ...rest } = get().foldOver;
+    set({ foldOver: rest });
+  },
   toggleProfile(machine, profile) {
     const cur = get().hiddenProfiles[machine] ?? [];
     const next = cur.includes(profile) ? cur.filter(p => p !== profile) : [...cur, profile];
     const hiddenProfiles = { ...get().hiddenProfiles, [machine]: next };
     try { localStorage.setItem(LS_REMOTE_HIDDEN_PROFILES, JSON.stringify(hiddenProfiles)); } catch { /* per-viewer convenience */ }
     set({ hiddenProfiles });
+  },
+  setMachineOrder(ids) {
+    const cur = get().machineOrder;
+    if (cur.length === ids.length && cur.every((x, i) => x === ids[i])) return;
+    try { localStorage.setItem(LS_REMOTE_MACHINE_ORDER, JSON.stringify(ids)); } catch { /* per-viewer convenience */ }
+    set({ machineOrder: ids });
   },
 }));
 
@@ -505,7 +572,11 @@ export type RemoteTaskAction =
   | { kind: "pin"; pinned: boolean }
   | { kind: "join"; lead: string }
   | { kind: "newGroup"; color: string }
-  | { kind: "leave" };
+  | { kind: "leave" }
+  /** A new tab in the task: the agent it already runs, or a named one. */
+  | { kind: "tab"; tab: { tab: "default" } | { tab: "agent"; id: string } }
+  /** Start its agent again in its last session (`termic open`). */
+  | { kind: "open" };
 
 export function remoteTaskRequest(taskId: string, a: RemoteTaskAction): Record<string, unknown> {
   switch (a.kind) {
@@ -515,6 +586,8 @@ export function remoteTaskRequest(taskId: string, a: RemoteTaskAction): Record<s
     // Colouring a task in no group founds a group of one around it.
     case "newGroup": return req("group", { task: taskId, color: a.color });
     case "leave": return req("group", { task: taskId, leave: true });
+    case "tab": return req("tab", { task: taskId, kind: a.tab });
+    case "open": return req("open", { task: taskId });
   }
 }
 
@@ -578,12 +651,21 @@ export function useServerDetectedClis(projectId: string | undefined, isServer: b
  *  the desktop's own code on the box (task_host). With no project there
  *  yet, the server's Add project dialog, which then opens it. */
 export async function openNewTaskOnServer(serverId: string, projectName?: string | null, baseBranch?: string | null): Promise<void> {
+  // A paired computer's projects live there, not in this app's store, so the
+  // server path below found none and opened the dialog on "add a project":
+  // a path field where the project picker should be. Its own dialog lists
+  // the projects it has.
+  if (useRemote.getState().machines.find(m => m.id === serverId)?.kind !== "server") {
+    useRemote.getState().setDialog({ newTaskOn: serverId, newTaskProject: projectName ?? null, newTaskBase: baseBranch ?? null });
+    return;
+  }
   const { useApp } = await import("@/store/app");
   const { useUI } = await import("@/store/ui");
   const mine = useApp.getState().projects.filter(p => p.server === serverId);
   const p = (projectName && mine.find(x => x.name === projectName)) || mine[0];
   if (!p) {
-    useRemote.getState().setDialog({ newTaskOn: serverId, newTaskAdding: true });
+    // No project there yet: add one first, from the box's repos folder.
+    useUI.getState().openNewProject(serverId);
     return;
   }
   requestAnimationFrame(() => useUI.getState().openNewTask(p.id, baseBranch ? { baseBranch } : undefined));

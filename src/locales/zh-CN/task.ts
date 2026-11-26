@@ -83,6 +83,8 @@ export default {
     scratchHint: "便签尚未保存到项目中。按 {{combo}} 选择保存位置。",
     setSyntaxTip: "设置语法",
     readOnly: "只读",
+    readOnlyLinkTip: "通过指向任务之外的链接打开。Termic 可以读取，但不会通过这个链接写入。",
+    readOnlyExternalTip: "任务之外的文件。Termic 只打开它供阅读，从不保存。",
     copyPathTip: "复制路径",
     revealInFinderTip: "在 {{manager}} 中显示",
     locateTip: "在文件树中定位",
@@ -95,6 +97,18 @@ export default {
   },
 
   // CopyPathItems：文件树、Git 面板、差异头部与面包屑共用的路径右键菜单项。
+  forgeLinks: {
+    openOn: "在 {{forge}} 上打开",
+    copyLink: "复制 {{forge}} 链接",
+    openOnBranch: "在 {{branch}} 上打开",
+    copyBranchLink: "复制 {{branch}} 链接",
+    openOnBranchFallback: "在 {{branch}} 上打开（{{why}}）",
+    copyBranchFallback: "复制 {{branch}} 链接（{{why}}）",
+    openPermalink: "打开永久链接",
+    copyPermalink: "复制永久链接",
+    notPushed: "分支未推送",
+    commitNotPushed: "提交未推送",
+  },
   copyPath: {
     openInDefaultApp: "用默认应用打开",
     openInManager: "在{{manager}}中打开",

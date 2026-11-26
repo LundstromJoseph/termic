@@ -130,7 +130,16 @@ phone read "working" until its next prompt (docs/agent-hooks.md,
 
 **Transcripts** (the phone's chat) come from each agent's own session
 log, read by `termic-remote/src/transcript.rs` into the same turns
-(prompt, reply, one line per tool call). A server task's log is on the
+(prompt, reply, one line per tool call). A tool call also carries a
+bounded `detail` (4000 characters) that the phone shows when the call is
+opened: an edit's `-`/`+` lines (Claude's Edit, MultiEdit and Write;
+Codex's apply_patch patch, or the patch string inside an `exec` script,
+which is how newer Codex edits; agy's edit_file `Target`/`Replacement`
+and write_file `Content`), else what the call returned (Claude's
+tool_result by `tool_use_id`; Codex's function_call_output or
+custom_tool_call_output by `call_id`, a string or `input_text` items,
+its "Output:" header dropped; agy's result step, type 132, call id at
+`[5,4,1]` and the terminal's output at `[140,2,3,10,3,4]`). A server task's log is on the
 box, so the desktop reads it there through `exec` (`task_host.rs`, as
 `termic result` does): Claude's file, and Codex's rollout found by a
 script on the box (`CODEX_ROLLOUT_SH`, the same lookup as below).
@@ -265,6 +274,34 @@ src/lib/remote.ts: folders at their first project, a group gathered at
 its first member), keep the host's order rather than re-sorting, and map
 the accent key to their own palette.
 
+**REMOTE, inline.** Other computers are listed at the end of the project
+list, in the same scroll (`remote-inline` in Sidebar.tsx), so local work
+keeps the top. The update card floats over the end of the list, which
+pads its bottom by the card's height so nothing is stuck behind it. Each
+computer's projects nest one step in under it, the idle ones folded into
+its own Inactive projects (a server project by the local activity rule, a
+paired computer's when every task's agent is stopped). Unreachable
+computers gather in one "N offline" line at the bottom, never hidden; a
+single one is itself. A computer you switched off is not offline: it
+keeps its own row and switch, and a click on its row connects it. REMOTE
+has its own display menu (`remoteDisplay` in prefs: each project's New
+task row under its tasks on or off, for server and paired projects alike,
+while the headers' + always show on hover; the connect switch on the row,
+shown unless hidden (`hideSwitch`); counts on a folded computer, Inactive
+projects, offline gathered or each); Connect and Disconnect are also in
+the computer's ⋯ menu. Every fold, local and remote, opens and closes
+through the same animated `Expand` (ui/Expand.tsx).
+
+**Folded like the host folds them.** A row says what the host's sidebar has
+folded shut: its project (`project_collapsed`), its task group and its
+folder (`collapsed` on `group` and `project_group`), from the folds the
+desktop pushes with `remote_set_sidebar_folds`. A desktop viewing a paired
+computer, and the phone, open on that state. A fold made on the viewing
+desktop holds only while the host keeps the state it was made against
+(`hostFold` in src/lib/remote.ts, session-only): once the host changes that
+fold, the host's state wins and the local one is dropped, or it would come
+back the moment the host returned to the old state.
+
 **Every tab, not only the agent.** `tasks[].tabs` lists the task's whole
 strip as the host's webview reports it (`cliAgentState.ts`): each tab's
 `kind` (`agent`, `shell`, `terminal`, `run`) and whether a PTY is `live`
@@ -289,7 +326,19 @@ so the host applies it exactly as its sidebar would and the next
 `tasks` snapshot carries the result. It also has the local row's Copy
 branch name, Stop task (while its agent runs: `stopRemoteAgent`) and
 Archive task (behind the same confirm as the task view's button:
-`archiveRemoteTask`). A server's row in this list skips pins and groups:
+`archiveRemoteTask`; the row shows a spinner until the host answers,
+through the same `archivingTasks` store a local archive uses, keyed by
+machine and task). On a paired computer it also offers New tab (the same
+agent, `tab` with kind `default`, or one of the host's usable agents,
+asked with `agents` when the submenu opens), Restart agent on a stopped
+task (`open`), Duplicate worktree (the paired computer's New task dialog
+from this task's branch) and Copy agent CLI briefing
+(`buildRemoteAgentBriefing`: the block addresses the task with
+`--peer <its machine id>` and the reply with `--peer <this machine's id>`,
+ids so a rename on either side does not break it). Not offered: Schedule
+(the schedule dialog is local-only), YOLO (no host verb sets it), and
+Spotlight, sandbox and the startup command, which change the other
+machine's own setup. A server's row in this list skips pins and groups:
 termic-server has neither. `pin` is a CLI verb for this
 (`termic pin [TASK] [--off]`, MCP `task_pin`, protocol v26).
 
@@ -457,6 +506,19 @@ server is also linked from Add project. Settings' rail lists projects the same w
 the profile whose window added it (`ServerRecord.profile`, a window
 label); one added before that field keeps its projects where they are.
 
+**Add project on a server** is the local Add project dialog
+(`NewProjectDialog`, opened with `openNewProject(serverId)`), reading and
+adding on the box: its repos folder is the server's own
+(`ServerRecord.repos_dir` in servers.json, also set in Settings > Remote
+on the server's row), discovery runs on the box through `exec`
+(`server_discover_repos`: folders holding `.git` up to three levels down,
+`~` the box's home), and each add is the server's `project_add`, the
+dialog waiting for the mirror to list it. Browse, clone, multi-repo and
+hiding a repo are this machine's and are left out there; a folder the box
+refuses as a repo is offered as a plain folder, without "make it a git
+repo", which would run git here. A server project's `+` opens its New
+task dialog directly (`ProjectNewTaskRoot`): its menu held one item.
+
 **Running things on the box.** termic-server offers two general
 primitives, and the desktop sends its existing code through them rather
 than growing a verb per feature:
@@ -517,9 +579,9 @@ funnels consult it:
 
 - `git_bytes` / `git_raw` (lib.rs): the git panel, diff, stage, commit,
   push, the finder's listing.
-- `task_dir_list`, `task_file_read`, `task_file_write`: the file tree and
-  the editor (a write goes to a temp file and is renamed over). A
-  relative path that could climb out of the task is refused before it
+- `task_dir_list`, `task_file_read`, `task_file_write`,
+  `task_file_writable`: the file tree and the editor (a write goes to a
+  temp file and is renamed over). A relative path that could climb out of the task is refused before it
   is sent.
 - `repo_config::load` / `save`: a server repo's `.termic.yaml`.
 - forge.rs `cli_command`: gh, glab and az run on this Mac from home, with

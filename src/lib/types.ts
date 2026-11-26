@@ -300,6 +300,10 @@ export interface TaskMember {
    *  Empty = the member repo's own `.termic.yaml` list is resolved on
    *  restore instead. */
   files_to_copy?: string[];
+  pr_number?: number | null;
+  pr_provider?: ForgeProvider | null;
+  pr_state?: "open" | "draft" | "merged" | "closed" | null;
+  pr_head?: string | null;
 }
 
 /** One frozen extra named port (GH #196): configured env var name +
@@ -350,6 +354,9 @@ export interface Task {
    *  joins none, and this is its only link back (the sidebar draws it on
    *  hover, src/components/sidebar/SpawnLinks.tsx). */
   spawned_by?: string;
+  /** Initiating tab id on `spawned_by` when spawned by an agent tab; lets
+   *  unqualified child replies route back to that tab. */
+  spawned_by_tab?: string;
   /** The recurring schedule this task is the parent of (GH #300). Absent on
    *  every other task. Its runs carry `spawned_by` + this task's group, and
    *  `schedule.history` holds their ids. */
@@ -479,6 +486,8 @@ export interface Task {
   pr_title?: string | null;
   pr_state?: "open" | "draft" | "merged" | "closed" | null;
   pr_state_at?: string | null;
+  /** Source branch (`PrStatus.head`) of the cached PR/MR. */
+  pr_head?: string | null;
   /** Comment-watcher opt-in (the PR card bell). Watching only runs while
    *  the task has a LIVE agent - there's nobody to tell otherwise. */
   pr_watch?: boolean;
@@ -1081,6 +1090,10 @@ export interface McpStatus {
   /** Claude accounts still missing it while others have it, by name. */
   claude_missing: string[];
   codex_registered: boolean;
+  /** True on macOS/Linux when a registered Termic helper predates X-Termic-Tab
+   *  and should be re-added so agents carry tab lineage. */
+  claude_needs_update?: boolean;
+  codex_needs_update?: boolean;
 }
 
 /** What a paired machine may do on THIS computer. "reply": send a prompt
@@ -1887,6 +1900,10 @@ export interface TerminalTab extends BaseTab {
    *  title classifier (gemini/codex). `working` → spinner; `done` →
    *  blue bullet; cleared on next user keystroke (NOT on tab view). */
   workState?: "idle" | "working" | "done";
+  /** When this tab last went into "working": the start of the turn, so a
+   *  phone that connects mid-turn shows how long it has really run rather
+   *  than counting from when it joined (remote_server.rs). Runtime-only. */
+  workStartedAt?: number;
   /** Work the agent DELEGATED and had not finished as of its last done hook:
    *  a subagent it is waiting on, a shell it left running. Reported by the
    *  hook (`lib/agentHooks.ts` `HOOK_OSC_DELEGATED_PREFIX`), decided by
@@ -2113,6 +2130,11 @@ export interface EditTab extends BaseTab {
    *  the pref (see docs/sandbox.md, "Known gap: the webview is outside
    *  the cage", and MarkdownPreview.tsx). Session-only, like mdView. */
   remoteImagesUnblocked?: boolean;
+  /** The file resolves outside the task through a link `task_file_write`
+   *  refuses (`task_file_writable`), so the buffer is read-only. Set by the
+   *  editor pane on load when it changes; drives the breadcrumb badge and the
+   *  preview's edit affordances. Session-only. */
+  readOnly?: boolean;
 }
 
 /** GitHub-style folder view (issue #151): the file/folder listing a

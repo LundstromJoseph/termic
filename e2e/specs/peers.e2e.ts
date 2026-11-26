@@ -32,7 +32,7 @@ import { readFileSync } from "node:fs";
 const FAKE_VERSION = (JSON.parse(readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "package.json"), "utf8")) as { version: string }).version;
 import {
   waitForText,
-  cliBinary, clickMenuItem, clickPresent, requireTermicApi, setInputValue, snap, typeIntoRemoteTerminal, waitForAppShell, waitForAttr, waitGone, waitVisible,
+  cliBinary, clickMenuItem, clickPresent, readClipboard, requireTermicApi, setInputValue, snap, typeIntoRemoteTerminal, waitForAppShell, waitForAttr, waitGone, waitVisible,
   openTask,
 } from "../helpers.js";
 
@@ -386,6 +386,13 @@ const pick = (selector: string, value: string) =>
     el.dispatchEvent(new Event("change", { bubbles: true }));
   }, selector, value);
 
+/** No fold mid-animation (ui/Expand.tsx marks one with these classes), so a
+ *  screenshot shows where rows end up, not a frame of them moving. */
+const foldsSettled = () => browser.waitUntil(
+  () => browser.execute(() => !document.querySelector(".termic-expand-in, .termic-expand-out")),
+  { timeout: 3_000, timeoutMsg: "a fold was still animating" },
+);
+
 describe("LAN pairing", () => {
   let appPort = 0;
   const incoming = newFake("Fake laptop");
@@ -539,6 +546,10 @@ describe("LAN pairing", () => {
     // gave way to the "paired" one.
     await waitFor("pairing mode closed", status, v => v.pair_mode === null);
     await waitGone('[data-testid="peer-code-dialog"]');
+    // The pairing goes both ways, the connection one way: the machine that
+    // asked connects; here, where the code was shown, it starts switched off.
+    // (The row's switch is off by default now; the row says it.)
+    await waitForAttr(`[data-testid="remote-machine-${incoming.id}"]`, "data-state", "disconnected");
 
     // The after-pairing dialog: who, what pairing means, what it is for.
     await waitVisible(dialog("incoming"));
@@ -855,10 +866,10 @@ describe("LAN pairing", () => {
       { timeout: 3_000, timeoutMsg: "the branch setting did not reach the remote row" });
       await prefs("setTaskBranchName", "none");
       // A paired computer's project folds like a local one.
-      await browser.execute(() => (document.querySelector('[data-testid="remote-project-webapp"] > button') as HTMLElement).click());
+      await browser.execute(() => (document.querySelector('[data-testid="remote-project-fold-webapp"]') as HTMLElement).click());
       await browser.waitUntil(async () => !(await browser.execute(() => !!document.querySelector('[data-testid="remote-task-rt-1"]'))),
         { timeout: 3_000, timeoutMsg: "folding the project did not hide its tasks" });
-      await browser.execute(() => (document.querySelector('[data-testid="remote-project-webapp"] > button') as HTMLElement).click());
+      await browser.execute(() => (document.querySelector('[data-testid="remote-project-fold-webapp"]') as HTMLElement).click());
       await waitVisible('[data-testid="remote-task-rt-1"]');
       // A task whose agent is not running reads as such: greyed, as a local
       // or server task's row is.
@@ -866,7 +877,123 @@ describe("LAN pairing", () => {
       expect(Number(await dimmed("rt-3"))).toBe(1);
       pushTasks!(baseTasks().map((x: any) => x.id === "rt-3" ? { ...x, state: "inactive" } : x));
       await browser.waitUntil(async () => Number(await dimmed("rt-3")) < 1, { timeout: 3_000, timeoutMsg: "an inactive remote task was not greyed" });
+      // An agent waiting on work it handed off (a subagent, a background
+      // shell) draws the local row's ring, not the spinner: working or not,
+      // no model is computing. Gone again once nothing is delegated.
+      const badge = () => browser.execute(() => {
+        const b = document.querySelector('[data-testid="remote-task-rt-3"] [data-testid="remote-work-badge"]');
+        return b ? `${b.getAttribute("data-work-state")}:${b.getAttribute("data-delegated")}` : null;
+      });
+      const delegating = (state: string) => baseTasks().map((x: any) => x.id === "rt-3"
+        ? { ...x, state, tabs: [{ id: "a", title: "claude", agent: "claude", state, is_default: true, kind: "agent", live: true, delegated: { label: "shell", count: 2, ids: ["s1", "s2"] } }] }
+        : x);
+      pushTasks!(delegating("working"));
+      await browser.waitUntil(async () => (await badge()) === "working:shell", { timeout: 3_000, timeoutMsg: "a delegating working task drew no ring" });
+      pushTasks!(delegating("idle"));
+      await browser.waitUntil(async () => (await badge()) === "delegated:shell", { timeout: 3_000, timeoutMsg: "an idle task with shells running drew no ring" });
       pushTasks!(baseTasks());
+      await browser.waitUntil(async () => (await badge()) === null, { timeout: 3_000, timeoutMsg: "the ring outlived its delegated work" });
+    });
+
+    it("lists other computers inline at the end of the project list, drawn by REMOTE's own display menu", async () => {
+      const q = (sel: string) => browser.execute((x) => !!document.querySelector(x), sel);
+      // Inline, in the same scroll as the projects and after them: local
+      // work keeps the top, and remote rows scroll with it.
+      expect(await browser.execute(() => {
+        const sec = document.querySelector('[data-testid="remote-sidebar-section"]');
+        const list = sec?.closest(".overflow-y-auto");
+        const projects = list?.querySelectorAll("[data-project-wrap]") ?? [];
+        const last = projects[projects.length - 1];
+        return !!list && !!last && !!(last.compareDocumentPosition(sec!) & Node.DOCUMENT_POSITION_FOLLOWING);
+      })).toBe(true);
+      // Let a fold animation the previous case started finish first.
+      await foldsSettled();
+      await snap("remote-inline.png");
+      // A minor release's update card floats over the end of the list, and
+      // the list makes room under its last row for it, so nothing is stuck
+      // behind the card.
+      await browser.execute(() => window.__termic!.useUpdate.setState({ update: { version: "99.0.0", date: new Date().toISOString(), body: "" }, currentVersion: "2.0.0", dismissedVersion: null }));
+      await waitVisible('[data-testid="update-card"]');
+      await browser.waitUntil(() => browser.execute(() => {
+        const card = document.querySelector('[data-testid="update-card"]')!.getBoundingClientRect().height;
+        const list = document.querySelector('[data-testid="remote-sidebar-section"]')!.closest(".overflow-y-auto") as HTMLElement;
+        return parseFloat(getComputedStyle(list).paddingBottom) >= card;
+      }), { timeout: 3_000, timeoutMsg: "the list left no room under its end for the update card" });
+      await snap("remote-inline-update.png");
+      await browser.execute(() => window.__termic!.useUpdate.setState({ update: null }));
+      await waitGone('[data-testid="update-card"]');
+      // The connect switch is on the row by default.
+      // Reset first: the options live in localStorage, which outlives a
+      // reseed, so an earlier run's choices would otherwise carry in.
+      await browser.execute(() => window.__termic!.usePrefs.getState().setRemoteDisplay({ newTask: "always", hideSwitch: false, counts: true, offline: "gather", inactiveAtBottom: true }));
+      expect(await q(`[data-testid="machine-switch-${remote.id}"]`)).toBe(true);
+      // Each project has its New task row under its tasks, as locally. The
+      // option takes the row away; the headers' + (shown on hover) stay.
+      expect(await q('[data-testid="remote-project-new-task-row-webapp"]')).toBe(true);
+      await browser.execute(() => window.__termic!.usePrefs.getState().setRemoteDisplay({ newTask: "never" }));
+      await browser.waitUntil(async () => !(await q('[data-testid="remote-project-new-task-row-webapp"]')), { timeout: 3_000, timeoutMsg: "turning the New task row off left it" });
+      expect(await q(`[data-testid="remote-new-task-${remote.id}"]`)).toBe(true);
+      expect(await q('[data-testid="remote-project-new-task-webapp"]')).toBe(true);
+      await browser.execute(() => window.__termic!.usePrefs.getState().setRemoteDisplay({ newTask: "always" }));
+      // The display menu itself.
+      await browser.execute(() => {
+        const el = document.querySelector('[data-testid="remote-display-menu"]') as HTMLElement;
+        const o = { bubbles: true, cancelable: true, pointerType: "mouse", button: 0, isPrimary: true, pointerId: 1 } as PointerEventInit;
+        el.dispatchEvent(new PointerEvent("pointerdown", o));
+        el.dispatchEvent(new PointerEvent("pointerup", o));
+      });
+      await waitVisible('[data-testid="remote-display-counts"]');
+      await snap("remote-display-menu.png");
+      await browser.keys("Escape");
+      // Folded, a computer says what it is doing: working and finished counts.
+      await clickPresent(`[data-testid="remote-machine-${remote.id}"] [data-machine-head] button`);
+      await browser.waitUntil(async () => q(`[data-testid="remote-machine-${remote.id}"] [data-testid="machine-counts"]`), { timeout: 3_000, timeoutMsg: "a folded computer showed no counts" });
+      await foldsSettled();
+      await snap("remote-inline-folded.png");
+      await clickPresent(`[data-testid="remote-machine-${remote.id}"] [data-machine-head] button`);
+      // A project whose agents are all stopped folds into the computer's own
+      // Inactive projects.
+      pushTasks!(baseTasks().map((x: any) => x.project === "webapp" ? { ...x, state: "inactive" } : x));
+      await browser.waitUntil(async () => q(`[data-testid="remote-inactive-${remote.id}"]`), { timeout: 3_000, timeoutMsg: "no Inactive projects under the computer" });
+      expect(await q('[data-testid="remote-project-webapp"]')).toBe(false);
+      await clickPresent(`[data-testid="remote-inactive-${remote.id}"] button`);
+      await waitVisible('[data-testid="remote-project-webapp"]');
+      await foldsSettled();
+      await snap("remote-inline-inactive.png");
+      pushTasks!(baseTasks());
+      await browser.waitUntil(async () => !(await q(`[data-testid="remote-inactive-${remote.id}"]`)), { timeout: 3_000, timeoutMsg: "the inactive fold outlived its projects" });
+    });
+
+    it("folds the paired computer's projects, groups and folders as its own sidebar has them", async () => {
+      const expanded = (sel: string) => browser.execute((x) => document.querySelector(x)?.getAttribute("aria-expanded") ?? null, sel);
+      const groupFold = '[data-testid="remote-group-rt-2"] > button';
+      const withFolds = (p: boolean, g: boolean, f: boolean) => baseTasks().map((x: any) => x.project === "api"
+        ? { ...x, project_collapsed: p, ...(x.group ? { group: { ...x.group, collapsed: g } } : {}), project_group: { ...x.project_group, collapsed: f } }
+        : x);
+      // The host folds the api project, its Auth group and the Backend folder: so does this view.
+      pushTasks!(withFolds(false, true, false));
+      await browser.waitUntil(async () => (await expanded(groupFold)) === "false", { timeout: 3_000, timeoutMsg: "the host's folded group showed open" });
+      pushTasks!(withFolds(true, true, false));
+      await browser.waitUntil(async () => (await expanded('[data-testid="remote-project-fold-api"]')) === "false", { timeout: 3_000, timeoutMsg: "the host's folded project showed open" });
+      pushTasks!(withFolds(false, true, true));
+      await browser.waitUntil(async () => (await expanded('[data-testid="remote-folder-fold-Backend"]')) === "false", { timeout: 3_000, timeoutMsg: "the host's folded folder showed open" });
+      // Opened here: it stays open while the host keeps it folded...
+      await browser.execute(() => (document.querySelector('[data-testid="remote-folder-fold-Backend"]') as HTMLElement).click());
+      expect(await expanded('[data-testid="remote-folder-fold-Backend"]')).toBe("true");
+      await browser.waitUntil(async () => (await expanded(groupFold)) === "false", { timeout: 3_000, timeoutMsg: "the group under the opened folder lost the host's fold" });
+      pushTasks!(withFolds(false, true, true));
+      // Negative: the host re-sending a fold it did not change must NOT undo
+      // the one opened here, and nothing fires for a fold that stays; 300 ms
+      // outlasts the task-list push and its render.
+      await browser.pause(300);
+      expect(await expanded('[data-testid="remote-folder-fold-Backend"]')).toBe("true");
+      // ...and once the host changes that fold, the host's state wins again.
+      pushTasks!(withFolds(false, false, false));
+      await browser.waitUntil(async () => (await expanded(groupFold)) === "true" && (await expanded('[data-testid="remote-folder-fold-Backend"]')) === "true", { timeout: 3_000, timeoutMsg: "the host opening its folds did not open them here" });
+      pushTasks!(withFolds(false, false, true));
+      await browser.waitUntil(async () => (await expanded('[data-testid="remote-folder-fold-Backend"]')) === "false", { timeout: 3_000, timeoutMsg: "the host folding its folder again was ignored" });
+      pushTasks!(baseTasks());
+      await browser.waitUntil(async () => (await expanded('[data-testid="remote-folder-fold-Backend"]')) === "true", { timeout: 3_000, timeoutMsg: "the folder did not reopen with the host" });
     });
 
     it("rings the desktop when a paired computer's task starts needing you, and when it finishes", async () => {
@@ -952,6 +1079,70 @@ describe("LAN pairing", () => {
       await waitGone('[data-testid="remote-task-rename-rt-4"]');
       expect(sent(mark).filter(c => c.cmd === "rename")).toEqual([]);
 
+      // A group's right-click is the local group's menu, run on that machine
+      // through its group verb on a member: colour, then ungroup (every
+      // member leaves). No default swatch: that verb cannot clear a colour.
+      const groupMenu = async () => {
+        await browser.execute((sel) => {
+          const head = document.querySelector(sel)!;
+          const r = head.getBoundingClientRect();
+          head.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: r.left + 10, clientY: r.top + 5, button: 2 }));
+        }, '[data-testid="remote-group-rt-2"] > button');
+        await browser.waitUntil(() => browser.execute(() => document.querySelectorAll("[role='menuitem']").length > 0), { timeout: 5000, timeoutMsg: "no group menu" });
+      };
+      await groupMenu();
+      expect(await browser.execute(() => !!document.querySelector("[role='menuitemradio'][aria-label='Default']"))).toBe(false);
+      mark = calls.length;
+      await browser.execute(() => (document.querySelector("[role='menuitemradio'][aria-label='Blue']") as HTMLElement).click());
+      await browser.waitUntil(async () => sent(mark).some(c => c.cmd === "group" && c.color === "blue"), { timeout: 5000, timeoutMsg: `the colour never went: ${JSON.stringify(sent(mark))}` });
+      mark = calls.length;
+      await groupMenu();
+      await clickMenuItem("Ungroup tasks");
+      await browser.waitUntil(async () => sent(mark).filter(c => c.cmd === "group" && c.leave === true).length >= 1, { timeout: 5000, timeoutMsg: `nobody left: ${JSON.stringify(sent(mark))}` });
+
+      // A new tab in the task there: the agent it already runs, by default.
+      mark = calls.length;
+      await menu("rt-4");
+      await clickMenuItem("New tab");
+      await browser.waitUntil(() => browser.execute(() => [...document.querySelectorAll("[role='menuitem']")].some(e => e.textContent?.trim() === "Same agent")), { timeout: 5000, timeoutMsg: "no Same agent" });
+      await clickMenuItem("Same agent");
+      await waitSent(mark, { cmd: "tab", task: "rt-4", kind: { tab: "default" } });
+
+      // Restart agent only on a stopped task: it reopens it in its last session.
+      pushTasks!(baseTasks().map((x: any) => x.id === "rt-3" ? { ...x, state: "inactive" } : x));
+      await waitForAttr('[data-testid="remote-task-rt-3"]', "data-state", "inactive");
+      mark = calls.length;
+      await menu("rt-3");
+      await clickMenuItem("Restart agent");
+      await waitSent(mark, { cmd: "open", task: "rt-3" });
+      pushTasks!(baseTasks());
+      await waitForAttr('[data-testid="remote-task-rt-3"]', "data-state", "idle");
+
+      // Duplicate opens New task on that computer, from this task's branch.
+      await menu("rt-1");
+      await clickMenuItem("Duplicate worktree");
+      await waitVisible('[data-testid="remote-new-base"]');
+      expect(await browser.execute(() => document.querySelector('[data-testid="remote-new-base"]')!.textContent)).toContain("fix/login");
+      await browser.keys("Escape");
+      await waitGone('[data-testid="remote-new-base"]');
+
+      // The computer's own + opens New task on its projects, not on "add a
+      // project": the path field is for a server, where a project is a path.
+      await clickPresent(`[data-testid="remote-new-task-${remote.id}"]`);
+      await browser.waitUntil(() => browser.execute(() => !!document.querySelector('[data-testid="remote-new-project"], [data-testid="remote-add-project"]')), { timeout: 5000, timeoutMsg: "New task did not open" });
+      expect(await browser.execute(() => !!document.querySelector('[data-testid="remote-project-path"]'))).toBe(false);
+      await browser.keys("Escape");
+      await browser.waitUntil(() => browser.execute(() => !document.querySelector('[data-testid="remote-add-project"], [data-testid="remote-new-project"]')), { timeout: 5000, timeoutMsg: "New task did not close" });
+      // Each project row has its own +, the local project header's: New task
+      // there, in that project.
+      mark = calls.length;
+      await clickPresent('[data-testid="remote-project-new-task-webapp"]');
+      await browser.waitUntil(() => browser.execute(() => !!document.querySelector('[data-testid="remote-new-project"], [data-testid="remote-add-project"]')), { timeout: 5000, timeoutMsg: "the project's New task did not open" });
+      expect(await browser.execute(() => !!document.querySelector('[data-testid="remote-project-path"]'))).toBe(false);
+      await browser.waitUntil(async () => sent(mark).some(c => c.cmd === "project_list"), { timeout: 5000, timeoutMsg: "the dialog never asked for the projects" });
+      await browser.keys("Escape");
+      await browser.waitUntil(() => browser.execute(() => !document.querySelector('[data-testid="remote-add-project"], [data-testid="remote-new-project"]')), { timeout: 5000, timeoutMsg: "New task did not close" });
+
       // The local row's Stop and Archive, run on that machine. Stop only
       // while its agent runs; Archive asks first, and a cancel sends nothing.
       mark = calls.length;
@@ -1017,6 +1208,22 @@ describe("LAN pairing", () => {
       // (The claim's term_resize may land right behind the reset, so wait
       // for the open and a size rather than for the reset to be last.)
       await waitForAttr('[data-testid="remote-terminal"]', "data-opened", "true");
+      // Drawn like a local terminal: the same renderer (WebGL joins the box
+      // glyphs of an agent's tables; the DOM renderer left gaps between rows).
+      // Compared with a local pane in this window, as WebGL may be off here.
+      const renderers = await browser.execute(() => {
+        const canvas = (el: Element | null) => !!el?.querySelector(".xterm-screen canvas");
+        const local = document.querySelector("[data-terminal-host]");
+        return { local: local ? canvas(local) : null, remote: canvas(document.querySelector('[data-testid="remote-terminal"]')) };
+      });
+      if (renderers.local !== null) expect(renderers.remote).toBe(renderers.local);
+      else expect(renderers.remote).toBe(true);
+      // An OSC 52 copy from the other machine (what Claude sends for a
+      // selection) lands on THIS clipboard. Claude also runs pbcopy, but on
+      // the machine it runs on, so over a pairing OSC 52 is the only way.
+      const copied = `copied over the pair ${Date.now()}`;
+      hostSend({ t: "term_data", data: Buffer.from(`\x1b]52;c;${Buffer.from(copied).toString("base64")}\x07`).toString("base64") });
+      await browser.waitUntil(async () => readClipboard() === copied, { timeout: 5000, timeoutMsg: `the OSC 52 copy never reached the clipboard (it has ${JSON.stringify(readClipboard().slice(0, 60))})` });
       await browser.waitUntil(async () => !!(await browser.execute(() => document.querySelector('[data-testid="remote-terminal"]')!.getAttribute("data-size"))),
         { timeout: 5_000, timeoutMsg: "the backlog never arrived" });
       // The last screen to take it owns the size. Opening it is taking it:
@@ -1044,6 +1251,12 @@ describe("LAN pairing", () => {
       // Continue here takes it again.
       await clickPresent('[data-testid="terminal-continue-here"]');
       await browser.waitUntil(async () => { const v = await view(); return v.owner === "true" && !v.hidden && !v.overlay; }, { timeout: 5_000, timeoutMsg: "Continue here did not take the size back" });
+      // Picking the task in the sidebar takes it back too: having clicked it
+      // here is the "use it here", so there is no overlay left to click.
+      hostSend({ t: "term_resize", cols: 200, rows: 60 });
+      await browser.waitUntil(async () => (await view()).overlay, { timeout: 5_000, timeoutMsg: "the host taking the size again did not raise the overlay" });
+      await clickPresent(`[data-testid="remote-task-${remoteTask.id}"]`);
+      await browser.waitUntil(async () => { const v = await view(); return v.owner === "true" && !v.hidden && !v.overlay; }, { timeout: 5_000, timeoutMsg: "picking the task in the sidebar did not take the size back" });
       // The terminal and nothing else: the phone's card, transcript and
       // composer stand in for a keyboard, and this window has one.
       const extras = await browser.execute(() =>

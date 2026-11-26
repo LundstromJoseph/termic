@@ -257,7 +257,7 @@ fn report_back_now(cmd: Command, contacts: &[String], host: &dyn CliHost) -> Com
 fn sanitize(cmd: &Command) -> Command {
     let Ok(mut v) = serde_json::to_value(cmd) else { return cmd.clone() };
     if let Some(o) = v.as_object_mut() {
-        for k in ["cwd", "parent_task", "caller_task"] {
+        for k in ["cwd", "parent_task", "parent_tab", "caller_task"] {
             o.remove(k);
         }
     }
@@ -1347,6 +1347,15 @@ impl Node {
         }
         let their_grant = msg.body.get("grant").and_then(|v| v.as_str()).and_then(Grant::parse).unwrap_or_default();
         let replaces_existing = self.store.lock().unwrap().peers.iter().any(|p| p.id == inc.peer.id);
+        // The pairing goes both ways, the connection one way: the machine
+        // whose person asked (and typed the code) connects; here a new pair
+        // starts switched off in the sidebar until turned on. Both connecting
+        // at once listed each machine's tasks on the other, which nobody
+        // asked for. Set before the record lands, so the link the record
+        // starts is already off. A re-pair keeps the switch as it was.
+        if !replaces_existing {
+            let _ = crate::remote_client::set_connected(&inc.peer.id, false);
+        }
         self.persist_pair(new_record(&inc.peer, inc.ip, &inc.key, their_grant));
         self.close_pair_mode();
         self.ui.pairing(&PairingView {
@@ -3057,6 +3066,7 @@ mod tests {
         let send = |p: &str| Command::Send {
             task: Some("t".into()), project: None, prompt: p.into(), prompt_ref: None, resume: false,
             fresh: false, wait: false, timeout_ms: None, tab: None, now: false, cwd: None,
+            caller_task: None,
         };
         let text = |c: Command| match c { Command::Send { prompt, .. } => prompt, _ => unreachable!() };
         // No alias: untouched.
@@ -3248,6 +3258,7 @@ mod tests {
         let send = |task: String, now: bool| Command::Send {
             task: Some(task), project: None, prompt: "done".into(), prompt_ref: None, resume: false,
             fresh: false, wait: false, timeout_ms: None, tab: None, now, cwd: None,
+            caller_task: None,
         };
         let now_of = |c: Command| match c { Command::Send { now, .. } => now, _ => unreachable!() };
         let contacts = vec![asked.id.clone()];
@@ -3282,6 +3293,7 @@ mod tests {
             tab: None,
             now: false,
             cwd: None,
+            caller_task: None,
         };
         // Before t1 ever called Win, Win cannot prompt it.
         let r = call(&b, "Mac", send(&t1), None);

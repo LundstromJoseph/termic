@@ -129,6 +129,7 @@ export default {
     stateDraft: "草稿",
     stateOpen: "开放",
     checksFailing: "检查失败",
+    checksRunning: "检查运行中",
     approved: "已批准",
     openOn: "在 {{forge}} 上打开",
     new: "新",
@@ -371,6 +372,11 @@ export default {
     prChecksFailing: "检查失败",
     prChecksPending: "检查进行中",
     memberMore: "+{{count}} 个",
+  },
+  attention: {
+    empty: "没有等待你的任务。",
+    open: "打开",
+    waiting: "正在终端中等你。",
   },
   activity: {
     windowTitle: "活动",

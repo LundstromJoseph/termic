@@ -25,7 +25,7 @@
 import { create } from "zustand";
 import { isBetaBuild } from "@/lib/build";
 import { check, type Update } from "@tauri-apps/plugin-updater";
-import { relaunch } from "@tauri-apps/plugin-process";
+import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
 
 // Two changelog artifacts served from termic.dev/updates/:
@@ -43,7 +43,10 @@ const MANUAL_CHECK_TIMEOUT_MS = 10_000;
 
 // localStorage keys. Kept here (not in prefs.ts) because this is app
 // state, not a user-facing Settings preference.
-const LS_DISMISSED = "updateDismissedVersion"; // update-card dismissal
+// A dismissed update is not stored: closing the card means "not now", and a
+// restart suggests that version again (a stored dismissal hid it for good).
+// Dropped here so an older build's leftover does not linger.
+try { localStorage.removeItem("updateDismissedVersion"); } catch { /* storage unavailable */ }
 const LS_LAST_SEEN = "updateLastSeenVersion";  // what's-new watermark
 
 /** One category block inside a changelog entry. */
@@ -148,7 +151,7 @@ export const useUpdate = create<UpdateState>((set, get) => ({
   changelogStatus: "idle",
   changelogMarkdown: null,
   installing: null,
-  dismissedVersion: lsGet(LS_DISMISSED),
+  dismissedVersion: "",
   lastSeenVersion: lsGet(LS_LAST_SEEN),
 
   init: () => {
@@ -261,7 +264,6 @@ export const useUpdate = create<UpdateState>((set, get) => ({
       // was briefly unreachable, and the next background check would then
       // re-show the card the user had dismissed.
       if (u) {
-        lsSet(LS_DISMISSED, "");
         set({ update: u, dismissedVersion: "" });
       } else {
         set({ update: u });
@@ -297,8 +299,9 @@ export const useUpdate = create<UpdateState>((set, get) => ({
       // Progress callback ignored for v1 — banner just says "Downloading".
       await u.downloadAndInstall();
       set({ installing: "installing" });
-      // relaunch() spawns the freshly-installed .app and exits this one.
-      await relaunch();
+      // Exits this one and starts the freshly installed app (through
+      // LaunchServices on macOS: relaunch_after_update in lib.rs).
+      await invoke("relaunch_after_update");
     } catch (e) {
       console.error("[updater] install failed:", e);
       set({ installing: null });
@@ -308,7 +311,6 @@ export const useUpdate = create<UpdateState>((set, get) => ({
   dismissUpdate: () => {
     const u = get().update;
     if (!u) return;
-    lsSet(LS_DISMISSED, u.version);
     set({ dismissedVersion: u.version });
   },
 
@@ -373,21 +375,34 @@ A prior version so the Changelog dialog has history to scroll.
 
 /** Dev-only fake Update — cast through unknown; the app only ever
  *  touches version / currentVersion / downloadAndInstall(). */
-function makeMockUpdate(version: string): Update {
+function makeMockUpdate(version: string, currentVersion = "0.4.0"): Update {
   return {
     version,
-    currentVersion: "0.4.0",
+    currentVersion,
+    // Shipped two hours ago, for the card's "v… · 2 hours ago".
+    date: new Date(Date.now() - 2 * 3600_000).toISOString(),
     downloadAndInstall: async () => { console.log("[updater] mock install, no-op in dev"); },
   } as unknown as Update;
 }
 
 /** Fully self-contained mock state (no network) for `npm run tauri dev`
- *  with VITE_MOCK_UPDATE=available | whatsnew. */
+ *  with VITE_MOCK_UPDATE=available | patch | whatsnew. */
 function devMockState(mode: string): Partial<UpdateState> {
   if (mode === "whatsnew") {
     return {
       currentVersion: MOCK_CHANGELOG[0].version,
       lastSeenVersion: "0.0.0",
+      changelog: MOCK_CHANGELOG,
+      changelogMarkdown: MOCK_CHANGELOG_MD,
+      changelogStatus: "ready",
+    };
+  }
+  // "patch": a patch on the running release, drawn as the slim row.
+  if (mode === "patch") {
+    return {
+      currentVersion: MOCK_CHANGELOG[1].version,
+      lastSeenVersion: MOCK_CHANGELOG[1].version,
+      update: makeMockUpdate(MOCK_CHANGELOG[0].version, MOCK_CHANGELOG[1].version),
       changelog: MOCK_CHANGELOG,
       changelogMarkdown: MOCK_CHANGELOG_MD,
       changelogStatus: "ready",

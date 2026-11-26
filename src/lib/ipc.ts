@@ -131,8 +131,18 @@ export const taskGroupJoin = (taskId: string, targetId: string, color?: string |
   invoke<void>("task_group_join", { taskId, targetId, color: color ?? null });
 /** `taskId` was created by `parentId`'s agent: records the link, and joins
  *  the parent's group when both are in one project (Rust `apply_spawn_link`). */
-export const taskLinkSpawn = (taskId: string, parentId: string, color?: string | null) =>
-  invoke<void>("task_link_spawn", { taskId, parentId, color: color ?? null });
+export const taskLinkSpawn = (
+  taskId: string,
+  parentId: string,
+  color?: string | null,
+  parentTabId?: string | null,
+) =>
+  invoke<void>("task_link_spawn", {
+    taskId,
+    parentId,
+    color: color ?? null,
+    parentTabId: parentTabId ?? null,
+  });
 /** A new group holding just this task (Move to group > New group). */
 export const taskGroupNew = (taskId: string, color?: string | null) =>
   invoke<void>("task_group_new", { taskId, color: color ?? null });
@@ -809,8 +819,28 @@ export const taskFileFp = (id: string, path: string) =>
  *  found" instead of opening a dead tab. */
 export const taskPathStat = (id: string, path: string) =>
   invoke<{ exists: boolean; is_dir: boolean }>("task_path_stat", { id, path });
+/** A file's addresses on its forge (GH #467): see file_web_links in lib.rs. */
+export interface FileWebLinks {
+  forge: string;
+  branch: string | null;
+  branchPushed: boolean;
+  defaultBranch: string | null;
+  commitPushed: boolean;
+  branchUrl: string | null;
+  defaultUrl: string | null;
+  permalinkUrl: string | null;
+}
+export const fileWebLinks = (path: string, lines?: [number, number] | null) =>
+  invoke<FileWebLinks>("file_web_links", { path, lines: lines ?? null });
 export const taskFileWrite = (id: string, path: string, content: string) =>
   invoke<void>("task_file_write", { id, path, content });
+/** Would `taskFileWrite` accept this path? False for a file reached through
+ *  a link out of the task unless the link lands in a sandbox path the user
+ *  granted, always false into the main checkout (its `.claude`) or a member
+ *  repo, and false for a missing file. The editor opens a `false` read-only.
+ *  Advisory: `taskFileWrite` re-checks. */
+export const taskFileWritable = (id: string, path: string) =>
+  invoke<boolean>("task_file_writable", { id, path });
 export const taskFiles    = (id: string) => invoke<string[]>("task_files", { id });
 
 // ─────────────────────────── scratchpads (GH #244) ───────────────────────────

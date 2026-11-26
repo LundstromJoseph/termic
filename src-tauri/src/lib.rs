@@ -752,6 +752,10 @@ pub struct Task {
     pub pr_state: Option<String>,
     #[serde(default)]
     pub pr_state_at: Option<String>,
+    /// Source branch (`PrStatus.head`) of the cached PR/MR, written alongside
+    /// `pr_state` so replacement discovery stays scoped to the same branch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_head: Option<String>,
     /// Comment watcher opt-in for this task (the bell on the PR
     /// card). Persisted so a relaunch resumes watching. The per-project
     /// `watch_pr_comments` setting force-enables it for every task
@@ -800,6 +804,12 @@ pub struct Task {
     /// is claimed through `$TERMIC_TASK_ID`, not proven).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spawned_by: Option<String>,
+    /// The tab inside `spawned_by` whose agent initiated this task
+    /// (`$TERMIC_TAB_ID` / `X-Termic-Tab`), so replies without an explicit
+    /// `--tab` route back to the initiating tab rather than the parent's
+    /// default tab. Cosmetic like `spawned_by` (caller-asserted).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spawned_by_tab: Option<String>,
     /// Per-agent account override for THIS task (GH #278), agent id -> account
     /// name. Written when a running task is switched to another account, and
     /// read at every spawn so the choice survives a relaunch. Absent means
@@ -1055,6 +1065,17 @@ pub struct TaskMember {
     /// creation copied in.
     #[serde(default)]
     pub files_to_copy: Vec<String>,
+    /// Cached PR/MR identity for this member repo (matching `Task::pr_*`),
+    /// keeping settled GitLab MRs pinned after branch deletion and scoping
+    /// same-branch replacements cleanly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_number: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_head: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -1998,7 +2019,6 @@ pub(crate) fn write_atomic_private(dest: &Path, bytes: &[u8]) -> std::io::Result
 }
 
 fn write_atomic_mode(dest: &Path, bytes: &[u8], private: bool) -> std::io::Result<()> {
-    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     // Resolve symlinks: rename would replace the link itself with a regular
     // file; we must write through to its target. canonicalize fails on a
     // DANGLING link (dotfiles target not created yet), so follow links by
@@ -2017,24 +2037,24 @@ fn write_atomic_mode(dest: &Path, bytes: &[u8], private: bool) -> std::io::Resul
     let dest = resolved.as_path();
     let dir = dest.parent().unwrap_or_else(|| Path::new("."));
     let stem = dest.file_name().and_then(|n| n.to_str()).unwrap_or("out");
-    let tmp = dir.join(format!(
-        ".{stem}.tmp.{}.{}",
-        std::process::id(),
-        SEQ.fetch_add(1, Ordering::Relaxed),
-    ));
+    // unguessable, and created with `create_new` (O_EXCL, which also refuses
+    // a symlink at the name). The dir is often one an agent can write: a
+    // `{pid}.{seq}` name opened with `File::create` let it plant a link there
+    // ahead of a save and have termic, outside the cage, write the buffer
+    // through it, and the rename then swapped the link in over the file.
+    let tmp = dir.join(format!(".{stem}.tmp.{}", Uuid::new_v4().simple()));
     let write = || -> std::io::Result<()> {
+        let mut opts = fs::OpenOptions::new();
+        opts.write(true).create_new(true);
         // A secret's temp file is BORN owner-only. Creating it with the umask
         // default and tightening after left a moment where another user could
         // open it, and an fd opened then keeps reading after the chmod.
         #[cfg(unix)]
-        let mut f = if private {
+        if private {
             use std::os::unix::fs::OpenOptionsExt;
-            fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp)?
-        } else {
-            fs::File::create(&tmp)?
-        };
-        #[cfg(not(unix))]
-        let mut f = fs::File::create(&tmp)?;
+            opts.mode(0o600);
+        }
+        let mut f = opts.open(&tmp)?;
         // and set explicitly too: `mode` is filtered through the umask.
         #[cfg(unix)]
         if private {
@@ -4016,6 +4036,7 @@ pub(crate) struct PtyFeed {
 
 struct PtyFeedInner {
     ring: PtyRing,
+    modes: TermModes,
     taps: Vec<std::sync::mpsc::SyncSender<PtyTapMsg>>,
 }
 
@@ -4030,7 +4051,7 @@ impl PtyFeed {
 
     fn new() -> Self {
         PtyFeed {
-            inner: Mutex::new(PtyFeedInner { ring: PtyRing::new(), taps: Vec::new() }),
+            inner: Mutex::new(PtyFeedInner { ring: PtyRing::new(), modes: TermModes::default(), taps: Vec::new() }),
         }
     }
     /// Reader-thread path: retain the chunk and forward it to every
@@ -4039,6 +4060,7 @@ impl PtyFeed {
     fn push(&self, data: &[u8]) {
         let mut inner = self.inner.lock();
         inner.ring.push(data);
+        inner.modes.feed(data);
         inner
             .taps
             .retain(|tx| tx.try_send(PtyTapMsg::Data(data.to_vec())).is_ok());
@@ -4081,11 +4103,94 @@ impl PtyFeed {
         let (tx, rx) = std::sync::mpsc::sync_channel(Self::TAP_DEPTH);
         let mut inner = self.inner.lock();
         inner.taps.push(tx.clone());
-        let (backlog, truncated) = inner.ring.tail(usize::MAX);
+        let (mut backlog, truncated) = inner.ring.tail(usize::MAX);
+        // The ring holds only the recent output, and a program switches its
+        // input modes once, at startup: a viewer replaying the tail never saw
+        // Claude turn mouse tracking on, so it selected text itself instead of
+        // sending the drag, and Claude never copied it. The modes' state now
+        // follows the backlog (after it, so the replay cannot undo it).
+        backlog.extend_from_slice(&inner.modes.restore());
         (backlog, truncated, rx, tx)
     }
     fn tail(&self, max: usize) -> (Vec<u8>, bool) {
         self.inner.lock().ring.tail(max)
+    }
+}
+
+/// The DEC private modes that change what a terminal SENDS (mouse reports
+/// and their encodings, focus reports, bracketed paste, application cursor
+/// keys), as the PTY's output last set them. A late viewer replays only the
+/// ring's tail, so it is handed these after it (`restore`). Screen modes (the
+/// alternate screen, cursor visibility) are left to the replay: they change
+/// what is drawn, and the tail redraws it.
+#[derive(Default)]
+pub(crate) struct TermModes {
+    on: std::collections::BTreeMap<u16, bool>,
+    /// An escape sequence cut off at the end of the last chunk.
+    carry: Vec<u8>,
+}
+
+impl TermModes {
+    const TRACKED: [u16; 10] = [1, 1000, 1002, 1003, 1004, 1005, 1006, 1015, 1016, 2004];
+
+    fn feed(&mut self, data: &[u8]) {
+        let mut buf = std::mem::take(&mut self.carry);
+        buf.extend_from_slice(data);
+        let mut i = 0;
+        while i < buf.len() {
+            if buf[i] != 0x1b {
+                i += 1;
+                continue;
+            }
+            // ESC [ ? params h|l
+            let rest = &buf[i..];
+            if rest.len() < 3 {
+                if b"\x1b[?".starts_with(rest) {
+                    self.carry = rest.to_vec();
+                }
+                return;
+            }
+            if &rest[..3] != b"\x1b[?" {
+                i += 1;
+                continue;
+            }
+            let mut j = 3;
+            while j < rest.len() && (rest[j].is_ascii_digit() || rest[j] == b';') {
+                j += 1;
+            }
+            if j == rest.len() {
+                // Cut off mid-sequence: keep it for the next chunk (bounded).
+                if rest.len() <= 32 {
+                    self.carry = rest.to_vec();
+                }
+                return;
+            }
+            let set = match rest[j] {
+                b'h' => Some(true),
+                b'l' => Some(false),
+                _ => None,
+            };
+            if let Some(set) = set {
+                for p in std::str::from_utf8(&rest[3..j]).unwrap_or("").split(';') {
+                    if let Ok(n) = p.parse::<u16>() {
+                        if Self::TRACKED.contains(&n) {
+                            self.on.insert(n, set);
+                        }
+                    }
+                }
+            }
+            i += j + 1;
+        }
+    }
+
+    /// The sequences that put a fresh terminal in these modes: each tracked
+    /// mode that is on is set, one that was turned off is reset.
+    fn restore(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        for (n, on) in &self.on {
+            out.extend_from_slice(format!("\x1b[?{n}{}", if *on { 'h' } else { 'l' }).as_bytes());
+        }
+        out
     }
 }
 
@@ -4487,8 +4592,14 @@ fn live_sandbox_lists(task: &Task) -> (Vec<String>, Vec<String>) {
     // The TASK'S profile, not the root's: settings are profile-scoped in full
     // (docs/profiles.md), so a second profile's sandbox defaults have to be
     // the ones a spawn under it actually gets.
-    let globals = load_settings_in(&task.profile);
-    let projects = load_projects_all();
+    live_sandbox_lists_in(task, &load_settings_in(&task.profile), &load_projects_all(), true)
+}
+
+/// `live_sandbox_lists` with its inputs passed in. `committed: false` drops
+/// layer 4 (every `.termic.yaml`), leaving only what the user authored: the
+/// editor's write check (`task_write_bounds`) takes that half, since a repo
+/// can commit a grant but must never widen where the editor writes.
+fn live_sandbox_lists_in(task: &Task, globals: &Settings, projects: &[Project], committed: bool) -> (Vec<String>, Vec<String>) {
     let mut rw = globals.sandbox_default_rw_paths.clone();
     let mut hosts = globals.sandbox_default_allowed_hosts.clone();
     // The task's own pinned arrays — the Sandbox dialog's
@@ -4505,9 +4616,11 @@ fn live_sandbox_lists(task: &Task) -> (Vec<String>, Vec<String>) {
         // Single-repo: the project's committed `.termic.yaml` sandbox block
         // (re-read live) + its personal projects.json overrides.
         if let Some(p) = projects.iter().find(|p| p.id == task.project_id) {
-            let cfg = repo_config_for(p);
-            rw.extend(cfg.sandbox.allowed_paths);
-            hosts.extend(cfg.sandbox.allowed_hosts);
+            if committed {
+                let cfg = repo_config_for(p);
+                rw.extend(cfg.sandbox.allowed_paths);
+                hosts.extend(cfg.sandbox.allowed_hosts);
+            }
             rw.extend(p.sandbox_rw_paths.iter().cloned());
             hosts.extend(p.sandbox_allowed_hosts.iter().cloned());
         }
@@ -4516,7 +4629,7 @@ fn live_sandbox_lists(task: &Task) -> (Vec<String>, Vec<String>) {
         // re-read live from its source repo. (Member sandbox lists from the
         // multi-repo project were frozen into the task's pinned arrays
         // at create, so they're already covered above.)
-        for m in &task.composition {
+        for m in task.composition.iter().filter(|_| committed) {
             let rp = member_repo_path(m);
             if rp.is_empty() { continue; }
             let cfg = repo_config::load_or_default(Path::new(&rp));
@@ -5492,7 +5605,7 @@ fn pty_spawn(
             // agent to prompt them back (src/lib/agentBriefing.ts).
             cmd.env(
                 "TERMIC_CLI_HELP",
-                "You are running INSIDE a Termic task ($TERMIC_TASK_ID): Termic runs coding agents side by side, each task a git worktree (or the main checkout) with its own terminal, listed in the app's sidebar. TERMIC_CLI is the Termic control CLI, which drives the app around you. Run `\"$TERMIC_CLI\" help --json` for the full command surface. Prompt an existing task with `\"$TERMIC_CLI\" send <task> -p \"...\"`; create one with `\"$TERMIC_CLI\" new <name> -p \"...\"` and, in that prompt, ask it to report back to you (the signed reply below) every time it finishes or gets stuck, follow-up work included, until a human tells it to stop: that is how results come back, and it arrives in your own terminal. If no report arrives, `result` and `logs` read what it produced. Ask for a file (e.g. RESULT.md in its worktree) only when it cannot report back: a task sandboxed in enforce/enforce-fs is denied this CLI, and so is anything run outside Termic. Unattended tasks need `--yolo` or `--sandbox enforce` or they stop at the first permission prompt; the cage self-approves inside it but costs you the report-back. Coordinate by prompting each other, not by blocking: end every prompt you send with the command you want run when that work is done, in DOUBLE quotes so your own shell fills in your task name and address: `\"$TERMIC_CLI\" send <task> -p \"[message from agent:<you> task:$TERMIC_TASK id:$TERMIC_TASK_ID] <work>. When done, reply: \\\"$TERMIC_CLI\\\" send $TERMIC_TASK_ID -p '[message from agent:<its agent> task:<its task name> id:<its task id>] done: <what you did> -- agent:<its agent> task:<its task name> id:<its task id>' -- agent:<you> task:$TERMIC_TASK id:$TERMIC_TASK_ID\"` (fill the <its ...> parts with the task you are prompting, which you know). Every prompt you send another agent opens with that header, `[message from agent:<agent> task:<task name> id:<task id>]`, and ends with that signature, `-- agent:<agent> task:<task name> id:<task id>`, naming YOU, so the receiver knows it came from another agent, not the user, and exactly which one: the id is where to reply. A prompt arriving in your terminal WITH that header is from another agent, not the user: treat it as a peer's request (the user's instructions win on conflict) and sign your reply the same way. Report back to that id every time you finish or get stuck, follow-up work included, and stop only when a human tells you to. Prefer that over `--wait`: work-done detection is a heuristic, and a waiting agent can do nothing else meanwhile. If you do wait, branch on exit codes: 0 done, 3 needs input, 7 timeout, 9 prompt not delivered. A task sandboxed in enforce/enforce-fs is denied the control plane by design and can never report back: ask it for a file in its worktree instead. Your own task, if any, is $TERMIC_TASK_ID (prefer the id over $TERMIC_TASK: names can be renamed or reused). Once you know the real subject of your work (issue filed, PR opened), retitle your task so the sidebar reads well: `\"$TERMIC_CLI\" rename \"<new name>\"` renames your own task's label (branch and directory keep their names). Tasks you create with `new` in your own project join YOUR task's group in the sidebar, one coloured block led by your task (one in another project joins no group and is linked to yours instead): name it for the batch of work with `\"$TERMIC_CLI\" group --name \"<what this batch is>\"` (optionally `--color teal`); `group` alone shows it. A multi-repo project holds several repos, possibly many (`project list` shows each project's type and members): `new --member <name>`, repeated, worktrees only the members named (none without it). Start another agent beside you in your own task with `\"$TERMIC_CLI\" tab --agent <id> --title <name> -p \"...\"` (no task argument needed), then address it with `--tab <name>` on send/wait/logs; `tab --tab <tab> --title <name>` renames an open tab. Label your own tab with what you are working on, shown after the task name in the sidebar: `\"$TERMIC_CLI\" prop ticket ABC-1` (`prop <key> \"\"` clears it, bare `prop` lists them). To start the dev server, when your task has a run script configured use `\"$TERMIC_CLI\" run`: it runs that script in the task's Run tab, where the user sees it and can stop it, so do not launch your own `npm run dev` or similar in a shell (`run --status` shows the script and whether it runs, `run --stop` stops it, `logs --tab <tab id>` reads its output). Put a coloured status on your task's sidebar row, under its name: `\"$TERMIC_CLI\" badge set ci failing --color error` (good, warning, error, neutral or a hex; the same key replaces it, `badge rm <key>` removes it, `badge list` lists them). To walk the user through your changes, present a commit range as a review in your task's Git tab: `\"$TERMIC_CLI\" present new main..HEAD --title \"<title>\"` prints its id; `present comment r1 --file <path> --line 12-14 -m \"...\"` opens a thread (no `--line`: the whole file). The user's comments arrive in your terminal naming each thread: answer each with `present reply r1-t3 -m \"...\"`, not in the terminal; `present show r1 --since <seq>` catches up; after an amend, rebase or new commit, `present update r1 --head HEAD` starts the review's next iteration and moves its threads, and its reply lists the threads that went outdated; `present delete r1` deletes a review for good. For notes, plans, findings, logs or a report the user should READ rather than commit, use a scratchpad instead of writing temporary .md files into the repo: it is a tab in your task that stays out of git and updates live as you write: `\"$TERMIC_CLI\" scratchpad new --title \"<title>\" -c \"<text>\"` prints its id; `scratchpad write <id> --append -c -` adds stdin to it, `scratchpad read <id>` prints it, `scratchpad list` lists them. If this machine is paired with others on its network (`\"$TERMIC_CLI\" peer list`), `--peer <machine>` runs any verb THERE (`\"$TERMIC_CLI\" --peer <machine> new <name> -p \"...\"`): add `peer:<this machine's name, from peer list>` to your header and ask for the reply as `termic --peer <this machine> send $TERMIC_TASK_ID ...`; a header carrying `peer:<machine>` came from that machine, so answer it with `--peer <machine>`.",
+                "You are running INSIDE a Termic task ($TERMIC_TASK_ID, and your own agent tab is $TERMIC_TAB_ID): Termic runs coding agents side by side, each task a git worktree (or the main checkout) with its own terminal, listed in the app's sidebar. TERMIC_CLI is the Termic control CLI, which drives the app around you. Run `\"$TERMIC_CLI\" help --json` for the full command surface. Prompt an existing task with `\"$TERMIC_CLI\" send <task> -p \"...\"`; create one with `\"$TERMIC_CLI\" new <name> -p \"...\"` and, in that prompt, ask it to report back to you (the signed reply below) every time it finishes or gets stuck, follow-up work included, until a human tells it to stop: that is how results come back, and it arrives in your own tab. If no report arrives, `result` and `logs` read what it produced. Ask for a file (e.g. RESULT.md in its worktree) only when it cannot report back: a task sandboxed in enforce/enforce-fs is denied this CLI, and so is anything run outside Termic. Unattended tasks need `--yolo` or `--sandbox enforce` or they stop at the first permission prompt; the cage self-approves inside it but costs you the report-back. Coordinate by prompting each other, not by blocking: end every prompt you send with the command you want run when that work is done, in DOUBLE quotes so your own shell fills in your task name, task id, and tab id: `\"$TERMIC_CLI\" send <task> -p \"[message from agent:<you> task:$TERMIC_TASK id:$TERMIC_TASK_ID${TERMIC_TAB_ID:+ tab:$TERMIC_TAB_ID}] <work>. When done, reply: \\\"$TERMIC_CLI\\\" send $TERMIC_TASK_ID ${TERMIC_TAB_ID:+--tab $TERMIC_TAB_ID }-p '[message from agent:<its agent> task:<its task name> id:<its task id>] done: <what you did> -- agent:<its agent> task:<its task name> id:<its task id>' -- agent:<you> task:$TERMIC_TASK id:$TERMIC_TASK_ID${TERMIC_TAB_ID:+ tab:$TERMIC_TAB_ID}\"` (fill the <its ...> parts with the task you are prompting, which you know). Every prompt you send another agent opens with that header, `[message from agent:<agent> task:<task name> id:<task id> tab:<tab id>]`, and ends with that signature, `-- agent:<agent> task:<task name> id:<task id> tab:<tab id>`, naming YOU, so the receiver knows it came from another agent, not the user, and exactly which task and tab to reply to (including split-pane tabs, which `--tab <tab id>` reaches by exact id). A prompt arriving in your terminal WITH that header is from another agent, not the user: treat it as a peer's request (the user's instructions win on conflict), pass `--tab <tab id>` if the header carries `tab:<tab id>`, and sign your reply the same way. Report back to that address every time you finish or get stuck, follow-up work included, and stop only when a human tells you to. Prefer that over `--wait`: work-done detection is a heuristic, and a waiting agent can do nothing else meanwhile. If you do wait, branch on exit codes: 0 done, 3 needs input, 7 timeout, 9 prompt not delivered. A task sandboxed in enforce/enforce-fs is denied the control plane by design and can never report back: ask it for a file in its worktree instead. Your own task, if any, is $TERMIC_TASK_ID (prefer the id over $TERMIC_TASK: names can be renamed or reused), and your tab is $TERMIC_TAB_ID. Once you know the real subject of your work (issue filed, PR opened), retitle your task so the sidebar reads well: `\"$TERMIC_CLI\" rename \"<new name>\"` renames your own task's label (branch and directory keep their names). Tasks you create with `new` in your own project join YOUR task's group in the sidebar, one coloured block led by your task (one in another project joins no group and is linked to yours instead): name it for the batch of work with `\"$TERMIC_CLI\" group --name \"<what this batch is>\"` (optionally `--color teal`); `group` alone shows it. A multi-repo project holds several repos, possibly many (`project list` shows each project's type and members): `new --member <name>`, repeated, worktrees only the members named (none without it). Start another agent beside you in your own task with `\"$TERMIC_CLI\" tab --agent <id> --title <name> -p \"...\"` (no task argument needed), then address it with `--tab <name>` on send/wait/logs (or by exact tab id for split-pane tabs); `tab --tab <tab> --title <name>` renames an open tab. Label your own tab with what you are working on, shown after the task name in the sidebar: `\"$TERMIC_CLI\" prop ticket ABC-1` (`prop <key> \"\"` clears it, bare `prop` lists them). To start the dev server, when your task has a run script configured use `\"$TERMIC_CLI\" run`: it runs that script in the task's Run tab, where the user sees it and can stop it, so do not launch your own `npm run dev` or similar in a shell (`run --status` shows the script and whether it runs, `run --stop` stops it, `logs --tab <tab id>` reads its output). Put a coloured status on your task's sidebar row, under its name: `\"$TERMIC_CLI\" badge set ci failing --color error` (good, warning, error, neutral or a hex; the same key replaces it, `badge rm <key>` removes it, `badge list` lists them). To walk the user through your changes, present a commit range as a review in your task's Git tab: `\"$TERMIC_CLI\" present new main..HEAD --title \"<title>\"` prints its id; `present comment r1 --file <path> --line 12-14 -m \"...\"` opens a thread (no `--line`: the whole file). The user's comments arrive in your terminal naming each thread: answer each with `present reply r1-t3 -m \"...\"`, not in the terminal; `present show r1 --since <seq>` catches up; after an amend, rebase or new commit, `present update r1 --head HEAD` starts the review's next iteration and moves its threads, and its reply lists the threads that went outdated; `present delete r1` deletes a review for good. For notes, plans, findings, logs or a report the user should READ rather than commit, use a scratchpad instead of writing temporary .md files into the repo: it is a tab in your task that stays out of git and updates live as you write: `\"$TERMIC_CLI\" scratchpad new --title \"<title>\" -c \"<text>\"` prints its id; `scratchpad write <id> --append -c -` adds stdin to it, `scratchpad read <id>` prints it, `scratchpad list` lists them. If this machine is paired with others on its network (`\"$TERMIC_CLI\" peer list`), `--peer <machine>` runs any verb THERE (`\"$TERMIC_CLI\" --peer <machine> new <name> -p \"...\"`): add `peer:<this machine's name, from peer list>` to your header and ask for the reply as `termic --peer <this machine> send $TERMIC_TASK_ID ${TERMIC_TAB_ID:+--tab $TERMIC_TAB_ID }...`; a header carrying `peer:<machine>` came from that machine, so answer it with `--peer <machine>`.",
             );
         }
     }
@@ -6627,7 +6740,7 @@ fn profile_update(app: AppHandle, slug: String, name: Option<String>, accent: Op
         use tauri::Manager;
         if let Some(win) = app.get_webview_window(&id.window_label()) {
             if !id.is_root() {
-                let _ = win.set_title(&title);
+                set_profile_window_title(&win, &title);
             }
         }
     }
@@ -7629,6 +7742,10 @@ fn link_repo_mode_members(host_dir: &Path, members: &[ProjectMember], first_port
             // Frozen, not applied: repo mode symlinks the live checkout,
             // which already holds its own gitignored files.
             files_to_copy:  pm.files_to_copy.clone(),
+            pr_number:      None,
+            pr_provider:    None,
+            pr_state:       None,
+            pr_head:        None,
         });
     }
     Ok(composition)
@@ -7890,6 +8007,7 @@ async fn task_open_repo(
         pr_title: None,
         pr_state: None,
         pr_state_at: None,
+        pr_head: None,
         pr_watch: false,
         pr_comments_seen_at: None,
         // New tasks are unordered: they append below any manually
@@ -7898,6 +8016,7 @@ async fn task_open_repo(
         pinned: false,
         group: None,
         spawned_by: None,
+        spawned_by_tab: None,
         schedule: None,
         badges: Vec::new(),
         last_active_at: None,
@@ -8435,6 +8554,7 @@ fn task_import_worktree(
         pr_title: None,
         pr_state: None,
         pr_state_at: None,
+        pr_head: None,
         pr_watch: false,
         pr_comments_seen_at: None,
         // New tasks are unordered: they append below any manually
@@ -8443,6 +8563,7 @@ fn task_import_worktree(
         pinned: false,
         group: None,
         spawned_by: None,
+        spawned_by_tab: None,
         schedule: None,
         badges: Vec::new(),
         last_active_at: None,
@@ -8949,6 +9070,7 @@ fn task_create_sync(app: AppHandle, args: CreateTaskArgs) -> Result<Task, String
         pr_title: None,
         pr_state: None,
         pr_state_at: None,
+        pr_head: None,
         pr_watch: false,
         pr_comments_seen_at: None,
         // New tasks are unordered: they append below any manually
@@ -8957,6 +9079,7 @@ fn task_create_sync(app: AppHandle, args: CreateTaskArgs) -> Result<Task, String
         pinned: false,
         group: None,
         spawned_by: None,
+        spawned_by_tab: None,
         schedule: None,
         badges: Vec::new(),
         last_active_at: None,
@@ -9384,6 +9507,7 @@ fn task_create_multi_sync(app: AppHandle, args: CreateMultiArgs) -> Result<Task,
         pr_title: None,
         pr_state: None,
         pr_state_at: None,
+        pr_head: None,
         pr_watch: false,
         pr_comments_seen_at: None,
         // New tasks are unordered: they append below any manually
@@ -9392,6 +9516,7 @@ fn task_create_multi_sync(app: AppHandle, args: CreateMultiArgs) -> Result<Task,
         pinned: false,
         group: None,
         spawned_by: None,
+        spawned_by_tab: None,
         schedule: None,
         badges: Vec::new(),
         last_active_at: None,
@@ -9607,6 +9732,10 @@ fn materialize_member(
                 run_script:     mp.run_script.clone(),
                 archive_script: mp.archive_script.clone(),
                 files_to_copy:  mp.files_to_copy.clone(),
+                pr_number:      None,
+                pr_provider:    None,
+                pr_state:       None,
+                pr_head:        None,
             })
         }
         MemberMode::Worktree => {
@@ -9668,6 +9797,10 @@ fn materialize_member(
                 run_script:     mp.run_script.clone(),
                 archive_script: mp.archive_script.clone(),
                 files_to_copy:  mp.files_to_copy.clone(),
+                pr_number:      None,
+                pr_provider:    None,
+                pr_state:       None,
+                pr_head:        None,
             })
         }
     }
@@ -10172,10 +10305,17 @@ fn apply_group_join(list: &mut [Task], task_id: &str, target_id: &str, color: Op
 }
 
 /// Record that `parent_id`'s agent created `child_id` (the CLI's and MCP's
-/// `new`). Always stamps `spawned_by`; a child in the SAME project also joins
-/// the parent's group, founding it if need be. A child in another project
-/// joins nothing: the sidebar links the two on hover instead.
-fn apply_spawn_link(list: &mut [Task], child_id: &str, parent_id: &str, color: Option<String>) -> Result<Vec<usize>, String> {
+/// `new`). Always stamps `spawned_by` (and `spawned_by_tab` when present); a
+/// child in the SAME project also joins the parent's group, founding it if
+/// need be. A child in another project joins nothing: the sidebar links the
+/// two on hover instead.
+fn apply_spawn_link(
+    list: &mut [Task],
+    child_id: &str,
+    parent_id: &str,
+    color: Option<String>,
+    parent_tab_id: Option<&str>,
+) -> Result<Vec<usize>, String> {
     if child_id == parent_id {
         return Err("a task cannot spawn itself".into());
     }
@@ -10186,6 +10326,15 @@ fn apply_spawn_link(list: &mut [Task], child_id: &str, parent_id: &str, color: O
     if list[ci].spawned_by.as_deref() != Some(parent_id) {
         list[ci].spawned_by = Some(parent_id.to_string());
         changed.push(ci);
+    }
+    let norm_tab = parent_tab_id.map(str::trim).filter(|s| !s.is_empty());
+    if let Some(tab) = norm_tab {
+        if list[ci].spawned_by_tab.as_deref() != Some(tab) {
+            list[ci].spawned_by_tab = Some(tab.to_string());
+            if !changed.contains(&ci) {
+                changed.push(ci);
+            }
+        }
     }
     if same_project {
         for i in apply_group_join(list, child_id, parent_id, color)? {
@@ -10275,10 +10424,15 @@ async fn task_group_join(task_id: String, target_id: String, color: Option<Strin
 }
 
 #[tauri::command]
-async fn task_link_spawn(task_id: String, parent_id: String, color: Option<String>) -> Result<(), String> {
+async fn task_link_spawn(
+    task_id: String,
+    parent_id: String,
+    color: Option<String>,
+    parent_tab_id: Option<String>,
+) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         let mut list = load_tasks_all();
-        let changed = apply_spawn_link(&mut list, &task_id, &parent_id, color)?;
+        let changed = apply_spawn_link(&mut list, &task_id, &parent_id, color, parent_tab_id.as_deref())?;
         save_changed(&list, changed)
     })
     .await
@@ -12343,10 +12497,7 @@ fn build_profile_window(app: &AppHandle, id: &ProfileId) -> tauri::Result<tauri:
         }
     };
     #[cfg(target_os = "macos")]
-    let traffic_y: f64 = std::env::var("TERMIC_TRAFFIC_Y")
-        .ok()
-        .and_then(|v| v.trim().parse::<f64>().ok())
-        .unwrap_or_else(|| if is_macos_tahoe() { 21.0 } else { 16.0 });
+    let traffic_y = profile_traffic_y();
 
     #[allow(unused_mut)]
     let mut builder = tauri::WebviewWindowBuilder::new(
@@ -12722,6 +12873,128 @@ fn hide_window_from_user_in_e2e(win: &tauri::WebviewWindow) {
         let behavior = (behavior & !(MANAGED | PARTICIPATES_IN_CYCLE)) | TRANSIENT | IGNORES_CYCLE;
         let _: () = msg_send![ns_window, setCollectionBehavior: behavior];
     }
+}
+
+// ─────────────── The "needs you" panel (GH #468) ───────────────
+
+/// A small window that floats over other apps while a task waits on you:
+/// each one's question, answered from there without switching to Termic.
+/// The main window decides when it shows (only while something waits) and
+/// which tasks it lists; this side reads and answers the questions, the same
+/// screen reader and stale check a phone's answer goes through.
+const ATTENTION_WINDOW: &str = "attention";
+
+/// Show or hide the panel. Shown WITHOUT taking focus: the point is to
+/// answer without leaving the app in front, so it must not pull Termic up
+/// when it appears.
+#[tauri::command(async)]
+fn attention_window(app: AppHandle, show: bool) -> Result<(), String> {
+    on_main_thread(&app, move |app| attention_window_main(app, show))
+}
+
+fn attention_window_main(app: &AppHandle, show: bool) -> Result<(), String> {
+    use tauri::Manager;
+    let existing = app.get_webview_window(ATTENTION_WINDOW);
+    if !show {
+        if let Some(w) = existing { let _ = w.hide(); }
+        return Ok(());
+    }
+    let win = match existing {
+        Some(w) => w,
+        None => {
+            let b = tauri::WebviewWindowBuilder::new(app, ATTENTION_WINDOW, tauri::WebviewUrl::App("attention.html".into()))
+                .title("Needs you")
+                .inner_size(360.0, 300.0)
+                .min_inner_size(280.0, 160.0)
+                .always_on_top(true)
+                .visible_on_all_workspaces(true)
+                .skip_taskbar(true)
+                .focused(false)
+                .visible(false);
+            let w = without_browser_accelerators(with_grayscale_text(without_writing_tools(b)))
+                .build()
+                .map_err(|e| e.to_string())?;
+            #[cfg(all(target_os = "macos", feature = "e2e"))]
+            hide_window_from_user_in_e2e(&w);
+            w
+        }
+    };
+    show_without_focus(&win);
+    Ok(())
+}
+
+/// Bring a window to the front without activating the app (macOS's
+/// orderFrontRegardless); elsewhere a plain show, which the window manager
+/// may or may not focus.
+fn show_without_focus(win: &tauri::WebviewWindow) {
+    #[cfg(target_os = "macos")]
+    {
+        use objc2::msg_send;
+        use objc2::runtime::AnyObject;
+        if let Ok(ns) = win.ns_window() {
+            let ns = ns as *mut AnyObject;
+            if !ns.is_null() {
+                // SAFETY: called on the main thread (on_main_thread), the
+                // pointer is tao's live NSWindow, and this is a public setter.
+                unsafe { let _: () = msg_send![ns, orderFrontRegardless]; }
+                return;
+            }
+        }
+    }
+    let _ = win.show();
+}
+
+/// The question on a task's agent screen, read as a phone reads it. None
+/// when the agent is waiting without a menu a tap could answer.
+#[tauri::command]
+async fn attention_question(app: AppHandle, task_id: String) -> Result<Option<termic_remote::wire::Question>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        use tauri::Manager;
+        let manager = app.state::<PtyManager>();
+        let pty = find_role_pty(&manager, &task_id, "agent")?;
+        Ok(agent_screen_question(&manager, &pty))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+fn agent_screen_question(manager: &PtyManager, pty: &str) -> Option<termic_remote::wire::Question> {
+    let (rows, cols) = pty_size_inner(manager, pty)?;
+    let (bytes, _) = pty_logs_tail(manager, pty, 128 * 1024).ok()?;
+    termic_remote::screen::question(&termic_remote::screen::render(&bytes, rows, cols))
+}
+
+/// Answer the question `question_id` with an option's keys (base64). Refused
+/// as "stale" when the screen no longer shows that question (answered at the
+/// desk, or a new one), so a late tap never answers something else.
+#[tauri::command]
+async fn attention_answer(app: AppHandle, task_id: String, question_id: String, keys: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        use tauri::Manager;
+        let manager = app.state::<PtyManager>();
+        let pty = find_role_pty(&manager, &task_id, "agent")?;
+        if agent_screen_question(&manager, &pty).map(|q| q.id).as_deref() != Some(question_id.as_str()) {
+            return Err("stale".into());
+        }
+        let bytes = termic_remote::unb64(&keys).ok_or("bad keys")?;
+        pty_write_inner(&manager, &pty, &bytes)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// "Open" on a card: the main window selects the task, and comes forward.
+#[tauri::command(async)]
+fn attention_open_task(app: AppHandle, task_id: String) -> Result<(), String> {
+    use tauri::{Emitter, Manager};
+    let _ = app.emit_to("main", "attention://open", serde_json::json!({ "taskId": task_id }));
+    if let Some(main) = app.get_webview_window("main") {
+        leave_windowless(&app);
+        let _ = main.unminimize();
+        let _ = main.show();
+        let _ = main.set_focus();
+    }
+    Ok(())
 }
 
 /// `(async)` for the same reason as `profile_open`: building a window from a
@@ -16567,17 +16840,162 @@ pub struct PrLookup {
     pub retry_at: Option<u64>,
 }
 
+#[derive(Clone, Copy)]
+struct KnownPr<'a> {
+    number: u64,
+    provider: Option<&'a str>,
+    state: Option<&'a str>,
+    head: Option<&'a str>,
+}
+
+/// Whether a PR found by branch lookup should replace the task's known PR.
+///
+/// When the known PR is settled (`merged` / `closed`), a replacement is
+/// accepted only while the checkout is still on that same branch (`known_head`
+/// and `candidate.head` both match `cur_branch`). Never regresses from a
+/// known PR to an older settled PR (`candidate.number < known_number`).
+fn accept_branch_candidate(
+    cur_branch: Option<&str>,
+    known_number: u64,
+    known_state: Option<&str>,
+    known_head: Option<&str>,
+    candidate: &forge::PrStatus,
+) -> bool {
+    if matches!(known_state, Some("merged") | Some("closed")) {
+        if candidate.number <= known_number {
+            return false;
+        }
+        let Some(b) = cur_branch else { return false };
+        if candidate.head != b {
+            return false;
+        }
+        return known_head.map_or(true, |h| h == b);
+    }
+    true
+}
+
+fn resolve_pr_with<F>(
+    cur_branch: Option<&str>,
+    known: Option<KnownPr<'_>>,
+    mut fetch: F,
+) -> Result<Option<forge::PrStatus>, forge::ForgeError>
+where
+    F: FnMut(Option<u64>, Option<u64>) -> Result<Option<forge::PrStatus>, forge::ForgeError>,
+{
+    let Some(k) = known else {
+        return fetch(None, None);
+    };
+    let resolve_after_live = |live: forge::PrStatus, fetch: &mut F| -> Result<Option<forge::PrStatus>, forge::ForgeError> {
+        let live_settled = live.state == "merged" || live.state == "closed";
+        if live_settled {
+            if cur_branch.is_some_and(|b| b == live.head) {
+                return match fetch(None, Some(live.number)) {
+                    Ok(Some(cand)) if cand.number != live.number => {
+                        if accept_branch_candidate(cur_branch, live.number, Some(&live.state), Some(&live.head), &cand) {
+                            Ok(Some(cand))
+                        } else {
+                            Ok(Some(live))
+                        }
+                    }
+                    Ok(Some(same)) => Ok(Some(same)),
+                    Ok(None) | Err(_) => Ok(Some(live)),
+                };
+            }
+            return Ok(Some(live));
+        }
+        if !cur_branch.is_some_and(|b| forge::branch_matches_pr(b, &live.head, live.number)) {
+            return match fetch(None, None) {
+                Ok(Some(moved)) => Ok(Some(moved)),
+                _ => Ok(Some(live)),
+            };
+        }
+        Ok(Some(live))
+    };
+
+    // Legacy record missing `pr_head`: resolve by stored number first to
+    // backfill the true head branch before evaluating same-branch rollover.
+    let Some(k_head) = k.head else {
+        return match fetch(Some(k.number), None) {
+            Ok(Some(live)) => resolve_after_live(live, &mut fetch),
+            Ok(None) => fetch(None, None),
+            Err(e) => Err(e),
+        };
+    };
+
+    let settled = matches!(k.state, Some("merged") | Some("closed"));
+    let same_checkout = cur_branch.is_some_and(|b| {
+        if settled { b == k_head } else { forge::branch_matches_pr(b, k_head, k.number) }
+    });
+    if !same_checkout {
+        if settled {
+            return fetch(Some(k.number), None);
+        }
+        // Cached state was active, but checkout moved off `k_head`: inspect
+        // `k.number` first so a PR that settled before switching stays pinned.
+        return match fetch(Some(k.number), None) {
+            Ok(Some(old_pr)) if old_pr.state == "merged" || old_pr.state == "closed" => Ok(Some(old_pr)),
+            Ok(Some(old_pr)) => match fetch(None, None) {
+                Ok(Some(moved)) => Ok(Some(moved)),
+                _ => Ok(Some(old_pr)),
+            },
+            Ok(None) => fetch(None, None),
+            Err(e) => Err(e),
+        };
+    }
+
+    match fetch(None, Some(k.number)) {
+        Ok(Some(candidate)) if candidate.number != k.number => {
+            if settled {
+                if accept_branch_candidate(cur_branch, k.number, k.state, Some(k_head), &candidate) {
+                    Ok(Some(candidate))
+                } else {
+                    fetch(Some(k.number), None)
+                }
+            } else if candidate.number < k.number {
+                // Verify `k.number` hasn't settled before adopting an older open PR on the branch.
+                match fetch(Some(k.number), None) {
+                    Ok(Some(old_pr)) if old_pr.state == "merged" || old_pr.state == "closed" => {
+                        if accept_branch_candidate(cur_branch, old_pr.number, Some(&old_pr.state), Some(&old_pr.head), &candidate) {
+                            Ok(Some(candidate))
+                        } else {
+                            Ok(Some(old_pr))
+                        }
+                    }
+                    Ok(Some(_)) => Ok(Some(candidate)),
+                    Ok(None) | Err(_) => Ok(Some(candidate)),
+                }
+            } else {
+                Ok(Some(candidate))
+            }
+        }
+        Ok(Some(same)) => Ok(Some(same)),
+        Ok(None) => fetch(Some(k.number), None),
+        Err(e) => fetch(Some(k.number), None).or(Err(e)),
+    }
+}
+
+fn resolve_pr_for_task(
+    provider: &str,
+    cwd: &Path,
+    known: Option<KnownPr<'_>>,
+) -> Result<Option<forge::PrStatus>, forge::ForgeError> {
+    let cur_branch = head_branch(cwd);
+    resolve_pr_with(cur_branch.as_deref(), known, |num, hint| {
+        if let Some(n) = num {
+            forge::pr_status(provider, cwd, Some(n))
+        } else {
+            forge::pr_status_for_branch(provider, cwd, hint)
+        }
+    })
+}
+
 /// The shared lookup body: resolve the repo's forge off its default remote,
-/// find the branch's PR (falling back to `known_number`), and map every
-/// failure onto the status vocabulary the card renders. `known_*` are the
+/// find the branch's PR (falling back to `known`), and map every
+/// failure onto the status vocabulary the card renders. `known` is the
 /// stored identity a TASK record carries - member lookups pass None, because
 /// a member resolves by branch only (its checkout's HEAD IS the member
 /// branch) and nothing persists a member identity anywhere.
-fn pr_lookup_at(
-    cwd: &Path,
-    known_number: Option<u64>,
-    known_provider: Option<&str>,
-) -> PrLookup {
+fn pr_lookup_at(cwd: &Path, known: Option<KnownPr<'_>>) -> PrLookup {
     // No network, no forge CLI: provider resolution is a cached lookup, and
     // detecting the default remote is one `git remote` subprocess - the
     // cheap floor a poll on a non-forge repo should cost.
@@ -16605,27 +17023,18 @@ fn pr_lookup_at(
     // Resolve by BRANCH first, and only fall back to the stored number.
     //
     // Preferring the stored number pinned this task to whichever PR it saw
-    // first, for good: close that PR, open a replacement on the same branch,
-    // and every later poll kept reporting the dead one - its checks, its
-    // review state, and a merge that would never come, so auto-archive could
-    // not fire either. Nothing ever cleared the number.
+    // first, for good: close or merge that PR, open a replacement on the
+    // same branch, and every later poll kept reporting the old one.
     //
-    // The number still matters for the case it was added for: once a PR is
-    // merged and its source branch deleted, a by-branch lookup stops
-    // resolving on GitLab. That is exactly when the branch lookup returns
-    // None, so it is the fallback rather than the default. Normal polls stay
-    // at one CLI call; only the deleted-branch case pays for a second.
+    // The number still matters when the branch lookup returns None (e.g. a
+    // merged PR whose source branch was deleted on GitLab, or a detached HEAD),
+    // and when the task moved to a different branch after the PR settled.
     //
     // `pr_provider` unset is a legacy task that predates the field - trust
     // its stored number under the CURRENT provider (a stale cross-forge
     // number just comes back "not found" and degrades to None).
-    let known_number =
-        known_number.filter(|_| known_provider.map_or(true, |p| p == provider));
-    let resolved = branch_then_number(
-        forge::pr_status(provider, cwd, None),
-        known_number.is_some(),
-        || forge::pr_status(provider, cwd, known_number),
-    );
+    let known = known.filter(|k| k.provider.map_or(true, |p| p == provider));
+    let resolved = resolve_pr_for_task(provider, cwd, known);
     match resolved {
         Ok(pr) => PrLookup {
             provider: Some(provider.to_string()),
@@ -16667,6 +17076,7 @@ fn pr_cache_differs(w: &Task, p: &forge::PrStatus, provider: &str) -> bool {
         || w.pr_url.as_deref() != Some(p.url.as_str())
         || w.pr_title.as_deref() != Some(p.title.as_str())
         || w.pr_state.as_deref() != Some(p.state.as_str())
+        || (!p.head.is_empty() && w.pr_head.as_deref() != Some(p.head.as_str()))
 }
 
 fn pr_lookup_blocking(id: &str) -> Result<PrLookup, String> {
@@ -16676,28 +17086,178 @@ fn pr_lookup_blocking(id: &str) -> Result<PrLookup, String> {
 
 /// A task's own lookup, its identity persisted.
 fn pr_lookup_task(w: &Task) -> PrLookup {
-    let lookup = pr_lookup_at(Path::new(&w.path), w.pr_number, w.pr_provider.as_deref());
+    let known_head = w.pr_head.as_deref().filter(|h| !h.is_empty());
+    let known = w.pr_number.map(|number| KnownPr {
+        number,
+        provider: w.pr_provider.as_deref(),
+        state: w.pr_state.as_deref(),
+        head: known_head,
+    });
+    let mut lookup = pr_lookup_at(Path::new(&w.path), known);
+    // An orphaned worktree (directory empty or `.git` removed on disk) still
+    // keeps its cached GitHub `pr_url` and `w.branch`: resolve and roll over by
+    // URL + branch via GraphQL so focus/turn-end/manual refresh stay current.
+    if lookup.status == "no-remote"
+        && !w.is_main_checkout
+        && !w.branch.is_empty()
+        && w.pr_provider.as_deref().map_or(true, |p| p == forge::GITHUB)
+    {
+        if let Some((host, owner, repo, number)) = w.pr_url.as_deref().and_then(forge::parse_github_pr_url) {
+            if let Some(fb) = pr_lookup_github_url_fallback(w, &host, &owner, &repo, number) {
+                lookup = fb;
+            }
+        }
+    }
     persist_pr_identity(w, &lookup);
     lookup
+}
+
+fn pr_lookup_github_url_fallback(
+    w: &Task,
+    host: &str,
+    owner: &str,
+    repo: &str,
+    number: u64,
+) -> Option<PrLookup> {
+    let r = forge::PrRef { owner: owner.to_string(), repo: repo.to_string(), number };
+    let answers = match forge::github_pr_status_batch_meta(host, "pr_status", std::slice::from_ref(&r)) {
+        Ok(a) => a,
+        Err(e) => return Some(pr_lookup_failed(forge::GITHUB, format!("https://{host}/{owner}/{repo}"), e)),
+    };
+    let item = answers.into_iter().next().flatten().filter(|it| answer_is_for(&it.status.url, host, &r))?;
+    let mut pr = item.status;
+    if batch_route(Some(&pr), Some(&w.branch)) == BatchRoute::SettledSameBranch {
+        let query_branch = if !pr.head.is_empty() { pr.head.clone() } else { w.branch.clone() };
+        let rep_ref = forge::BranchReplacementRef {
+            owner: r.owner,
+            repo: r.repo,
+            branch: query_branch,
+            old_number: pr.number,
+            old_cross_repository: item.cross_repository,
+            old_head_owner: item.head_owner,
+        };
+        match forge::github_branch_pr_replacements_batch(host, "pr_status", std::slice::from_ref(&rep_ref)) {
+            Ok(mut outcomes) => {
+                if let Some(forge::ReplacementOutcome::Replace(new_pr)) = outcomes.pop() {
+                    pr = new_pr;
+                }
+            }
+            Err(e) => return Some(pr_lookup_failed(forge::GITHUB, format!("https://{host}/{owner}/{repo}"), e)),
+        }
+    }
+    Some(PrLookup {
+        provider: Some(forge::GITHUB.to_string()),
+        remote_url: format!("https://{host}/{owner}/{repo}"),
+        status: "ok".into(),
+        message: String::new(),
+        pr: Some(pr),
+        retry_at: None,
+    })
+}
+
+fn pr_persist_lock() -> &'static Mutex<()> {
+    static L: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
+    L.get_or_init(|| Mutex::new(()))
+}
+
+fn apply_pr_identity(
+    wm: &mut Task,
+    expected_number: Option<u64>,
+    expected_provider: Option<&str>,
+    expected_url: Option<&str>,
+    p: &forge::PrStatus,
+    provider: &str,
+    now_rfc3339: &str,
+) -> bool {
+    let snapshot_stale = (wm.pr_number != expected_number
+        || wm.pr_provider.as_deref() != expected_provider
+        || wm.pr_url.as_deref() != expected_url)
+        && (wm.pr_number != Some(p.number) || wm.pr_provider.as_deref() != Some(provider));
+    if snapshot_stale || !pr_cache_differs(wm, p, provider) {
+        return false;
+    }
+    let state_changed = wm.pr_number != Some(p.number)
+        || wm.pr_provider.as_deref() != Some(provider)
+        || wm.pr_state.as_deref() != Some(p.state.as_str());
+    wm.pr_url = Some(p.url.clone());
+    wm.pr_number = Some(p.number);
+    wm.pr_provider = Some(provider.to_string());
+    wm.pr_title = Some(p.title.clone());
+    wm.pr_state = Some(p.state.clone());
+    if !p.head.is_empty() {
+        wm.pr_head = Some(p.head.clone());
+    }
+    if state_changed || wm.pr_state_at.is_none() {
+        wm.pr_state_at = Some(now_rfc3339.to_string());
+    }
+    true
 }
 
 /// Cache the identity on the task record so future polls (and the next app
 /// launch) can resolve by number. The title and state ride along (History
 /// searches and shows them), but a poll that saw nothing new writes nothing:
-/// this runs every minute per task with a PR.
+/// this runs every minute per task with a PR. Serialized against concurrent
+/// PR writers (`task_pr_create`, batch poll) so a slower lookup cannot overwrite
+/// a newly created PR on disk.
 fn persist_pr_identity(w: &Task, lookup: &PrLookup) {
     let (Some(p), Some(provider)) = (&lookup.pr, lookup.provider.as_deref()) else { return };
     if !pr_cache_differs(w, p, provider) {
         return;
     }
+    let _guard = pr_persist_lock().lock();
     let mut list = load_tasks_all();
     if let Some(wm) = list.iter_mut().find(|x| x.id == w.id) {
-        wm.pr_url = Some(p.url.clone());
-        wm.pr_number = Some(p.number);
-        wm.pr_provider = Some(provider.to_string());
-        wm.pr_title = Some(p.title.clone());
-        wm.pr_state = Some(p.state.clone());
-        wm.pr_state_at = Some(chrono::Utc::now().to_rfc3339());
+        let now = chrono::Utc::now().to_rfc3339();
+        if apply_pr_identity(
+            wm,
+            w.pr_number,
+            w.pr_provider.as_deref(),
+            w.pr_url.as_deref(),
+            p,
+            provider,
+            &now,
+        ) {
+            let _ = save_task(wm);
+        }
+    }
+}
+
+fn member_cache_differs(m: &TaskMember, p: &forge::PrStatus, provider: &str) -> bool {
+    m.pr_number != Some(p.number)
+        || m.pr_provider.as_deref() != Some(provider)
+        || m.pr_state.as_deref() != Some(p.state.as_str())
+        || (!p.head.is_empty() && m.pr_head.as_deref() != Some(p.head.as_str()))
+}
+
+fn persist_member_pr_updates(task_id: &str, updates: &[(&TaskMember, &PrLookup)]) {
+    let diffs: Vec<_> = updates.iter().filter_map(|(m, l)| {
+        let p = l.pr.as_ref()?;
+        let prov = l.provider.as_deref()?;
+        member_cache_differs(m, p, prov).then_some((m.dir_name.as_str(), m.pr_number, m.pr_provider.as_deref(), p, prov))
+    }).collect();
+    if diffs.is_empty() {
+        return;
+    }
+    let _guard = pr_persist_lock().lock();
+    let mut list = load_tasks_all();
+    let Some(wm) = list.iter_mut().find(|x| x.id == task_id) else { return };
+    let mut changed = false;
+    for (dir_name, exp_num, exp_prov, p, prov) in diffs {
+        if let Some(m) = wm.composition.iter_mut().find(|c| c.dir_name == dir_name) {
+            let stale = (m.pr_number != exp_num || m.pr_provider.as_deref() != exp_prov)
+                && (m.pr_number != Some(p.number) || m.pr_provider.as_deref() != Some(prov));
+            if !stale && member_cache_differs(m, p, prov) {
+                m.pr_number = Some(p.number);
+                m.pr_provider = Some(prov.to_string());
+                m.pr_state = Some(p.state.clone());
+                if !p.head.is_empty() {
+                    m.pr_head = Some(p.head.clone());
+                }
+                changed = true;
+            }
+        }
+    }
+    if changed {
         let _ = save_task(wm);
     }
 }
@@ -16714,16 +17274,20 @@ struct TaskPrLookup {
 /// anything else takes the per-task `pr_lookup_at` path, and so does a batch
 /// answer that cannot be trusted on its own (see `batch_route`).
 ///
+/// Settled (`merged` / `closed`) PRs still on the same branch check for a
+/// newer replacement PR on that branch via one batched GraphQL query per host
+/// (`github_branch_pr_replacements_batch`), so they pay zero `gh` subprocesses.
+///
 /// Background work, always: `gh_api` refuses a chunk while the host's gate
 /// is closed, and the rest of that host is left out of the answer, so the
 /// caller keeps what it had. How any other failure is answered: see
 /// `batch_failure_plan`.
 ///
 /// Every way out of the batch into a per-task `gh pr view` (a task the query
-/// cannot hold, a chunk that keeps failing, an answer that needs a second
-/// look, a moved branch) spends from one `BATCH_FALLBACK_MAX` budget per
-/// pass. A task past it is left out, or answered with what the batch saw, and
-/// comes first next pass, since the caller asks stalest first.
+/// cannot hold, a chunk that keeps failing, a moved branch) spends from one
+/// `BATCH_FALLBACK_MAX` budget per pass. A task past it is left out, or
+/// answered with what the batch saw, and comes first next pass, since the
+/// caller asks stalest first.
 fn pr_lookup_batch(ids: &[String]) -> Vec<TaskPrLookup> {
     let all = load_tasks_all();
     // Rechecks of tasks that are gone or archived are never asked again.
@@ -16771,9 +17335,10 @@ fn pr_lookup_batch(ids: &[String]) -> Vec<TaskPrLookup> {
 
     let mut out = Vec::new();
     'hosts: for (host, items) in by_host {
+        let mut settled_checks: Vec<(&Task, forge::PrStatus, forge::BranchReplacementRef)> = Vec::new();
         for chunk in items.chunks(forge::PR_BATCH_MAX) {
             let refs: Vec<forge::PrRef> = chunk.iter().map(|(_, r)| r.clone()).collect();
-            let answers = match forge::github_pr_status_batch(&host, "pr_status", &refs) {
+            let answers = match forge::github_pr_status_batch_meta(&host, "pr_status", &refs) {
                 Ok(a) => {
                     batch_failures().lock().remove(&host);
                     a
@@ -16807,28 +17372,94 @@ fn pr_lookup_batch(ids: &[String]) -> Vec<TaskPrLookup> {
                     continue;
                 }
             };
-            for ((t, r), answer) in chunk.iter().zip(answers) {
+            for ((t, r), item) in chunk.iter().zip(answers) {
                 // An answer about some other PR (a host that re-homed it, or
                 // a renamed repo) is not trusted, nor persisted onto the
                 // task: the per-task lookup finds what the branch is on.
-                let answer = answer.filter(|p| answer_is_for(&p.url, &host, r));
+                let item = item.filter(|it| answer_is_for(&it.status.url, &host, r));
                 let path = Path::new(&t.path);
-                let branch = head_branch(path);
-                match batch_route(answer.as_ref(), branch.as_deref()) {
-                    BatchRoute::Trusted => out.push(ok(t, answer.expect("trusted means answered"))),
+                let branch = batch_checkout_branch(path, t);
+                match batch_route(item.as_ref().map(|i| &i.status), branch.as_deref()) {
+                    BatchRoute::Trusted => out.push(ok(t, item.expect("trusted means answered").status)),
+                    BatchRoute::SettledSameBranch => {
+                        let it = item.expect("settled means answered");
+                        let b = branch.expect("same-branch means local branch exists");
+                        let query_branch = if !it.status.head.is_empty() { it.status.head.clone() } else { b };
+                        if take_recheck(&t.id, "", now) {
+                            let rep_ref = forge::BranchReplacementRef {
+                                owner: r.owner.clone(),
+                                repo: r.repo.clone(),
+                                branch: query_branch,
+                                old_number: it.status.number,
+                                old_cross_repository: it.cross_repository,
+                                old_head_owner: it.head_owner,
+                            };
+                            settled_checks.push((t, it.status, rep_ref));
+                        } else {
+                            out.push(ok(t, it.status));
+                        }
+                    }
                     BatchRoute::Single => {
                         if take_recheck(&t.id, "", now) {
-                            single.push((t, answer));
-                        } else if let Some(pr) = answer {
-                            // Closed, as of this pass. A replacement on the
-                            // same branch is looked for at the recheck pace.
-                            out.push(ok(t, pr));
+                            single.push((t, item.map(|i| i.status)));
+                        } else if let Some(it) = item {
+                            out.push(ok(t, it.status));
                         }
                     }
                     BatchRoute::Moved => {
-                        let pr = answer.expect("moved means answered");
+                        let pr = item.expect("moved means answered").status;
                         let branch = branch.as_deref().unwrap_or_default();
                         out.push(ok(t, moved_branch_pr(t, branch, pr, now, &mut budget)));
+                    }
+                }
+            }
+        }
+        let mut paused = false;
+        let release_rechecks = |chunk: &[(&Task, forge::PrStatus, forge::BranchReplacementRef)]| {
+            let mut m = rechecks().lock();
+            for (t, _, _) in chunk {
+                m.remove(&t.id);
+            }
+        };
+        for chunk in settled_checks.chunks(forge::PR_REPLACEMENT_BATCH_MAX) {
+            if paused {
+                release_rechecks(chunk);
+                continue;
+            }
+            let refs: Vec<forge::BranchReplacementRef> = chunk.iter().map(|(_, _, r)| r.clone()).collect();
+            match forge::github_branch_pr_replacements_batch(&host, "pr_status", &refs) {
+                Ok(outcomes) => {
+                    replacement_failures().lock().remove(&host);
+                    for ((t, old_pr, _), outcome) in chunk.iter().zip(outcomes) {
+                        match outcome {
+                            forge::ReplacementOutcome::Replace(new_pr) => out.push(ok(t, new_pr)),
+                            forge::ReplacementOutcome::KeepOld => out.push(ok(t, old_pr.clone())),
+                            forge::ReplacementOutcome::Retry => {
+                                single.push((t, Some(old_pr.clone())));
+                            }
+                        }
+                    }
+                }
+                Err(forge::ForgeError::RateLimited { .. }) => {
+                    paused = true;
+                    release_rechecks(chunk);
+                }
+                Err(e) => {
+                    let streak = {
+                        let mut f = replacement_failures().lock();
+                        let n = f.entry(host.clone()).or_insert(0);
+                        *n = n.saturating_add(1);
+                        *n
+                    };
+                    match batch_failure_plan(&e, streak) {
+                        FailurePlan::FallBack => {
+                            eprintln!("[pr] batch replacement check on {host} keeps failing, falling back per task: {e:?}");
+                            single.extend(chunk.iter().map(|(t, old_pr, _)| (*t, Some(old_pr.clone()))));
+                        }
+                        FailurePlan::Answer | FailurePlan::LeaveOut => {
+                            eprintln!("[pr] batch replacement check on {host} failed, retrying next pass: {e:?}");
+                            release_rechecks(chunk);
+                        }
                     }
                 }
             }
@@ -16841,7 +17472,7 @@ fn pr_lookup_batch(ids: &[String]) -> Vec<TaskPrLookup> {
             continue;
         }
         if budget == 0 {
-            if let Some(pr) = batch_pr {
+            if let Some(pr) = batch_pr.filter(|p| !matches!(p.state.as_str(), "merged" | "closed")) {
                 out.push(ok(t, pr));
             }
             continue;
@@ -16863,26 +17494,61 @@ fn answer_is_for(url: &str, host: &str, asked: &forge::PrRef) -> bool {
     })
 }
 
-/// The checkout's branch from its HEAD file, without a `git` subprocess
-/// (the batch asks this for every task, every pass). A worktree's `.git` is
-/// a `gitdir:` pointer file. Anything unexpected asks git.
-fn head_branch(repo: &Path) -> Option<String> {
+#[derive(Debug, PartialEq, Eq)]
+enum CheckoutBranch {
+    OnBranch(String),
+    Detached,
+    NoGit,
+}
+
+fn checkout_branch(repo: &Path) -> CheckoutBranch {
     let dot_git = repo.join(".git");
     let git_dir = match std::fs::read_to_string(&dot_git) {
-        Ok(pointer) => {
-            let dir = PathBuf::from(pointer.trim().strip_prefix("gitdir:")?.trim());
-            if dir.is_absolute() { dir } else { repo.join(dir) }
-        }
+        Ok(pointer) => match pointer.trim().strip_prefix("gitdir:") {
+            Some(rest) => {
+                let dir = PathBuf::from(rest.trim());
+                if dir.is_absolute() { dir } else { repo.join(dir) }
+            }
+            None => dot_git,
+        },
         Err(_) => dot_git,
     };
     match std::fs::read_to_string(git_dir.join("HEAD")) {
         Ok(head) => match head.trim().strip_prefix("ref: refs/heads/") {
-            Some(b) if !b.is_empty() => Some(b.to_string()),
-            Some(_) => current_branch(repo),
-            // Detached.
-            None => None,
+            Some(b) if !b.is_empty() => CheckoutBranch::OnBranch(b.to_string()),
+            Some(_) => match current_branch(repo) {
+                Some(b) => CheckoutBranch::OnBranch(b),
+                None => CheckoutBranch::Detached,
+            },
+            // Detached HEAD inside an actual git checkout.
+            None => CheckoutBranch::Detached,
         },
-        Err(_) => current_branch(repo),
+        Err(_) => match current_branch(repo) {
+            Some(b) => CheckoutBranch::OnBranch(b),
+            None if repo.join(".git").exists() => CheckoutBranch::Detached,
+            None => CheckoutBranch::NoGit,
+        },
+    }
+}
+
+/// The checkout's branch from its HEAD file, without a `git` subprocess
+/// (the batch asks this for every task, every pass). A worktree's `.git` is
+/// a `gitdir:` pointer file. Anything unexpected asks git.
+fn head_branch(repo: &Path) -> Option<String> {
+    match checkout_branch(repo) {
+        CheckoutBranch::OnBranch(b) => Some(b),
+        CheckoutBranch::Detached | CheckoutBranch::NoGit => None,
+    }
+}
+
+/// Branch used for batch rollover routing: uses live HEAD when on disk, keeps
+/// detached HEAD as `None` (review checkouts stay pinned), and falls back to
+/// the task's stored branch only when no local git checkout exists on disk.
+fn batch_checkout_branch(repo: &Path, t: &Task) -> Option<String> {
+    match checkout_branch(repo) {
+        CheckoutBranch::OnBranch(b) => Some(b),
+        CheckoutBranch::Detached => None,
+        CheckoutBranch::NoGit => (!t.branch.is_empty() && !t.is_main_checkout).then(|| t.branch.clone()),
     }
 }
 
@@ -16894,16 +17560,22 @@ enum BatchRoute {
     /// Open, but the task's branch is no longer its head: the task moved to
     /// another branch, which may have a PR of its own (`moved_branch_pr`).
     Moved,
-    /// Missing (deleted repo, wrong number, lost access) or closed (not
-    /// merged): the full per-task lookup, whose by-branch half is what finds
-    /// a replacement PR opened on the same branch. At the recheck pace.
+    /// Merged or closed while the checkout is still on that PR's branch:
+    /// check for a replacement PR created on the same branch.
+    SettledSameBranch,
+    /// Missing (deleted repo, wrong number, lost access): the full per-task lookup.
     Single,
 }
 
 fn batch_route(answer: Option<&forge::PrStatus>, branch: Option<&str>) -> BatchRoute {
     match answer {
         None => BatchRoute::Single,
-        Some(p) if p.state == "closed" => BatchRoute::Single,
+        // Fork review checkouts (`pr-<n>-<head>`) stay pinned to that PR once settled;
+        // same-branch replacements only apply when continuing work on `branch == p.head`.
+        Some(p) if p.state == "closed" || p.state == "merged" => match branch {
+            Some(b) if b == p.head => BatchRoute::SettledSameBranch,
+            _ => BatchRoute::Trusted,
+        },
         // Detached HEAD (a PR review checkout) has no branch to disagree.
         Some(p) => match branch {
             Some(b) if !forge::branch_matches_pr(b, &p.head, p.number) => BatchRoute::Moved,
@@ -16971,6 +17643,11 @@ fn batch_failures() -> &'static Mutex<HashMap<String, u32>> {
     F.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+fn replacement_failures() -> &'static Mutex<HashMap<String, u32>> {
+    static F: std::sync::OnceLock<Mutex<HashMap<String, u32>>> = std::sync::OnceLock::new();
+    F.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum FailurePlan {
     /// Answer every task with the failure's status: missing CLI or signed
@@ -17023,7 +17700,8 @@ fn member_pr_lookups(id: &str, background: bool) -> Result<Option<Vec<MemberPrLo
     }) {
         return Ok(None);
     }
-    Ok(Some(on_disk_members(&w)
+    let members: Vec<&TaskMember> = on_disk_members(&w).collect();
+    let rows: Vec<(&TaskMember, String, PrLookup)> = members.iter()
         .map(|m| {
             let cwd = Path::new(&m.path);
             // Frozen `m.branch` is the create-time value; read HEAD like
@@ -17035,11 +17713,22 @@ fn member_pr_lookups(id: &str, background: bool) -> Result<Option<Vec<MemberPrLo
                 .map(|s| s.trim().to_string())
                 .filter(|b| !b.is_empty())
                 .unwrap_or_else(|| m.branch.clone());
-            MemberPrLookup {
-                dir_name: m.dir_name.clone(),
-                branch,
-                lookup: pr_lookup_at(cwd, None, None),
-            }
+            let known = m.pr_number.map(|number| KnownPr {
+                number,
+                provider: m.pr_provider.as_deref(),
+                state: m.pr_state.as_deref(),
+                head: m.pr_head.as_deref().filter(|h| !h.is_empty()),
+            });
+            (*m, branch, pr_lookup_at(cwd, known))
+        })
+        .collect();
+    let updates: Vec<(&TaskMember, &PrLookup)> = rows.iter().map(|(m, _, l)| (*m, l)).collect();
+    persist_member_pr_updates(&w.id, &updates);
+    Ok(Some(rows.into_iter()
+        .map(|(m, branch, lookup)| MemberPrLookup {
+            dir_name: m.dir_name.clone(),
+            branch,
+            lookup,
         })
         .collect()))
 }
@@ -17513,28 +18202,6 @@ async fn project_forge_issues(project_id: String, limit: Option<u32>, scope: Opt
         .map_err(|e| e.to_string())?
 }
 
-/// Live PR/MR status for the task's branch (host repo). Hits the
-/// network via the forge CLI — callers poll at a slow cadence (60s), not
-/// the 4s git-status tick.
-/// The by-branch answer, else the stored number's. The number is asked when
-/// the branch finds no PR (its source branch was deleted after a merge) and
-/// also when the branch lookup FAILS: a detached HEAD, which is what a PR
-/// review checkout is, has no branch to look up and `gh` reports that as an
-/// error, so the badge froze on its last state for good (GH #435). If the
-/// number fails too, the branch's error is the one reported.
-fn branch_then_number<T, E>(
-    by_branch: Result<Option<T>, E>,
-    knows_number: bool,
-    by_number: impl FnOnce() -> Result<Option<T>, E>,
-) -> Result<Option<T>, E> {
-    match by_branch {
-        Ok(Some(pr)) => Ok(Some(pr)),
-        Ok(None) if knows_number => by_number(),
-        Err(e) if knows_number => by_number().or(Err(e)),
-        other => other,
-    }
-}
-
 /// PR status for many tasks in one call: the background poller's path, so
 /// always rate-gated. See `pr_lookup_batch`; tasks a closed gate skipped are
 /// absent.
@@ -17637,19 +18304,69 @@ async fn task_pr_create(
             }
             Err(e) => return Err(e.into_message()),
         };
-        // Persist identity immediately — the follow-up lookup also does
-        // this, but creation should never lose the URL even if the status
-        // fetch right after hiccups.
-        {
+        // Persist identity immediately under `pr_persist_lock` — then hydrate
+        // by the returned PR number rather than by branch, so a second active
+        // PR on another base branch or a transient status hiccup never hijacks
+        // or fails a just-created PR/MR.
+        let (created_snapshot, next_num) = {
+            let _guard = pr_persist_lock().lock();
+            let cur_branch = head_branch(&cwd);
             let mut list = load_tasks_all();
+            let mut snap = None;
             if let Some(wm) = list.iter_mut().find(|x| x.id == id) {
+                let n = forge::pr_number_from_url(&url);
+                let pr_changed = wm.pr_number != n || wm.pr_provider.as_deref() != Some(provider);
                 wm.pr_url = Some(url.clone());
-                wm.pr_number = forge::pr_number_from_url(&url);
+                wm.pr_number = n;
                 wm.pr_provider = Some(provider.to_string());
+                wm.pr_title = Some(title.to_string());
+                wm.pr_state = Some(if draft { "draft" } else { "open" }.to_string());
+                wm.pr_head = cur_branch.or_else(|| (!wm.branch.is_empty()).then(|| wm.branch.clone()));
+                wm.pr_state_at = Some(chrono::Utc::now().to_rfc3339());
+                if pr_changed && wm.pr_comments_seen_at.is_some() {
+                    wm.pr_comments_seen_at = Some(chrono::Utc::now().to_rfc3339());
+                }
                 let _ = save_task(wm);
+                snap = Some((wm.clone(), n));
             }
+            snap.unwrap_or_else(|| (w.clone(), forge::pr_number_from_url(&url)))
+        };
+        let synthesized = |number: u64| PrLookup {
+            provider: Some(provider.to_string()),
+            remote_url: remote_url.clone(),
+            status: "ok".into(),
+            message: String::new(),
+            pr: Some(forge::PrStatus {
+                provider: provider.to_string(),
+                number,
+                url: url.clone(),
+                title: title.to_string(),
+                state: if draft { "draft" } else { "open" }.into(),
+                checks: "none".into(),
+                review: "none".into(),
+                base: base.to_string(),
+                head: created_snapshot.pr_head.clone().unwrap_or_default(),
+            }),
+            retry_at: None,
+        };
+        if let Some(n) = next_num {
+            if let Ok(Some(pr)) = forge::pr_status(provider, &cwd, Some(n))
+                .map(|o| o.filter(|p| p.number == n))
+            {
+                let lookup = PrLookup {
+                    provider: Some(provider.to_string()),
+                    remote_url: remote_url.clone(),
+                    status: "ok".into(),
+                    message: String::new(),
+                    pr: Some(pr),
+                    retry_at: None,
+                };
+                persist_pr_identity(&created_snapshot, &lookup);
+                return Ok(lookup);
+            }
+            return Ok(synthesized(n));
         }
-        pr_lookup_blocking(&id)
+        Ok(pr_lookup_blocking(&id).unwrap_or_else(|_| synthesized(0)))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -17812,9 +18529,11 @@ fn reject_escaping_segments(rel: &str) -> Result<PathBuf, String> {
 /// result is contained within it. Canonicalizes both ends so a symlink
 /// pointing outside the worktree also fails the contains check.
 ///
-/// **MUST** be used for every renderer → filesystem read inside a task
-/// (file_read, file_diff, future watchers). Without it, untrusted paths
-/// from the webview could read arbitrary text files on disk.
+/// **MUST** bound every renderer → filesystem access inside a task, either
+/// directly (diff, rename, delete, git paths) or as the first check of
+/// `safe_task_read_path` (file reads, the tree) and `safe_task_write_path`
+/// (editor saves). Without it, untrusted paths from the webview could read
+/// arbitrary text files on disk.
 fn safe_task_path(ws_path: &Path, rel: &str) -> Result<PathBuf, String> {
     let pb = reject_escaping_segments(rel)?;
     let target = ws_path.join(&pb);
@@ -17833,87 +18552,176 @@ fn safe_task_path(ws_path: &Path, rel: &str) -> Result<PathBuf, String> {
     Ok(canon_target)
 }
 
-/// Read-only path resolution that also accepts the top-level config-dir
-/// symlinks termic itself creates into the repo root (GH #250).
+/// Path resolution for reads: `safe_task_path`, and when that fails because
+/// a symlink leads out of the task, wherever the link lands (GH #250).
 ///
 /// `link_config_dir` symlinks `.claude/` and friends from the repo into every
 /// new worktree, precisely because they are commonly gitignored and so
 /// `git worktree add` leaves them out. `safe_task_path` then refused to read
 /// back through the very link we made: canonicalizing lands outside the
 /// worktree, so the folder LISTED (the parent's `read_dir` sees a dir entry)
-/// and could never be opened, with no retry or refresh able to help.
+/// and could never be opened, with no retry or refresh able to help. Links
+/// the user makes themselves (notes kept outside the repo) hit the same wall.
 ///
-/// The bound is the PROJECT root rather than the worktree. A link resolving
-/// inside the repo the user deliberately added is theirs to read; a repo that
-/// ships `.claude -> ~/.ssh` still resolves outside it and is still refused,
-/// which is the case the containment check exists for.
+/// This decides what the user is SHOWN, not what anything can reach: the
+/// webview can already read any path (`file_read_external`) and no agent
+/// sees the result. So it follows any link, except into `ReadBounds::denied`,
+/// which keeps termic's own secrets off the screen.
 ///
-/// READ paths only. `task_path_rename`, `task_path_delete` and every git path
-/// keep the strict check, so nothing can MUTATE the main checkout by writing
-/// through a link from a worktree task.
+/// READ paths only. Everything this admits beyond `safe_task_path` is outside
+/// the task. `task_path_rename`, `task_path_delete` and every git path keep
+/// the strict check; `task_file_write` writes through a link only into a
+/// sandbox path the user granted (`safe_task_write_path`). Every other file
+/// this admits opens read-only in the editor (`task_file_writable`).
 fn safe_task_read_path(w: &Task, base: &Path, rel: &str) -> Result<PathBuf, String> {
-    let proj = load_projects_all()
-        .into_iter()
-        .find(|p| p.id == w.project_id);
-    let root = proj.as_ref().map(|p| PathBuf::from(&p.root_path));
-    let cust_dir = proj
-        .and_then(|p| profile_dir(&p.profile).ok())
-        .map(|pdir| customizations::customizations_dir(&pdir));
-    safe_task_read_path_in(root.as_deref(), cust_dir.as_deref(), base, rel)
+    resolve_task_path_in(base, rel, || task_read_bounds(w))
 }
 
-/// The decision itself, with the project root passed in rather than looked up,
-/// so it is testable without a profile on disk.
-fn safe_task_read_path_in(
-    project_root: Option<&Path>,
-    customizations_root: Option<&Path>,
-    base: &Path,
-    rel: &str,
-) -> Result<PathBuf, String> {
+/// What a followed link may not open. Built lazily by `resolve_task_path_in`,
+/// only once a target is known to exist outside the task. Every path in it
+/// is canonical, so the resolver compares with `starts_with` alone.
+#[derive(Default)]
+struct ReadBounds {
+    /// termic's data dir (the CLI token, logins, projects.json), the keychain
+    /// dirs and the broker's per-spawn dirs.
+    denied: Vec<PathBuf>,
+    /// the customizations the profile re-allows inside the data dir (skills,
+    /// agents, `mcp.json`, never `mcp.env.local`), which termic links into
+    /// `.agents` and `.mcp.json`.
+    exempt: Vec<PathBuf>,
+}
+
+fn task_read_bounds(w: &Task) -> ReadBounds {
+    let home = dirs::home_dir().map(|h| h.to_string_lossy().into_owned()).unwrap_or_default();
+    let mut denied: Vec<String> = sandbox::control_plane_paths().data_dir.into_iter().collect();
+    denied.extend(sandbox::keychain_dirs(&home));
+    denied.extend(broker::spawn_base_dir().map(|b| b.to_string_lossy().into_owned()));
+    let exempt = profile_dir(&w.profile)
+        .map(|d| vec![customizations::skills_dir(&d), customizations::agents_dir(&d), customizations::mcp_json_file(&d)])
+        .unwrap_or_default();
+    let canon = |v: Vec<PathBuf>| v.into_iter().filter_map(|p| dunce::canonicalize(p).ok()).collect();
+    ReadBounds { denied: canon(denied.into_iter().map(PathBuf::from).collect()), exempt: canon(exempt) }
+}
+
+/// The decision itself, with the bounds injected, so it is testable without
+/// a profile on disk.
+fn resolve_task_path_in(base: &Path, rel: &str, bounds: impl FnOnce() -> ReadBounds) -> Result<PathBuf, String> {
     let strict = match safe_task_path(base, rel) {
         Ok(p) => return Ok(p),
         Err(e) => e,
     };
-    let pb = match reject_escaping_segments(rel) {
-        Ok(p) => p,
-        Err(_) => return Err(strict),
-    };
-    let Some(first) = pb.components().next() else { return Err(strict) };
-    let first_str = first.as_os_str().to_string_lossy();
-
-    // Only a symlink sitting directly in the task root qualifies, or a
-    // Termic-managed customization path under .agents or .mcp.json.
-    let is_link = base
-        .join(first.as_os_str())
-        .symlink_metadata()
-        .map(|m| m.file_type().is_symlink())
-        .unwrap_or(false);
-    let is_customization_path = first_str == ".agents" || first_str == ".mcp.json";
-
-    if !is_link && !is_customization_path {
+    // `..`, an absolute path and a missing target all stay the strict error,
+    // and a miss (the common one) never pays for `bounds`.
+    let Ok(pb) = reject_escaping_segments(rel) else { return Err(strict) };
+    let Ok(target) = dunce::canonicalize(base.join(&pb)) else { return Err(strict) };
+    let b = bounds();
+    // ponytail: a display stop checked on the canonical path, which the read
+    // then walks again. A link swapped in between gets through; open with
+    // O_NOFOLLOW + F_GETPATH if this ever has to be a boundary.
+    let exempt = b.exempt.iter().any(|r| target.starts_with(r));
+    if !exempt && b.denied.iter().any(|d| target.starts_with(d)) {
         return Err(strict);
     }
+    Ok(target)
+}
 
-    let Ok(target) = dunce::canonicalize(base.join(&pb)) else {
-        return Err(strict);
+/// Path resolution for writes (editor save, `task_file_writable`):
+/// `safe_task_path`, and when that fails because a link leads out of the
+/// task, the link's target if it lies inside a sandbox path the USER granted.
+///
+/// The agent can already write there, so refusing the editor the same file
+/// only got in the way. Unlike the read side this IS a boundary (the webview
+/// has no other write), so only the layers a repo cannot author count:
+/// global defaults, the task's and the project's personal lists, and the
+/// task agent's own list. `.termic.yaml` is committed, so a hostile repo
+/// could grant `$HOME` there and ship a link; it never counts here. Nor do
+/// the sandbox's built-in runtime paths (`~/.local/bin` is code execution).
+fn safe_task_write_path(w: &Task, base: &Path, rel: &str) -> Result<PathBuf, String> {
+    resolve_task_write_path_in(base, rel, || task_write_bounds(w))
+}
+
+/// What a write through a link may reach. Canonical, like `ReadBounds`.
+#[derive(Default)]
+struct WriteBounds {
+    /// the user's own sandbox grants.
+    granted: Vec<PathBuf>,
+    /// always refused, grant or not: `ReadBounds::denied` (with no
+    /// customization exemption) plus the main checkout and every member's
+    /// repo, so a broad grant like `~` cannot make the `.claude` link termic
+    /// creates write into the repo behind the worktree.
+    denied: Vec<PathBuf>,
+}
+
+fn task_write_bounds(w: &Task) -> WriteBounds {
+    let Some(home) = dirs::home_dir().map(|h| h.to_string_lossy().into_owned()) else {
+        return WriteBounds::default();
     };
+    let projects = load_projects_all();
+    let proj = projects.iter().find(|p| p.id == w.project_id);
+    let raw = write_grant_paths(w, &load_settings_in(&w.profile), &projects, sandbox::agent_allowed_paths(&w.cli));
+    let granted = expand_grants(&raw, &home, &w.path);
+    let mut denied = task_read_bounds(w).denied;
+    let repos = proj.map(|p| p.root_path.clone()).into_iter()
+        .chain(w.composition.iter().map(member_repo_path));
+    denied.extend(repos.filter(|r| !r.is_empty()).filter_map(|r| dunce::canonicalize(r).ok()));
+    WriteBounds { granted, denied }
+}
 
-    if let Some(root) = project_root {
-        if let Ok(canon_root) = dunce::canonicalize(root) {
-            if target.starts_with(&canon_root) {
-                return Ok(target);
-            }
-        }
+/// The raw grant entries the editor may write through a link into: what the
+/// agent's cage was actually given by the user, so the editor never reaches
+/// past it. A layer missing here fails safe: the file just opens read-only.
+///
+/// - the personal half of `live_sandbox_lists` (no `.termic.yaml`), the same
+///   list Seatbelt renders and Docker mounts
+/// - the agent's own `sandbox_allowed_paths`, Seatbelt only: Docker never
+///   mounts them (docker.rs), so in a Docker task the container cannot reach
+///   them and the editor must not either
+fn write_grant_paths(w: &Task, globals: &Settings, projects: &[Project], agent_paths: Vec<String>) -> Vec<String> {
+    let mut raw = live_sandbox_lists_in(w, globals, projects, false).0;
+    // ponytail: the task's primary agent, not the tab's. A tab running
+    // another agent (`agent_override`) gets a cage without these; tracking
+    // which agent planted a link is not worth it while the primary's cage
+    // can write there anyway.
+    if !w.docker_sandbox_enabled {
+        raw.extend(agent_paths);
     }
+    raw
+}
 
-    if let Some(cust) = customizations_root {
-        if let Ok(canon_cust) = dunce::canonicalize(cust) {
-            if target.starts_with(&canon_cust) {
-                return Ok(target);
-            }
-        }
+/// Sandbox allowed-path entries as canonical dirs, expanded the way the
+/// profile expands them (`subst_path`). `regex:` entries bound no directory
+/// and are dropped, as is anything missing on disk (nothing to write into),
+/// relative or holding `..`: Seatbelt matches those literally or not at
+/// all, while canonicalizing would resolve `.` against termic's own cwd and
+/// `$WORKSPACE/..` to every sibling task.
+fn expand_grants(raw: &[String], home: &str, task_path: &str) -> Vec<PathBuf> {
+    raw.iter()
+        .filter(|p| !p.trim().is_empty() && !p.trim_start().starts_with("regex:"))
+        .map(|p| PathBuf::from(sandbox::subst_path(p, home, task_path)))
+        .filter(|p| p.is_absolute() && !p.components().any(|c| c == std::path::Component::ParentDir))
+        .filter_map(|p| dunce::canonicalize(p).ok())
+        .collect()
+}
+
+/// The write decision with the bounds injected, so it is testable without a
+/// profile on disk.
+fn resolve_task_write_path_in(base: &Path, rel: &str, bounds: impl FnOnce() -> WriteBounds) -> Result<PathBuf, String> {
+    let strict = match safe_task_path(base, rel) {
+        Ok(p) => return Ok(p),
+        Err(e) => e,
+    };
+    let Ok(pb) = reject_escaping_segments(rel) else { return Err(strict) };
+    let Ok(target) = dunce::canonicalize(base.join(&pb)) else { return Err(strict) };
+    let b = bounds();
+    // ponytail: checked on the canonical path, which `write_atomic` then
+    // walks again, so a link swapped in between is followed. Open with
+    // O_NOFOLLOW + F_GETPATH if that window ever matters.
+    if b.denied.iter().any(|d| target.starts_with(d)) {
+        return Err(strict);
     }
-
+    if b.granted.iter().any(|g| target.starts_with(g)) {
+        return Ok(target);
+    }
     Err(strict)
 }
 
@@ -17970,15 +18778,36 @@ fn check_task_path_existence(ws_path: &Path, rel: &str) -> Result<PathStat, Stri
     Ok(PathStat { exists: false, is_dir: false })
 }
 
+/// Async + spawn_blocking: the link fallback reads settings and projects
+/// and canonicalizes every allowlist entry, which can block on a stale
+/// network mount.
 #[tauri::command]
-fn task_path_stat(id: String, path: String) -> Result<PathStat, String> {
+async fn task_path_stat(id: String, path: String) -> Result<PathStat, String> {
+    tauri::async_runtime::spawn_blocking(move || task_path_stat_sync(&id, &path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn task_path_stat_sync(id: &str, path: &str) -> Result<PathStat, String> {
     let w = load_tasks_all().into_iter().find(|w| w.id == id).ok_or("no task")?;
     // Unlike a diff/read, "is this a directory" is a sensible question for a
     // path that's exactly a composition member's own root (e.g. a markdown
     // link's `..`/`/` resolves there per resolveTaskHref's member-floor
     // scoping) — allow it rather than erroring.
-    let (cwd, rel) = resolve_task_git_path_ex(&w, &path, true)?;
-    check_task_path_existence(&cwd, &rel)
+    let (cwd, rel) = resolve_task_git_path_ex(&w, path, true)?;
+    // A link the file tree can open (`safe_task_read_path`) is not an escape
+    // for a markdown link either, and a missing file under one is a dead link.
+    // Only consulted once the strict check fails.
+    check_task_path_existence(&cwd, &rel).or_else(|e| {
+        if let Ok(abs) = safe_task_read_path(&w, &cwd, &rel) {
+            return Ok(PathStat { exists: true, is_dir: abs.is_dir() });
+        }
+        let parent = Path::new(&rel).parent().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+        if !parent.is_empty() && safe_task_read_path(&w, &cwd, &parent).is_ok() {
+            return Ok(PathStat { exists: false, is_dir: false });
+        }
+        Err(e)
+    })
 }
 
 /// Ceiling on bytes shipped to the webview for a preview or an image diff.
@@ -18485,7 +19314,8 @@ struct Base64Read {
     fp: String,
 }
 
-/// Same member-aware resolution + worktree containment as `task_file_read`,
+/// Same member-aware resolution and read resolver (`safe_task_read_path`)
+/// as `task_file_read`,
 /// plus an image/PDF extension whitelist and a 20 MB cap. Split from the
 /// `#[tauri::command]` wrapper (mirroring `task_file_diff_sides_for_task`)
 /// so tests can exercise it with an in-memory `Task` instead of
@@ -18555,17 +19385,22 @@ fn task_file_fp_for_task(w: &Task, path: &str) -> Result<String, String> {
     Ok(file_fp(&abs))
 }
 
-/// Stat a previewable file and return its `mtime:len` fingerprint. Sync: one
-/// `metadata()` call, nowhere near the multi-MB reads the async IPC
-/// discipline targets.
+/// Stat a previewable file and return its `mtime:len` fingerprint. Async +
+/// spawn_blocking: polled on every agent-settle tick, and a file reached
+/// through a link resolves via `safe_task_read_path`, which canonicalizes
+/// wherever the link points (a stale network mount blocks).
 #[tauri::command]
-fn task_file_fp(id: String, path: String) -> Result<String, String> {
-    let w = load_tasks_all().into_iter().find(|w| w.id == id).ok_or("no task")?;
-    task_file_fp_for_task(&w, &path)
+async fn task_file_fp(id: String, path: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let w = load_tasks_all().into_iter().find(|w| w.id == id).ok_or("no task")?;
+        task_file_fp_for_task(&w, &path)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Read an allowlisted preview file (image/PDF) as raw bytes + mime, reusing
-/// the SAME member-aware resolution, worktree containment, extension
+/// the SAME member-aware resolution, read resolver, extension
 /// allowlist, and 20 MB cap as `task_file_read_base64_for_task` — just
 /// without the base64 encode. Split from the `load_tasks_all()` lookup (mirroring
 /// `task_file_read_base64_for_task`) so tests can exercise it with an
@@ -18616,17 +19451,16 @@ fn taskpdf_response(uri_path: &str) -> tauri::http::Response<Vec<u8>> {
     }
 }
 
-/// Overwrite a task file with new contents (editor save). The
-/// path is constrained to the worktree by `safe_task_path`, same
-/// as the read side. Synchronous to mirror `task_file_read` — a
-/// single text file (capped at 2 MB on read) is not the heavy-IO case
-/// the spawn_blocking discipline targets.
 /// Write stdin to the file $1 on a box, atomically, as `write_atomic` does
 /// here: through a symlink to its target (a dotfiles link stays a link),
 /// keeping the file's mode (an executable script stays executable), via a
 /// temp file renamed over it. `stat -c` is GNU and busybox, `-f` the BSDs.
 pub(crate) const BOX_WRITE_SH: &str = r#"f=$1; [ -L "$f" ] && f=$(readlink -f -- "$f" 2>/dev/null || printf %s "$f"); t="$f.termic-tmp.$$"; cat > "$t" || exit 1; if [ -e "$f" ]; then m=$(stat -c %a "$f" 2>/dev/null || stat -f %Lp "$f" 2>/dev/null) && chmod "$m" "$t"; fi; mv -f "$t" "$f""#;
 
+/// Overwrite a task file with new contents (editor save). A local path is
+/// constrained to the worktree, or to a link's target inside a sandbox path
+/// the user granted (`safe_task_write_path`). Any other link out of the task
+/// that `safe_task_read_path` lets the editor open is never written through.
 #[tauri::command]
 async fn task_file_write(id: String, path: String, content: String) -> Result<(), String> {
     // Off the main thread: on a server project this is an ssh round trip.
@@ -18646,11 +19480,32 @@ async fn task_file_write(id: String, path: String, content: String) -> Result<()
         return if code == 0 { Ok(()) } else { Err(format!("write failed: {}", err.trim())) };
     }
     let (cwd, rel) = resolve_task_git_path(&w, &path)?;
-    let abs = safe_task_path(&cwd, &rel)?;
+    let abs = safe_task_write_path(&w, &cwd, &rel)?;
     // Atomic: uncommitted source is unrecoverable if a truncate-write tears.
     // Tradeoff accepted: the swap installs a new inode (breaks hardlinks).
     write_atomic(&abs, content.as_bytes()).map_err(|e| format!("write failed: {e}"))
 }).await.map_err(|e| e.to_string())?
+}
+
+/// Whether `task_file_write` would accept `path`, so the editor can open a
+/// file reached through a link out of the task (and outside the user's
+/// sandbox grants) read-only instead of failing on ⌘S. Asked alongside the read, which decides whether the file opens at
+/// all. It is about links, not file mode: a `chmod 444` file still answers
+/// true. A server task is fenced by `server_rel` and writes on the box
+/// through `BOX_WRITE_SH`, which follows links, so it answers true.
+#[tauri::command]
+async fn task_file_writable(id: String, path: String) -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let w = load_tasks_all().into_iter().find(|w| w.id == id).ok_or("no task")?;
+        if server_projects::server_for_path(Path::new(&w.path)).is_some() {
+            server_rel(Path::new(&w.path), &path)?;
+            return Ok(true);
+        }
+        let (cwd, rel) = resolve_task_git_path(&w, &path)?;
+        Ok(safe_task_write_path(&w, &cwd, &rel).is_ok())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 // ──────────────────────────── scratchpads (GH #244) ────────────────────────
@@ -19393,14 +20248,24 @@ fn task_path_delete(id: String, path: String) -> Result<(), String> {
 /// Resolves the absolute path server-side (member-aware) so the frontend
 /// doesn't have to reconstruct paths for members that live outside the
 /// wrapper. macOS selects the item; Windows selects it; Linux opens the
-/// containing folder (no portable "select" verb).
+/// containing folder (no portable "select" verb). A path the file tree
+/// reached through a link out of the task reveals where the link lands, not
+/// the link: that is the file the editor has open.
+///
+/// Async + spawn_blocking for the same reason as `task_path_stat`.
 #[tauri::command]
-fn task_reveal_path(id: String, path: String) -> Result<(), String> {
+async fn task_reveal_path(id: String, path: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || task_reveal_path_sync(&id, &path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn task_reveal_path_sync(id: &str, path: &str) -> Result<(), String> {
     let w = load_tasks_all().into_iter().find(|w| w.id == id).ok_or("no task")?;
     // Revealing a directory (including a composition member's own root) is
     // meaningful here, unlike for a diff/read — allow the bare-member-root case.
     let (cwd, rel) = resolve_task_git_path_ex(&w, &path, true)?;
-    let abs = safe_task_path(&cwd, &rel)?;
+    let abs = safe_task_read_path(&w, &cwd, &rel)?;
     let target = abs.to_string_lossy().into_owned();
     let (program, args) = reveal_command(std::env::consts::OS, &target);
     crate::proc_ctl::command(program).args(&args).status().map_err(|e| e.to_string())?;
@@ -19817,11 +20682,14 @@ fn task_dir_list_sync(id: String, rel: String, heal: bool) -> Result<Vec<FileEnt
         if remainder.is_empty() {
             dunce::canonicalize(&mp).map_err(|e| format!("{}: {e}", mp.display()))?
         } else {
-            safe_task_path(&mp, remainder)?
+            // Same read resolver `task_file_read` uses for a member path, or
+            // a file opens that its folder can't be expanded to reach.
+            safe_task_read_path(&w, &mp, remainder)?
         }
     } else {
-        // GH #250: also resolves through the config-dir symlinks termic itself
-        // creates into the repo root, which the strict check refused.
+        // GH #250: also follows a link out of the task at any depth (the
+        // `.claude` link termic creates, notes linked in from elsewhere),
+        // which the strict check refused.
         safe_task_read_path(&w, &base, &rel)?
     };
     // The repo that owns this directory + the path relative to its root.
@@ -28930,6 +29798,119 @@ pub(crate) fn enter_windowless(app: &AppHandle) {
     }
 }
 
+/// A file's addresses on its forge (GH #467): the current branch, the
+/// default branch, and a permalink pinned to HEAD (with `lines`, 1-based and
+/// inclusive). Read from git's own view of the remote, no network: a branch
+/// or commit the remote does not have yet is reported as not pushed, and the
+/// caller falls back to the default branch, saying so.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FileWebLinks {
+    /// "GitHub", "GitLab" or "Azure DevOps", for the menu's labels.
+    forge: String,
+    branch: Option<String>,
+    branch_pushed: bool,
+    default_branch: Option<String>,
+    commit_pushed: bool,
+    branch_url: Option<String>,
+    default_url: Option<String>,
+    permalink_url: Option<String>,
+}
+
+#[tauri::command]
+async fn file_web_links(path: String, lines: Option<(u32, u32)>) -> Result<FileWebLinks, String> {
+    tauri::async_runtime::spawn_blocking(move || file_web_links_blocking(&path, lines))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn file_web_links_blocking(path: &str, lines: Option<(u32, u32)>) -> Result<FileWebLinks, String> {
+    let target = std::path::Path::new(path);
+    let dir = if target.is_dir() { target } else { target.parent().ok_or("no folder")? };
+    let git = |args: &[&str]| -> Option<String> {
+        let out = git_command().args(args).current_dir(dir).output().ok()?;
+        out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_string()).filter(|s| !s.is_empty())
+    };
+    let top = git(&["rev-parse", "--show-toplevel"]).ok_or("not in a git repository")?;
+    let (top_c, file_c) = (dunce::canonicalize(&top).map_err(|e| e.to_string())?, dunce::canonicalize(target).map_err(|e| e.to_string())?);
+    let rel = file_c.strip_prefix(&top_c).map_err(|_| "outside its repository".to_string())?
+        .to_string_lossy().replace('\\', "/");
+    // The branch's own remote when it tracks one, else origin.
+    let remote = git(&["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])
+        .and_then(|u| u.split_once('/').map(|(r, _)| r.to_string()))
+        .unwrap_or_else(|| "origin".into());
+    let url = git(&["remote", "get-url", &remote]).ok_or_else(|| format!("no remote named {remote}"))?;
+    let provider = forge::provider_for_remote(&url).ok_or("not a GitHub, GitLab or Azure DevOps remote")?;
+    let branch = git(&["symbolic-ref", "--short", "-q", "HEAD"]);
+    let branch_pushed = branch.as_deref().is_some_and(|b| git(&["rev-parse", "--verify", "-q", &format!("refs/remotes/{remote}/{b}")]).is_some());
+    let default_branch = git(&["symbolic-ref", "--short", "-q", &format!("refs/remotes/{remote}/HEAD")])
+        .map(|r| r.trim_start_matches(&format!("{remote}/")).to_string())
+        .or_else(|| ["main", "master"].into_iter()
+            .find(|b| git(&["rev-parse", "--verify", "-q", &format!("refs/remotes/{remote}/{b}")]).is_some())
+            .map(str::to_string));
+    let sha = git(&["rev-parse", "HEAD"]);
+    let commit_pushed = sha.as_deref().is_some_and(|c| git(&["branch", "-r", "--contains", c]).is_some());
+    let link = |r: &str, commit: bool, l: Option<(u32, u32)>| forge::file_web_url(provider, &url, r, commit, &rel, l);
+    Ok(FileWebLinks {
+        forge: forge::forge_label(provider).to_string(),
+        branch_url: branch.as_deref().filter(|_| branch_pushed).and_then(|b| link(b, false, None)),
+        default_url: default_branch.as_deref().and_then(|b| link(b, false, None)),
+        permalink_url: match (lines, sha.as_deref()) {
+            (Some(l), Some(c)) if commit_pushed => link(c, true, Some(l)),
+            (Some(l), _) => default_branch.as_deref().and_then(|b| link(b, false, Some(l))),
+            _ => None,
+        },
+        branch,
+        branch_pushed,
+        default_branch,
+        commit_pushed,
+    })
+}
+
+/// Relaunch into a freshly installed update.
+///
+/// On macOS this does NOT use Tauri's restart, which spawns the new binary
+/// straight from this process: LaunchServices never launched it, so the Dock
+/// kept the app apart from it and labelled the icon "Running in Background".
+/// Here a detached helper waits for this process to exit and then `open`s the
+/// bundle, so LaunchServices starts the new version as a normal app; the
+/// helper ends with that. Elsewhere, Tauri's restart.
+#[tauri::command]
+fn relaunch_after_update(app: AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::process::CommandExt as _;
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        // <Name>.app/Contents/MacOS/<binary>
+        let bundle = exe
+            .ancestors()
+            .nth(3)
+            .filter(|p| p.extension().is_some_and(|e| e == "app"))
+            .ok_or_else(|| format!("not inside an .app bundle: {}", exe.display()))?
+            .to_path_buf();
+        std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(r#"while kill -0 "$1" 2>/dev/null; do sleep 0.2; done; exec /usr/bin/open "$2""#)
+            .arg("termic-relaunch")
+            .arg(std::process::id().to_string())
+            .arg(&bundle)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            // Its own process group, so nothing that tears down ours takes it.
+            .process_group(0)
+            .spawn()
+            .map_err(|e| format!("could not start the relaunch helper: {e}"))?;
+        // The ordinary exit path: RunEvent::Exit still cleans up children.
+        app.exit(0);
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        app.restart();
+    }
+}
+
 /// Bring the UI back. Drives the menu-bar item, dock-icon clicks
 /// (RunEvent::Reopen), and the CLI's `raise` verb. Idempotent.
 pub(crate) fn leave_windowless(app: &AppHandle) {
@@ -29823,6 +30804,12 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            relaunch_after_update,
+            file_web_links,
+            attention_window,
+            attention_question,
+            attention_answer,
+            attention_open_task,
             sudo_touchid::sudo_touchid_set_offer,
             sudo_touchid::sudo_touchid_script,
             agent_hooks::agent_hooks_status,
@@ -29871,7 +30858,7 @@ pub fn run() {
             task_git_log, task_git_refs, task_git_push, task_git_commit_files, task_git_compare, task_review_range, review_list, review_post, review_resolve, review_delete, task_git_blame, task_git_commit_meta, task_git_commit_offset,
             detect_forges, forge_rate_status, task_pr_status, task_pr_status_batch, project_forge_lists, task_member_pr_status, task_pr_create, task_pr_comments, task_set_pr_watch, task_set_pr_comments_seen,
             project_forge_issues, project_forge_provider, project_forge_prs, project_fetch_pr_branch, project_git_checkout,
-            task_file_diff, task_file_diff_sides, task_file_read, file_read_external, clipboard_image_save, clipboard_image_capture, server_paste_image, clipboard_image_png_b64, task_file_read_base64, task_file_fp, task_file_write, task_dir_list, task_path_stat,
+            task_file_diff, task_file_diff_sides, task_file_read, file_read_external, clipboard_image_save, clipboard_image_capture, server_paste_image, clipboard_image_png_b64, task_file_read_base64, task_file_fp, task_file_write, task_file_writable, task_dir_list, task_path_stat,
             task_path_rename, task_path_delete, task_reveal_path,
             scratch_list, scratch_read, scratch_write, scratch_set_meta, scratch_delete,
             scratch_promote, scratch_promote_target_exists,
@@ -29936,6 +30923,9 @@ pub fn run() {
             remote_client::remote_set_connected,
             remote_client::server_add,
             server_projects::server_which,
+            server_projects::server_discover_repos,
+            server_projects::server_repos_dir,
+            server_projects::server_set_repos_dir,
             remote_client::server_restart,
             remote_client::server_remove,
             remote_client::server_rename,
@@ -30255,6 +31245,118 @@ fn cleanup_children(app: &tauri::AppHandle) {
             .collect();
         graceful_then_kill(&victims);
         mgr.inner.lock().drain();
+    }
+}
+
+/// Where a profile window's traffic lights sit: x is fixed, y lower on
+/// Tahoe, which stopped centering them in an overlay title bar.
+/// `TERMIC_TRAFFIC_Y` overrides it, to find the exact value by eye.
+#[cfg(target_os = "macos")]
+fn profile_traffic_y() -> f64 {
+    std::env::var("TERMIC_TRAFFIC_Y")
+        .ok()
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        .unwrap_or_else(|| if is_macos_tahoe() { 21.0 } else { 16.0 })
+}
+
+/// Retitle a profile window, keeping its traffic lights where we put them.
+///
+/// Changing an NSWindow's title makes AppKit lay its title bar out again,
+/// which puts the window controls back at the system's spot (further in and
+/// lower than our `traffic_light_position`). Only profile windows other than
+/// the root are ever retitled, which is why one profile's window had them off
+/// and the other's did not. Asking for a redraw so tao would re-apply its
+/// position did not hold on screen (2.0.6), so the buttons are moved back
+/// here directly, the way tao places them (`inset_traffic_lights`), in the
+/// same main-thread step as the title. An unchanged title is left alone:
+/// config sync re-set every window's title on each sync.
+pub(crate) fn set_profile_window_title(win: &tauri::WebviewWindow, title: &str) {
+    if win.title().ok().as_deref() == Some(title) {
+        return;
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = win.set_title(title);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let Ok(ns_window) = win.ns_window() else { let _ = win.set_title(title); return };
+        let ns_window = ns_window as usize;
+        let title = title.to_string();
+        let y = profile_traffic_y();
+        let _ = win.run_on_main_thread(move || {
+            use objc2::runtime::AnyObject;
+            use objc2::{class, msg_send};
+            let ns_window = ns_window as *mut AnyObject;
+            let Ok(c) = std::ffi::CString::new(title) else { return };
+            // SAFETY: on the main thread (run_on_main_thread), on the live
+            // NSWindow tao owns; only public NSWindow / NSView calls.
+            unsafe {
+                let s: *mut AnyObject = msg_send![class!(NSString), stringWithUTF8String: c.as_ptr()];
+                if s.is_null() { return; }
+                let _: () = msg_send![ns_window, setTitle: s];
+                inset_traffic_lights(ns_window, 16.0, y);
+            }
+        });
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct NsPoint { x: f64, y: f64 }
+#[cfg(target_os = "macos")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct NsSize { w: f64, h: f64 }
+#[cfg(target_os = "macos")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct NsRect { origin: NsPoint, size: NsSize }
+#[cfg(target_os = "macos")]
+unsafe impl objc2::Encode for NsPoint {
+    const ENCODING: objc2::Encoding = objc2::Encoding::Struct("CGPoint", &[f64::ENCODING, f64::ENCODING]);
+}
+#[cfg(target_os = "macos")]
+unsafe impl objc2::Encode for NsSize {
+    const ENCODING: objc2::Encoding = objc2::Encoding::Struct("CGSize", &[f64::ENCODING, f64::ENCODING]);
+}
+#[cfg(target_os = "macos")]
+unsafe impl objc2::Encode for NsRect {
+    const ENCODING: objc2::Encoding = objc2::Encoding::Struct("CGRect", &[NsPoint::ENCODING, NsSize::ENCODING]);
+}
+
+/// Put the window's close/minimize/zoom buttons at (x, y) from its top-left,
+/// as tao's `inset_traffic_lights` does: the title bar container is sized to
+/// the buttons plus y, and the buttons spaced as AppKit spaced them.
+///
+/// # Safety
+/// On the main thread, with `ns_window` a live NSWindow.
+#[cfg(target_os = "macos")]
+unsafe fn inset_traffic_lights(ns_window: *mut objc2::runtime::AnyObject, x: f64, y: f64) {
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+    let button = |kind: usize| -> *mut AnyObject { msg_send![ns_window, standardWindowButton: kind] };
+    // NSWindowCloseButton = 0, NSWindowMiniaturizeButton = 1, NSWindowZoomButton = 2.
+    let (close, mini, zoom) = (button(0), button(1), button(2));
+    if close.is_null() || mini.is_null() || zoom.is_null() {
+        return;
+    }
+    let parent: *mut AnyObject = msg_send![close, superview];
+    if parent.is_null() { return; }
+    let container: *mut AnyObject = msg_send![parent, superview];
+    if container.is_null() { return; }
+    let close_rect: NsRect = msg_send![close, frame];
+    let window_rect: NsRect = msg_send![ns_window, frame];
+    let mut bar: NsRect = msg_send![container, frame];
+    bar.size.h = close_rect.size.h + y;
+    bar.origin.y = window_rect.size.h - bar.size.h;
+    let _: () = msg_send![container, setFrame: bar];
+    let mini_rect: NsRect = msg_send![mini, frame];
+    let gap = mini_rect.origin.x - close_rect.origin.x;
+    for (i, b) in [close, mini, zoom].into_iter().enumerate() {
+        let r: NsRect = msg_send![b, frame];
+        let _: () = msg_send![b, setFrameOrigin: NsPoint { x: x + i as f64 * gap, y: r.origin.y }];
     }
 }
 
@@ -30678,7 +31780,7 @@ mod tests {
     fn state(s: &str, queued: u32) -> crate::cli_server::TaskAgentState {
         crate::cli_server::TaskAgentState { props: Default::default(),
             state: s.into(), tabs: 1, queued, capable: true,
-            tab_states: vec![], hydrated: true,
+            tab_states: vec![], pane_tab_states: vec![], hydrated: true,
         }
     }
 
@@ -34610,6 +35712,31 @@ mod tests {
     }
 
     #[test]
+    fn a_late_viewer_gets_the_input_modes_set_before_its_backlog() {
+        let mut m = TermModes::default();
+        // Claude at startup: mouse tracking with SGR reports, bracketed paste.
+        m.feed(b"\x1b[?1000h\x1b[?1006h\x1b[?2004hhello");
+        // A sequence split across two chunks still counts.
+        m.feed(b"text \x1b[?10");
+        m.feed(b"04h more");
+        // Screen modes are left to the replay; an unknown one is ignored.
+        m.feed(b"\x1b[?1049h\x1b[?25l\x1b[?9999h");
+        assert_eq!(String::from_utf8(m.restore()).unwrap(), "\x1b[?1000h\x1b[?1004h\x1b[?1006h\x1b[?2004h");
+        // Turned off later: reset, so a replay that set it is undone.
+        m.feed(b"\x1b[?1000;1006l");
+        assert_eq!(String::from_utf8(m.restore()).unwrap(), "\x1b[?1000l\x1b[?1004h\x1b[?1006l\x1b[?2004h");
+    }
+
+    #[test]
+    fn subscribe_hands_the_modes_after_the_backlog() {
+        let feed = PtyFeed::new();
+        feed.push(b"\x1b[?1002h\x1b[?1006hscreen");
+        let (backlog, _, _rx, _tx) = feed.subscribe();
+        assert!(backlog.ends_with(b"\x1b[?1002h\x1b[?1006h"), "{:?}", String::from_utf8_lossy(&backlog));
+        assert!(String::from_utf8_lossy(&backlog).contains("screen"));
+    }
+
+    #[test]
     fn a_resize_nudge_wakes_every_tap_and_adds_nothing_to_the_backlog() {
         // A phone watching a terminal must hear of a resize while the agent
         // is idle: the nudge is the wake-up its forwarder checks the size on.
@@ -35180,6 +36307,11 @@ mod tests {
         (repo, wt)
     }
 
+    /// `resolve_task_path_in` with nothing denied.
+    fn read_in(base: &Path, rel: &str) -> Result<PathBuf, String> {
+        resolve_task_path_in(base, rel, ReadBounds::default)
+    }
+
     #[test]
     fn reads_through_the_config_symlink_termic_created() {
         let (repo, wt) = repo_with_linked_config();
@@ -35188,90 +36320,229 @@ mod tests {
         // and never opens.
         assert!(safe_task_path(wt.path(), ".claude").is_err());
 
-        let dir = safe_task_read_path_in(Some(repo.path()), None, wt.path(), ".claude").unwrap();
+        let dir = read_in(wt.path(), ".claude").unwrap();
         assert_eq!(dir, dunce::canonicalize(repo.path().join(".claude")).unwrap());
         // …and files under it, which is what the editor opens.
-        let file = safe_task_read_path_in(Some(repo.path()), None, wt.path(), ".claude/settings.json").unwrap();
+        let file = read_in(wt.path(), ".claude/settings.json").unwrap();
         assert!(file.ends_with(".claude/settings.json"));
-        assert!(safe_task_read_path_in(Some(repo.path()), None, wt.path(), ".claude/agents").is_ok());
+        assert!(read_in(wt.path(), ".claude/agents").is_ok());
     }
 
     #[cfg(unix)]
     #[test]
-    fn still_refuses_a_link_that_leaves_the_project() {
-        // The case the containment check exists for: a repo shipping a link to
-        // something private. It resolves outside the PROJECT root, so widening
-        // the bound to the project must not admit it.
-        let (repo, wt) = repo_with_linked_config();
-        let outside = tempdir().unwrap();
-        fs::create_dir_all(outside.path().join("ssh")).unwrap();
-        fs::write(outside.path().join("ssh/id_rsa"), b"secret").unwrap();
-        std::os::unix::fs::symlink(
-            fs::canonicalize(outside.path().join("ssh")).unwrap(),
-            wt.path().join(".secrets"),
-        )
-        .unwrap();
+    fn follows_a_link_at_any_depth_wherever_it_lands() {
+        // notes kept outside the repo, linked in several levels down, and a
+        // relative link climbing out: both open (read-only, see below).
+        let (_repo, wt) = repo_with_linked_config();
+        let notes = tempdir().unwrap();
+        fs::write(notes.path().join("a.md"), b"x").unwrap();
+        fs::create_dir_all(wt.path().join("docs/review")).unwrap();
+        std::os::unix::fs::symlink(notes.path(), wt.path().join("docs/review/link")).unwrap();
+        assert_eq!(read_in(wt.path(), "docs/review/link").unwrap(), fs::canonicalize(notes.path()).unwrap());
+        assert!(read_in(wt.path(), "docs/review/link/a.md").unwrap().ends_with("a.md"));
 
-        let err = safe_task_read_path_in(Some(repo.path()), None, wt.path(), ".secrets/id_rsa").unwrap_err();
-        assert!(err.contains("path escapes task"), "{err}");
-        // And with no project known, nothing is relaxed at all.
-        assert!(safe_task_read_path_in(None, None, wt.path(), ".claude").is_err());
+        // both tempdirs share the temp root: climb from docs/review back to it.
+        let up = Path::new("../../..").join(notes.path().file_name().unwrap());
+        std::os::unix::fs::symlink(&up, wt.path().join("docs/review/rel")).unwrap();
+        assert!(read_in(wt.path(), "docs/review/rel/a.md").is_ok());
     }
 
     #[cfg(unix)]
     #[test]
-    fn reads_profile_customizations_skills() {
-        let (repo, wt) = repo_with_linked_config();
-        let cust = tempdir().unwrap();
-        let skill_dir = cust.path().join("skills/termic");
-        fs::create_dir_all(&skill_dir).unwrap();
-        fs::write(skill_dir.join("SKILL.md"), b"# Termic Skill").unwrap();
-
-        let wt_skill_dir = wt.path().join(".agents/skills");
-        fs::create_dir_all(&wt_skill_dir).unwrap();
-        std::os::unix::fs::symlink(
-            fs::canonicalize(&skill_dir).unwrap(),
-            wt_skill_dir.join("termic"),
-        )
-        .unwrap();
-
-        let read = safe_task_read_path_in(Some(repo.path()), Some(cust.path()), wt.path(), ".agents/skills/termic/SKILL.md").unwrap();
-        assert!(read.ends_with("SKILL.md"));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn only_a_link_at_the_task_root_is_relaxed() {
-        // A symlink buried deep in the repo must not widen the check, even
-        // when its target is inside the project: only the top-level dirs
-        // link_config_dir creates qualify.
-        let repo = tempdir().unwrap();
-        fs::create_dir_all(repo.path().join("vendor")).unwrap();
-        fs::write(repo.path().join("vendor/lib.rs"), b"x").unwrap();
+    fn a_followed_link_never_opens_termics_own_dirs() {
+        // a link into the data dir (CLI token, logins) stays refused, with the
+        // strict error naming where it pointed. The customizations termic
+        // links into `.agents` live inside it and still open, but only the
+        // ones the profile re-allows: `mcp.env.local` beside them does not.
         let wt = tempdir().unwrap();
-        fs::create_dir_all(wt.path().join("src/nested")).unwrap();
-        std::os::unix::fs::symlink(
-            fs::canonicalize(repo.path().join("vendor")).unwrap(),
-            wt.path().join("src/nested/vendor"),
-        )
-        .unwrap();
+        let data = tempdir().unwrap();
+        let data_c = fs::canonicalize(data.path()).unwrap();
+        fs::create_dir_all(data_c.join("token")).unwrap();
+        fs::create_dir_all(data_c.join("cust/skills")).unwrap();
+        fs::create_dir_all(data_c.join("cust/mcp")).unwrap();
+        fs::write(data_c.join("cust/mcp/mcp.env.local"), b"k=v").unwrap();
+        fs::create_dir_all(wt.path().join("deep")).unwrap();
+        std::os::unix::fs::symlink(data_c.join("token"), wt.path().join("deep/t")).unwrap();
+        fs::create_dir_all(wt.path().join(".agents")).unwrap();
+        std::os::unix::fs::symlink(data_c.join("cust/skills"), wt.path().join(".agents/skills")).unwrap();
+        std::os::unix::fs::symlink(data_c.join("cust/mcp"), wt.path().join(".agents/mcp")).unwrap();
 
-        assert!(safe_task_read_path_in(Some(repo.path()), None, wt.path(), "src/nested/vendor/lib.rs").is_err());
+        let bounds = || ReadBounds { denied: vec![data_c.clone()], exempt: vec![data_c.join("cust/skills")] };
+        let err = resolve_task_path_in(wt.path(), "deep/t", bounds).unwrap_err();
+        assert!(err.contains("path escapes task"), "{err}");
+        assert!(resolve_task_path_in(wt.path(), ".agents/skills", bounds).is_ok());
+        assert!(resolve_task_path_in(wt.path(), ".agents/mcp/mcp.env.local", bounds).is_err());
+    }
+
+    #[test]
+    fn bounds_are_only_built_for_an_existing_target_outside_the_task() {
+        // a plain miss (a deleted file, a tree reload racing a build) and an
+        // ordinary read must not pay for canonicalizing the denied dirs.
+        let wt = tempdir().unwrap();
+        fs::write(wt.path().join("a.md"), b"x").unwrap();
+        let never = || -> ReadBounds { panic!("bounds built") };
+        assert!(resolve_task_path_in(wt.path(), "a.md", never).is_ok());
+        assert!(resolve_task_path_in(wt.path(), "missing.md", never).is_err());
+        assert!(resolve_task_path_in(wt.path(), "../x", never).is_err());
+    }
+
+    /// `resolve_task_write_path_in` with these grants and denies.
+    fn write_in(base: &Path, rel: &str, granted: &[&Path], denied: &[&Path]) -> Result<PathBuf, String> {
+        let canon = |v: &[&Path]| v.iter().map(|p| fs::canonicalize(p).unwrap()).collect();
+        resolve_task_write_path_in(base, rel, || WriteBounds { granted: canon(granted), denied: canon(denied) })
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_out_of_the_task_is_readable_but_not_writable_without_a_grant() {
+        // every file the read resolver admits beyond `safe_task_path` opens
+        // read-only unless the user granted where it lands. A dir granted only
+        // by `.termic.yaml` or the sandbox's built-in runtime paths is this
+        // case too: `task_write_bounds` never reads either source.
+        let (repo, wt) = repo_with_linked_config();
+        fs::create_dir_all(wt.path().join("deep")).unwrap();
+        std::os::unix::fs::symlink(fs::canonicalize(repo.path()).unwrap(), wt.path().join("deep/main")).unwrap();
+        fs::write(wt.path().join("own.md"), b"x").unwrap();
+        for rel in [".claude/settings.json", "deep/main/.claude/settings.json"] {
+            assert!(read_in(wt.path(), rel).is_ok(), "{rel} should read");
+            let err = write_in(wt.path(), rel, &[], &[]).unwrap_err();
+            assert!(err.contains("path escapes task"), "{rel}: {err}");
+        }
+        assert!(write_in(wt.path(), "own.md", &[], &[]).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_into_a_user_granted_dir_is_writable_at_any_depth() {
+        // the reported case: a review dir under a granted `~/.local`, linked
+        // in several levels down. The agent can write there, so can the editor.
+        let wt = tempdir().unwrap();
+        let local = tempdir().unwrap();
+        let review = local.path().join("share/reviews/grype/1");
+        fs::create_dir_all(&review).unwrap();
+        fs::write(review.join("notes.md"), b"x").unwrap();
+        fs::create_dir_all(wt.path().join("changes/open/c1/code-review")).unwrap();
+        std::os::unix::fs::symlink(&review, wt.path().join("changes/open/c1/code-review/grype")).unwrap();
+        let rel = "changes/open/c1/code-review/grype/notes.md";
+
+        let abs = write_in(wt.path(), rel, &[local.path()], &[]).unwrap();
+        assert_eq!(abs, fs::canonicalize(review.join("notes.md")).unwrap());
+        // a grant is a subtree, not a string prefix: a sibling stays shut.
+        let sibling = tempdir().unwrap();
+        fs::write(sibling.path().join("x.md"), b"x").unwrap();
+        std::os::unix::fs::symlink(sibling.path(), wt.path().join("changes/sib")).unwrap();
+        assert!(write_in(wt.path(), "changes/sib/x.md", &[local.path()], &[]).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_broad_grant_never_writes_into_the_main_checkout_or_termics_dirs() {
+        // the cut that was backed out before: granting `~` made the `.claude`
+        // link termic creates write into the repo behind the worktree. The
+        // denies win over any grant.
+        let home = tempdir().unwrap();
+        let repo = home.path().join("code/repo");
+        fs::create_dir_all(repo.join(".claude")).unwrap();
+        fs::write(repo.join(".claude/settings.json"), b"{}").unwrap();
+        let data = home.path().join("data");
+        fs::create_dir_all(&data).unwrap();
+        fs::write(data.join("token"), b"t").unwrap();
+        let wt = tempdir().unwrap();
+        std::os::unix::fs::symlink(repo.join(".claude"), wt.path().join(".claude")).unwrap();
+        std::os::unix::fs::symlink(&data, wt.path().join("d")).unwrap();
+        fs::create_dir_all(home.path().join("notes")).unwrap();
+        fs::write(home.path().join("notes/a.md"), b"x").unwrap();
+        std::os::unix::fs::symlink(home.path().join("notes"), wt.path().join("n")).unwrap();
+
+        let (g, d) = ([home.path()], [repo.as_path(), data.as_path()]);
+        // control: the grant alone does admit it, so the deny is what stops it.
+        assert!(write_in(wt.path(), ".claude/settings.json", &g, &[]).is_ok());
+        assert!(write_in(wt.path(), ".claude/settings.json", &g, &d).is_err());
+        assert!(write_in(wt.path(), "d/token", &g, &d).is_err());
+        // …while the rest of the grant still writes.
+        assert!(write_in(wt.path(), "n/a.md", &g, &d).is_ok());
+    }
+
+    #[test]
+    fn write_bounds_are_only_built_for_a_target_outside_the_task() {
+        let wt = tempdir().unwrap();
+        fs::write(wt.path().join("a.md"), b"x").unwrap();
+        let never = || -> WriteBounds { panic!("bounds built") };
+        assert!(resolve_task_write_path_in(wt.path(), "a.md", never).is_ok());
+        assert!(resolve_task_write_path_in(wt.path(), "missing.md", never).is_err());
+        assert!(resolve_task_write_path_in(wt.path(), "../x", never).is_err());
+        assert!(resolve_task_write_path_in(wt.path(), "/etc/passwd", never).is_err());
+    }
+
+    #[test]
+    fn grants_expand_like_the_profile_and_drop_regexes() {
+        let home = tempdir().unwrap();
+        let task = tempdir().unwrap();
+        fs::create_dir_all(home.path().join(".local")).unwrap();
+        fs::create_dir_all(task.path().join("out")).unwrap();
+        let (h, t) = (home.path().to_str().unwrap(), task.path().to_str().unwrap());
+        // `.`, a bare relative entry and `$WORKSPACE/..` all exist on disk and
+        // would canonicalize to something (termic's cwd, every sibling task),
+        // which Seatbelt would never match. They must drop, not widen.
+        let raw: Vec<String> = ["~/.local", "$HOME/.local/", "$WORKSPACE/out", "regex:^$HOME/.*", "", "~/missing",
+            ".", "out", "$WORKSPACE/..", "$HOME/.local/../.local"]
+            .iter().map(|s| s.to_string()).collect();
+        let got = expand_grants(&raw, h, t);
+        // dunce, as expand_grants: std's canonicalize is `\\?\C:\...` on
+        // Windows, the same folder spelled another way.
+        let local = dunce::canonicalize(home.path().join(".local")).unwrap();
+        assert_eq!(got, vec![local.clone(), local, dunce::canonicalize(task.path().join("out")).unwrap()]);
+    }
+
+    #[test]
+    fn write_grants_are_the_users_layers_and_the_agent_list_only_outside_docker() {
+        // the editor may write through a link only where the agent's cage
+        // reaches by the user's say-so. A repo's `.termic.yaml` never counts,
+        // and Docker never mounts the agent's own list, so a Docker task
+        // must not get it either (else the editor reaches host paths the
+        // container cannot).
+        let repo = tempdir().unwrap();
+        repo_config::add_allowed(repo.path(), repo_config::AllowKind::Path, "/from/termic-yaml").unwrap();
+        let proj = Project {
+            id: "p1".into(),
+            root_path: repo.path().to_string_lossy().into_owned(),
+            sandbox_rw_paths: vec!["/from/project".into()],
+            ..Default::default()
+        };
+        let globals = Settings { sandbox_default_rw_paths: vec!["/from/globals".into()], ..Default::default() };
+        let mut task = Task { project_id: "p1".into(), sandbox_rw_paths: vec!["/from/task".into()], ..Default::default() };
+        let agent = || vec!["/from/agent".to_string()];
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+
+        // control: the spawn's own list does carry `.termic.yaml`, so its
+        // absence below is the `committed: false` cut, not a fixture miss.
+        assert!(live_sandbox_lists_in(&task, &globals, std::slice::from_ref(&proj), true).0.contains(&"/from/termic-yaml".to_string()));
+
+        let projects = std::slice::from_ref(&proj);
+        assert_eq!(write_grant_paths(&task, &globals, projects, agent()),
+            s(&["/from/globals", "/from/task", "/from/project", "/from/agent"]));
+        task.docker_sandbox_enabled = true;
+        assert_eq!(write_grant_paths(&task, &globals, projects, agent()),
+            s(&["/from/globals", "/from/task", "/from/project"]));
+
+        // multi-repo: the project's list was frozen into the task at create,
+        // and the cage reads only the task's copy, so the editor does too.
+        task.docker_sandbox_enabled = false;
+        let multi = Project { project_type: ProjectType::Multi, ..proj.clone() };
+        assert_eq!(write_grant_paths(&task, &globals, std::slice::from_ref(&multi), vec![]),
+            s(&["/from/globals", "/from/task"]));
     }
 
     #[test]
     fn ordinary_paths_are_untouched() {
         // The relaxation is a FALLBACK: everything that resolved before still
         // resolves the same way, and the classic escapes stay rejected.
-        let (repo, wt) = repo_with_linked_config();
+        let (_repo, wt) = repo_with_linked_config();
         fs::create_dir_all(wt.path().join("docs")).unwrap();
         fs::write(wt.path().join("docs/a.md"), b"x").unwrap();
-        assert_eq!(
-            safe_task_read_path_in(Some(repo.path()), None, wt.path(), "docs/a.md").unwrap(),
-            safe_task_path(wt.path(), "docs/a.md").unwrap(),
-        );
-        assert!(safe_task_read_path_in(Some(repo.path()), None, wt.path(), "../outside.txt").is_err());
-        assert!(safe_task_read_path_in(Some(repo.path()), None, wt.path(), "/etc/passwd").is_err());
+        assert_eq!(read_in(wt.path(), "docs/a.md").unwrap(), safe_task_path(wt.path(), "docs/a.md").unwrap());
+        assert!(read_in(wt.path(), "../outside.txt").is_err());
+        assert!(read_in(wt.path(), "/etc/passwd").is_err());
     }
 
     // ─────────────────── scratchpads (GH #244) ───────────────────
@@ -35539,19 +36810,135 @@ mod tests {
     }
 
     #[test]
-    fn a_pr_lookup_falls_back_to_the_stored_number_when_the_branch_cannot_answer() {
-        type R = Result<Option<u32>, &'static str>;
-        let never = || -> R { panic!("the number must not be asked") };
-        assert_eq!(branch_then_number(Ok(Some(1)), true, never), Ok(Some(1)));
-        // Source branch deleted after a merge.
-        assert_eq!(branch_then_number(Ok(None), true, || -> R { Ok(Some(7)) }), Ok(Some(7)));
-        // Detached HEAD: gh errors with "not on any branch" (GH #435).
-        assert_eq!(branch_then_number(Err("not on any branch"), true, || -> R { Ok(Some(7)) }), Ok(Some(7)));
-        // Both fail: the branch's error is the one shown.
-        assert_eq!(branch_then_number(Err("offline"), true, || -> R { Err("also offline") }), Err("offline"));
-        // No stored number: nothing to fall back to, one CLI call.
-        assert_eq!(branch_then_number(Err("offline"), false, never), Err("offline"));
-        assert_eq!(branch_then_number(Ok(None), false, never), Ok(None));
+    fn resolve_pr_with_handles_fallback_legacy_head_and_same_branch_rollover() {
+        let mk = |n: u64, state: &str, head: &str| forge::PrStatus {
+            provider: "github".into(),
+            number: n,
+            url: format!("https://github.com/acme/app/pull/{n}"),
+            title: format!("PR {n}"),
+            state: state.into(),
+            checks: "none".into(),
+            review: "none".into(),
+            base: "main".into(),
+            head: head.into(),
+        };
+        fn known<'a>(number: u64, state: Option<&'a str>, head: Option<&'a str>) -> Option<KnownPr<'a>> {
+            Some(KnownPr { number, provider: Some("github"), state, head })
+        }
+
+        // Falls back to stored number when branch returns None or detached HEAD error.
+        let r1 = resolve_pr_with(Some("feat"), known(7, Some("merged"), Some("feat")), |num, _| match num {
+            None => Ok(None),
+            Some(7) => Ok(Some(mk(7, "merged", "feat"))),
+            _ => unreachable!(),
+        });
+        assert_eq!(r1.unwrap().unwrap().number, 7);
+
+        let r_err = resolve_pr_with(Some("feat"), known(7, Some("open"), Some("feat")), |num, _| match num {
+            None => Err(forge::ForgeError::Other("not on any branch".into())),
+            Some(7) => Ok(Some(mk(7, "open", "feat"))),
+            _ => unreachable!(),
+        });
+        assert_eq!(r_err.unwrap().unwrap().number, 7);
+
+        // Both fail -> branch error surfaces.
+        let r_both = resolve_pr_with(Some("feat"), known(7, Some("open"), Some("feat")), |num, _| match num {
+            None => Err(forge::ForgeError::Other("offline".into())),
+            Some(_) => Err(forge::ForgeError::Other("also offline".into())),
+        });
+        assert!(matches!(r_both, Err(forge::ForgeError::Other(m)) if m == "offline"));
+
+        // Legacy record missing `pr_head`: resolves #7 by number first, learns real head `feat-b`,
+        // and refuses to adopt an unrelated PR on current branch `feat-a`.
+        let r_legacy = resolve_pr_with(Some("feat-a"), known(7, Some("merged"), None), |num, _| match num {
+            Some(7) => Ok(Some(mk(7, "merged", "feat-b"))),
+            None => panic!("must not look up feat-a before knowing PR #7's real head"),
+            _ => unreachable!(),
+        });
+        assert_eq!(r_legacy.unwrap().unwrap().head, "feat-b");
+
+        // Full sequence: settled #7 on same branch -> poll sees no replacement (keeps #7) -> sees open #8 (adopts #8).
+        let step1 = resolve_pr_with(Some("feat"), known(7, Some("merged"), Some("feat")), |num, hint| match num {
+            None => {
+                assert_eq!(hint, Some(7));
+                Ok(Some(mk(7, "merged", "feat")))
+            }
+            Some(_) => unreachable!(),
+        });
+        assert_eq!(step1.unwrap().unwrap().number, 7);
+        let step2 = resolve_pr_with(Some("feat"), known(7, Some("merged"), Some("feat")), |num, hint| match num {
+            None => {
+                assert_eq!(hint, Some(7));
+                Ok(Some(mk(8, "open", "feat")))
+            }
+            Some(_) => unreachable!(),
+        });
+        assert_eq!(step2.unwrap().unwrap().number, 8);
+
+        // Cached state was open #7, offline #7 merged while an older #5 against `release` is open -> keeps #7.
+        let r_older = resolve_pr_with(Some("feat"), known(7, Some("open"), Some("feat")), |num, _| match num {
+            None => Ok(Some(mk(5, "open", "feat"))),
+            Some(7) => Ok(Some(mk(7, "merged", "feat"))),
+            _ => unreachable!(),
+        });
+        assert_eq!(r_older.unwrap().unwrap().number, 7);
+    }
+
+    #[test]
+    fn resolve_pr_with_keeps_settled_pr_pinned_off_branch_or_detached() {
+        let mk = |n: u64, state: &str, head: &str| forge::PrStatus {
+            provider: "github".into(),
+            number: n,
+            url: format!("https://github.com/acme/app/pull/{n}"),
+            title: format!("PR {n}"),
+            state: state.into(),
+            checks: "none".into(),
+            review: "none".into(),
+            base: "main".into(),
+            head: head.into(),
+        };
+        let known_settled = |st: &'static str| Some(KnownPr {
+            number: 7, provider: Some("github"), state: Some(st), head: Some("feat"),
+        });
+
+        for (cur_branch, cached_state) in [
+            (Some("other"), "merged"),
+            (Some("other"), "closed"),
+            (None, "merged"),
+            (None, "closed"),
+            (Some("pr-7-feat"), "merged"),
+        ] {
+            let mut calls = Vec::new();
+            let res = resolve_pr_with(cur_branch, known_settled(cached_state), |num, hint| {
+                calls.push((num, hint));
+                match num {
+                    Some(7) => Ok(Some(mk(7, cached_state, "feat"))),
+                    None => panic!("settled PR off its branch or detached must never call by-branch lookup"),
+                    _ => unreachable!(),
+                }
+            });
+            assert_eq!(res.unwrap().unwrap().number, 7);
+            assert_eq!(calls, vec![(Some(7), None)], "cur_branch={cur_branch:?}, state={cached_state}");
+        }
+
+        // Cached state was still open before switching branches / detaching, and live check shows it settled:
+        // stays pinned on #7 without falling through to by-branch lookup.
+        for cur_branch in [Some("other"), None] {
+            let mut calls = Vec::new();
+            let known_open = Some(KnownPr {
+                number: 7, provider: Some("github"), state: Some("open"), head: Some("feat"),
+            });
+            let res = resolve_pr_with(cur_branch, known_open, |num, hint| {
+                calls.push((num, hint));
+                match num {
+                    Some(7) => Ok(Some(mk(7, "merged", "feat"))),
+                    None => panic!("must stay pinned when stored PR is already settled"),
+                    _ => unreachable!(),
+                }
+            });
+            assert_eq!(res.unwrap().unwrap().number, 7);
+            assert_eq!(calls, vec![(Some(7), None)], "cur_branch={cur_branch:?}");
+        }
     }
 
     #[test]
@@ -35673,22 +37060,22 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn task_file_fp_for_task_rejects_a_symlink_escaping_the_worktree() {
-        // A `.pdf` NAME is not a `.pdf` LOCATION: containment is decided by
-        // `safe_task_path`, which canonicalizes through the symlink before
-        // the extension is ever looked at, so an in-worktree link pointing
-        // out cannot turn this into a stat oracle for the whole disk.
+    fn task_file_fp_for_task_judges_a_link_by_where_it_lands() {
+        // A `.pdf` NAME is not a `.pdf` LOCATION: the read resolver follows a
+        // link out of the task (GH #250) and the extension is checked on the
+        // canonical target, so a link named like a PDF onto anything else is
+        // refused, while one onto a real PDF elsewhere previews like any
+        // other followed link.
         let outside = tempdir().unwrap();
         fs::write(outside.path().join("elsewhere.pdf"), b"%PDF-1.4\n").unwrap();
+        fs::write(outside.path().join("notes.txt"), b"x").unwrap();
         let ws = tempdir().unwrap();
-        std::os::unix::fs::symlink(
-            outside.path().join("elsewhere.pdf"),
-            ws.path().join("looks-local.pdf"),
-        )
-        .unwrap();
+        std::os::unix::fs::symlink(outside.path().join("notes.txt"), ws.path().join("looks-local.pdf")).unwrap();
+        std::os::unix::fs::symlink(outside.path().join("elsewhere.pdf"), ws.path().join("linked.pdf")).unwrap();
         let task = Task { path: ws.path().to_string_lossy().into_owned(), ..Default::default() };
 
         assert!(task_file_fp_for_task(&task, "looks-local.pdf").is_err());
+        assert!(task_file_fp_for_task(&task, "linked.pdf").is_ok());
     }
 
     #[test]
@@ -36563,13 +37950,34 @@ mod tests {
     #[test]
     fn batch_route_trusts_only_an_open_pr_on_the_tasks_branch() {
         assert_eq!(batch_route(Some(&pr("open", "feat", 5)), Some("feat")), BatchRoute::Trusted);
-        assert_eq!(batch_route(Some(&pr("merged", "feat", 5)), Some("feat")), BatchRoute::Trusted);
-        // Fork checkouts and a detached review checkout are still the PR.
+        assert_eq!(batch_route(Some(&pr("merged", "feat", 5)), Some("feat")), BatchRoute::SettledSameBranch);
+        // Fork checkouts and a detached review checkout stay pinned on the tracked PR.
         assert_eq!(batch_route(Some(&pr("open", "feat", 5)), Some("pr-5-feat")), BatchRoute::Trusted);
+        assert_eq!(batch_route(Some(&pr("merged", "feat", 5)), Some("pr-5-feat")), BatchRoute::Trusted);
         assert_eq!(batch_route(Some(&pr("open", "feat", 5)), None), BatchRoute::Trusted);
         assert_eq!(batch_route(Some(&pr("open", "feat", 5)), Some("follow-up")), BatchRoute::Moved);
-        assert_eq!(batch_route(Some(&pr("closed", "feat", 5)), Some("feat")), BatchRoute::Single);
+        assert_eq!(batch_route(Some(&pr("closed", "feat", 5)), Some("feat")), BatchRoute::SettledSameBranch);
+        // Once settled, switching to another branch or detaching stays on the old PR.
+        assert_eq!(batch_route(Some(&pr("merged", "feat", 5)), Some("follow-up")), BatchRoute::Trusted);
+        assert_eq!(batch_route(Some(&pr("closed", "feat", 5)), Some("follow-up")), BatchRoute::Trusted);
+        assert_eq!(batch_route(Some(&pr("merged", "feat", 5)), None), BatchRoute::Trusted);
         assert_eq!(batch_route(None, Some("feat")), BatchRoute::Single);
+    }
+
+    #[test]
+    fn accept_branch_candidate_requires_same_branch_and_newer_number_for_settled_prs() {
+        // Same branch, old PR merged -> accepts newer open/draft/merged PR.
+        assert!(accept_branch_candidate(Some("feat"), 5, Some("merged"), Some("feat"), &pr("open", "feat", 6)));
+        assert!(accept_branch_candidate(Some("feat"), 5, Some("closed"), Some("feat"), &pr("draft", "feat", 6)));
+        assert!(accept_branch_candidate(Some("feat"), 5, Some("merged"), Some("feat"), &pr("merged", "feat", 6)));
+        // Never regress to an older settled or older still-open PR on the branch.
+        assert!(!accept_branch_candidate(Some("feat"), 5, Some("merged"), Some("feat"), &pr("closed", "feat", 4)));
+        assert!(!accept_branch_candidate(Some("feat"), 5, Some("merged"), Some("feat"), &pr("open", "feat", 4)));
+        // Fork alias checkout, moved branch, or detached HEAD -> stay on old settled PR.
+        assert!(!accept_branch_candidate(Some("pr-5-feat"), 5, Some("merged"), Some("feat"), &pr("open", "feat", 6)));
+        assert!(!accept_branch_candidate(Some("other"), 5, Some("merged"), Some("feat"), &pr("open", "other", 9)));
+        assert!(!accept_branch_candidate(Some("feat"), 5, Some("merged"), Some("feat"), &pr("open", "other", 9)));
+        assert!(!accept_branch_candidate(None, 5, Some("merged"), Some("feat"), &pr("open", "feat", 6)));
     }
 
     #[test]
@@ -36628,6 +38036,15 @@ mod tests {
         assert_eq!(head_branch(&wt).as_deref(), Some("feat/x"));
         git(&["checkout", "--detach"], &wt).unwrap();
         assert_eq!(head_branch(&wt), None);
+        assert_eq!(checkout_branch(&wt), CheckoutBranch::Detached);
+
+        let missing_dir = tempdir().unwrap();
+        let missing = missing_dir.path();
+        assert_eq!(checkout_branch(missing), CheckoutBranch::NoGit);
+        let orphan = Task { branch: "feat/x".into(), ..Default::default() };
+        // Detached HEAD stays pinned (`None`); missing `.git` uses the task's stored branch.
+        assert_eq!(batch_checkout_branch(&wt, &orphan), None);
+        assert_eq!(batch_checkout_branch(missing, &orphan).as_deref(), Some("feat/x"));
     }
 
     #[test]
@@ -39881,25 +41298,28 @@ filename f.rs
         let mut l = vec![gt("orch"), gt("near"), gt("far")];
         l[2].project_id = "q".into();
 
-        let changed = apply_spawn_link(&mut l, "near", "orch", Some("teal".into())).unwrap();
+        let changed = apply_spawn_link(&mut l, "near", "orch", Some("teal".into()), Some("tab-2")).unwrap();
         assert_eq!(l[1].spawned_by.as_deref(), Some("orch"));
+        assert_eq!(l[1].spawned_by_tab.as_deref(), Some("tab-2"));
         assert_eq!(gid(&l, "near").as_deref(), Some("orch"));
         assert_eq!(changed.len(), 2, "child stamped and grouped, lead founded; each written once");
 
-        let changed = apply_spawn_link(&mut l, "far", "orch", None).unwrap();
+        let changed = apply_spawn_link(&mut l, "far", "orch", None, Some("  ")).unwrap();
         assert_eq!(changed, vec![2]);
         assert_eq!(l[2].spawned_by.as_deref(), Some("orch"));
+        assert_eq!(l[2].spawned_by_tab, None, "blank parent tab is ignored");
         assert_eq!(gid(&l, "far"), None, "no group across projects");
 
         // The link is to the DIRECT parent, even where the group is the
         // root's (a sub-orchestrator's child lands in the root group).
         l.push(gt("leaf"));
-        apply_spawn_link(&mut l, "leaf", "near", None).unwrap();
+        apply_spawn_link(&mut l, "leaf", "near", None, None).unwrap();
         assert_eq!(l[3].spawned_by.as_deref(), Some("near"));
+        assert_eq!(l[3].spawned_by_tab, None);
         assert_eq!(gid(&l, "leaf").as_deref(), Some("orch"));
 
-        assert!(apply_spawn_link(&mut l, "orch", "orch", None).is_err());
-        assert!(apply_spawn_link(&mut l, "orch", "nope", None).is_err());
+        assert!(apply_spawn_link(&mut l, "orch", "orch", None, None).is_err());
+        assert!(apply_spawn_link(&mut l, "orch", "nope", None, None).is_err());
     }
 
     #[test]
@@ -39907,8 +41327,10 @@ filename f.rs
         let t = gt("x");
         let json = serde_json::to_string(&t).unwrap();
         assert!(!json.contains("spawned_by"), "absent stays absent on disk");
+        assert!(!json.contains("spawned_by_tab"), "absent stays absent on disk");
         let back: Task = serde_json::from_str(&json).unwrap();
         assert_eq!(back.spawned_by, None);
+        assert_eq!(back.spawned_by_tab, None);
     }
 
     #[test]
@@ -40662,6 +42084,28 @@ filename f.rs
         fs::set_permissions(&loose, fs::Permissions::from_mode(0o644)).unwrap();
         write_atomic(&loose, b"plain").unwrap();
         assert_eq!(mode(&loose), 0o644);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_atomic_never_writes_through_a_link_planted_at_a_temp_name() {
+        // an agent that can write the dir plants links where the temp file
+        // used to be named (`.{name}.tmp.{pid}.{seq}`, both guessable) and
+        // waits for a save. The save must land in the file, never through a
+        // planted link, and the file must stay a regular file.
+        let dir = tempdir().unwrap();
+        let victim = dir.path().join("victim");
+        fs::write(&victim, b"untouched").unwrap();
+        let f = dir.path().join("notes.md");
+        fs::write(&f, b"old").unwrap();
+        for seq in 0..64 {
+            let name = format!(".notes.md.tmp.{}.{seq}", std::process::id());
+            std::os::unix::fs::symlink(&victim, dir.path().join(name)).unwrap();
+        }
+        write_atomic(&f, b"new").unwrap();
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "untouched");
+        assert_eq!(fs::read_to_string(&f).unwrap(), "new");
+        assert!(!fs::symlink_metadata(&f).unwrap().file_type().is_symlink());
     }
 
     #[test]
@@ -41738,6 +43182,7 @@ mod schedule_record_tests {
         w.pr_url = Some("https://github.com/acme/web/pull/77".into());
         w.pr_title = Some("Fix login".into());
         w.pr_state = Some("open".into());
+        w.pr_head = Some("fix-login".into());
         w.pr_state_at = Some("2026-10-01T00:00:00Z".into());
         // The same poll again: no write, whatever the timestamp says.
         assert!(!pr_cache_differs(&w, &pr("open", "Fix login"), "github"));
@@ -41746,7 +43191,26 @@ mod schedule_record_tests {
         assert!(pr_cache_differs(&w, &pr("open", "Fix login and logout"), "github"));
         // A record written before these fields existed reads them as absent.
         let old: Task = serde_json::from_str(r#"{"id":"t","pr_number":77}"#).unwrap();
-        assert_eq!((old.pr_title, old.pr_state, old.pr_state_at), (None, None, None));
+        assert_eq!((old.pr_title, old.pr_state, old.pr_state_at, old.pr_head), (None, None, None, None));
+
+        // Stale poll snapshot must not overwrite a newer PR already written on disk (e.g. by task_pr_create).
+        let mut disk = Task::default();
+        disk.pr_number = Some(78);
+        disk.pr_provider = Some("github".into());
+        disk.pr_url = Some("https://github.com/acme/web/pull/78".into());
+        disk.pr_state = Some("open".into());
+        let stale_poll = pr("merged", "Old 77");
+        assert!(!apply_pr_identity(
+            &mut disk,
+            Some(77),
+            Some("github"),
+            Some("https://github.com/acme/web/pull/77"),
+            &stale_poll,
+            "github",
+            "2026-10-02T00:00:00Z",
+        ));
+        assert_eq!(disk.pr_number, Some(78));
+        assert_eq!(disk.pr_state.as_deref(), Some("open"));
     }
 
     use super::*;
@@ -41872,7 +43336,7 @@ mod schedule_record_tests {
             let changed = apply_group_new(&mut list, "parent", None).unwrap();
             save_changed(&list, changed).unwrap();
             let mut list = load_tasks_all();
-            let changed = apply_spawn_link(&mut list, "other", "parent", None).unwrap();
+            let changed = apply_spawn_link(&mut list, "other", "parent", None, None).unwrap();
             save_changed(&list, changed).unwrap();
             assert_eq!(stored("parent"), Some(s), "group writers");
         });

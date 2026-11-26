@@ -131,30 +131,41 @@ use std::io::{self, BufRead, Read, Write};
 /// stays listed whatever the filters say), so a remote client or an agent
 /// can do what the row's Pin does. A v25 server does not know it.
 ///
-/// v27: `badge_set`, `badge_remove` and `badge_list` set, remove and list a
-/// task's badges, and `TaskSummary` carries them. A v26 server does not know
+/// v27: tab-scoped parent-child routing. `new` carries `parent_tab`
+/// (`$TERMIC_TAB_ID` or MCP `X-Termic-Tab`) so `spawned_by_tab` records which
+/// tab initiated a child task, and `send` carries `caller_task` so an
+/// unqualified reply from a child defaults back to that initiating tab instead
+/// of the parent's default tab.
+///
+/// v28: `run` takes `script`, one of the project's named run commands (the
+/// Run button's dropdown: `scripts.run_scripts` in `.termic.yaml` plus the
+/// personal ones), and `status` lists them. A v27 server would drop the
+/// field and start the main run script instead, which reads as success.
+///
+/// v29: `badge_set`, `badge_remove` and `badge_list` set, remove and list a
+/// task's badges, and `TaskSummary` carries them. A v28 server does not know
 /// the verbs; the bump turns that into "restart the app".
 ///
-/// v28: the `present_*` verbs (`present_new`, `present_comment`,
+/// v30: the `present_*` verbs (`present_new`, `present_comment`,
 /// `present_reply`, `present_show`, `present_list`, `present_claim`) open
 /// an agent-presented review of a commit range and thread comments on it.
-/// A v27 server does not know them; the bump turns that into "restart the
+/// A v29 server does not know them; the bump turns that into "restart the
 /// app" instead of an unknown-command failure.
 ///
-/// v29: `present_resolve` resolves or reopens a review thread, and a thread
-/// carries `resolved`. A v28 server does not know the verb; the bump turns
+/// v31: `present_resolve` resolves or reopens a review thread, and a thread
+/// carries `resolved`. A v30 server does not know the verb; the bump turns
 /// that into "restart the app".
 ///
-/// v30: `present_update` starts a review's next iteration, and a review carries
-/// `iterations` while its threads carry `iteration`, `origin` and `outdated`. A v29
+/// v32: `present_update` starts a review's next iteration, and a review carries
+/// `iterations` while its threads carry `iteration`, `origin` and `outdated`. A v31
 /// server does not know the verb; the bump turns that into "restart the app".
 ///
-/// v31: `present_delete` deletes a review and its hidden refs. A v30 server
+/// v33: `present_delete` deletes a review and its hidden refs. A v32 server
 /// does not know the verb; the bump turns that into "restart the app".
 ///
-/// v32: `view` shows a file to the user in a tab of a task. A v31 server does
+/// v34: `view` shows a file to the user in a tab of a task. A v33 server does
 /// not know the verb; the bump turns that into "restart the app".
-pub const PROTOCOL_VERSION: u32 = 32;
+pub const PROTOCOL_VERSION: u32 = 34;
 
 /// A pasted "123", "#123", "!123" or a PR / MR link, reduced to its number.
 /// None for anything else. The webview's `parsePrRef` (src/lib/prReview.ts)
@@ -884,6 +895,11 @@ pub enum Command {
         /// caller-asserted: an unknown id is ignored, never an error.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         parent_task: Option<String>,
+        /// v27: the tab inside `parent_task` whose agent created this task
+        /// (`$TERMIC_TAB_ID`, or MCP `X-Termic-Tab`), stamped as
+        /// `spawned_by_tab` so unqualified replies return to that tab.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_tab: Option<String>,
         /// v21: review this pull request (`termic review`). The webview
         /// fetches its head and checks it out (a worktree unless `mode` is
         /// "main"), names the task `review-pr-<n>` when `name` is empty,
@@ -1015,7 +1031,7 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cwd: Option<String>,
     },
-    /// v32: show a file to the user in a tab of the task: a file inside the
+    /// v34: show a file to the user in a tab of the task: a file inside the
     /// task in its editor, any other path read-only. Replies `ReplyData::View`,
     /// which never carries the file's content.
     View {
@@ -1033,7 +1049,7 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cwd: Option<String>,
     },
-    /// v27: set a badge on a task. Re-setting `key` replaces its text and
+    /// v29: set a badge on a task. Re-setting `key` replaces its text and
     /// colour in place. Replies `ReplyData::Badges`.
     BadgeSet {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1050,7 +1066,7 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cwd: Option<String>,
     },
-    /// v27: remove a task's badge by key. A missing key is not an error:
+    /// v29: remove a task's badge by key. A missing key is not an error:
     /// the reply's `changed` is false.
     BadgeRemove {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1061,7 +1077,7 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cwd: Option<String>,
     },
-    /// v27: list a task's badges.
+    /// v29: list a task's badges.
     BadgeList {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         task: Option<String>,
@@ -1070,7 +1086,7 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cwd: Option<String>,
     },
-    /// v28: open a review of `range` (`A..B`) in the task's Git tab.
+    /// v30: open a review of `range` (`A..B`) in the task's Git tab.
     /// `tab` is the agent tab the user's comments go to. Replies
     /// `ReplyData::Review`.
     PresentNew {
@@ -1094,7 +1110,7 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cwd: Option<String>,
     },
-    /// v28: open a thread on `file` of a review, on head-side lines
+    /// v30: open a thread on `file` of a review, on head-side lines
     /// `start_line..=end_line`, or at file level without them. Replies
     /// `ReplyData::ReviewWrite`.
     PresentComment {
@@ -1112,7 +1128,7 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cwd: Option<String>,
     },
-    /// v28: reply in a thread (`r1-t3`, which names its review). Replies
+    /// v30: reply in a thread (`r1-t3`, which names its review). Replies
     /// `ReplyData::ReviewWrite`.
     PresentReply {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1124,7 +1140,7 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cwd: Option<String>,
     },
-    /// v29: resolve (`resolved` true) or reopen a thread. Replies
+    /// v31: resolve (`resolved` true) or reopen a thread. Replies
     /// `ReplyData::ReviewResolve`.
     PresentResolve {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1136,7 +1152,7 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cwd: Option<String>,
     },
-    /// v28: one review. With `since`, only the comments whose seq is
+    /// v30: one review. With `since`, only the comments whose seq is
     /// greater, in the threads that have one. Replies `ReplyData::Review`.
     PresentShow {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1149,7 +1165,7 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cwd: Option<String>,
     },
-    /// v28: the task's reviews. Replies `ReplyData::Reviews`.
+    /// v30: the task's reviews. Replies `ReplyData::Reviews`.
     PresentList {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         task: Option<String>,
@@ -1158,7 +1174,7 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cwd: Option<String>,
     },
-    /// v28: point a review at another agent tab of its task, and with
+    /// v30: point a review at another agent tab of its task, and with
     /// `author` (default: that tab's agent name) the name its future agent
     /// comments carry. Replies `ReplyData::ReviewClaim`.
     PresentClaim {
@@ -1175,7 +1191,7 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cwd: Option<String>,
     },
-    /// v30: start the review's next iteration at `head`; `base` defaults to the
+    /// v32: start the review's next iteration at `head`; `base` defaults to the
     /// last iteration's base_ref re-resolved; `show` is full or an iteration number.
     /// Replies `ReplyData::ReviewUpdate`.
     PresentUpdate {
@@ -1192,7 +1208,7 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cwd: Option<String>,
     },
-    /// v31: delete a review, its file and its hidden refs. Its id is never
+    /// v33: delete a review, its file and its hidden refs. Its id is never
     /// reused. Replies `ReplyData::ReviewDelete`.
     PresentDelete {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1327,7 +1343,9 @@ pub enum Command {
     /// its Run tab, exactly as the app's Run button starts it. Starts what
     /// is not already running; `stop` stops it; `status` only reports what
     /// is configured and running. `member` narrows a multi-repo task's run
-    /// to one member repo. cwd-aware when `task` absent.
+    /// to one member repo. `script` (v28) is one of the project's named run
+    /// commands, by label, instead of the run script. cwd-aware when `task`
+    /// absent.
     Run {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         task: Option<String>,
@@ -1341,6 +1359,8 @@ pub enum Command {
         status: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         member: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        script: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cwd: Option<String>,
     },
@@ -1619,6 +1639,11 @@ pub enum Command {
         /// The CLI's working directory, for worktree-first resolution.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cwd: Option<String>,
+        /// v27: the task the caller runs in (`$TERMIC_TASK_ID`, or MCP
+        /// `X-Termic-Task`). When `tab` is absent and the target spawned this
+        /// caller from `spawned_by_tab`, routes the reply to that tab.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        caller_task: Option<String>,
     },
     /// The GUI's "send diff to main": bring the worktree's cumulative
     /// diff into the project's main checkout as uncommitted changes.
@@ -1782,23 +1807,23 @@ pub enum ReplyData {
     Tab(TabData),
     TabClose(TabCloseData),
     Prop(PropData),
-    /// `view` (v32).
+    /// `view` (v34).
     View(ViewData),
-    /// `badge set`, `badge rm` and `badge list` (v27).
+    /// `badge set`, `badge rm` and `badge list` (v29).
     Badges(BadgesData),
-    /// `present new` and `present show` (v28).
+    /// `present new` and `present show` (v30).
     Review(ReviewData),
-    /// `present claim` (v28).
+    /// `present claim` (v30).
     ReviewClaim(ReviewClaimData),
-    /// `present comment` and `present reply` (v28).
+    /// `present comment` and `present reply` (v30).
     ReviewWrite(ReviewWriteData),
-    /// `present resolve` and `present unresolve` (v29).
+    /// `present resolve` and `present unresolve` (v31).
     ReviewResolve(ReviewResolveData),
-    /// `present list` (v28).
+    /// `present list` (v30).
     Reviews(ReviewsData),
-    /// `present update` (v30).
+    /// `present update` (v32).
     ReviewUpdate(ReviewUpdateData),
-    /// `present delete` (v31).
+    /// `present delete` (v33).
     ReviewDelete(ReviewDeleteData),
     Quit(QuitData),
     Archive(ArchiveData),
@@ -2321,12 +2346,31 @@ pub struct RunData {
     /// One per configured script: the host's, then each multi-repo member
     /// with one. Empty when nothing is configured.
     pub targets: Vec<RunTarget>,
+    /// v28: the project's named run commands, whether running and in which
+    /// tab, for `status` (and when there is no run script to report), so a
+    /// caller can find a label to pass as `script`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scripts: Vec<RunScript>,
+}
+
+/// One of a project's named run commands (the Run button's dropdown).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RunScript {
+    /// What `script` takes. The command itself when it has no label.
+    pub label: String,
+    pub command: String,
+    pub running: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RunTarget {
     /// "" for the host project, else the member repo's directory name.
     pub member: String,
+    /// v28: the named run command's label, when this is one (`script`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
     /// The configured command.
     pub script: String,
     /// Its Run tab, once one exists: `logs --tab` reads its output.
@@ -2643,12 +2687,16 @@ pub struct TaskSummary {
     /// ignores it or reads none), so no protocol bump.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spawned_by: Option<String>,
+    /// v27: the parent tab id that spawned this task (`spawned_by_tab`), when
+    /// recorded. Additive so callers can see which tab initiated the task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spawned_by_tab: Option<String>,
     /// v18 (GH #358): the task's collected tab properties (see
     /// `CollectedProp`). Empty when no tab holds any, or when the UI has
     /// not reported the task's tabs.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub props: Vec<CollectedProp>,
-    /// v27: the task's badges.
+    /// v29: the task's badges.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub badges: Vec<BadgeEntry>,
     /// A termic-server task's organisation as a desktop last wrote it
@@ -3287,7 +3335,8 @@ mod tests {
                 wait: true,
                 timeout_ms: Some(60_000),
                 cwd: Some("/repo/web".into()),
-                parent_task: None,
+                parent_task: Some("orch-1".into()),
+                parent_tab: Some("tab-2".into()),
                 pr: None,
                 members: vec!["alpha".into(), "Beta".into()],
             },
@@ -3311,6 +3360,7 @@ mod tests {
                 timeout_ms: None,
                 cwd: None,
                 parent_task: None,
+                parent_tab: None,
                 pr: None,
                 members: Vec::new(),
             },
@@ -3335,6 +3385,7 @@ mod tests {
                 timeout_ms: None,
                 cwd: None,
                 parent_task: None,
+                parent_tab: None,
                 pr: None,
                 members: Vec::new(),
             },
@@ -3359,6 +3410,7 @@ mod tests {
                 timeout_ms: None,
                 cwd: None,
                 parent_task: None,
+                parent_tab: None,
                 pr: None,
                 members: Vec::new(),
             },
@@ -3441,13 +3493,13 @@ mod tests {
                 key: Some("status".into()), value: Some(String::new()), cwd: None,
             },
             Command::Prop { task: None, project: None, tab: None, key: None, value: None, cwd: Some("/t".into()) },
-            // v32: show a file.
+            // v34: show a file.
             Command::View {
                 path: "/tmp/report.md".into(), focus: true, task: Some("fix-auth".into()),
                 project: Some("web".into()), cwd: None,
             },
             Command::View { path: "/t/a.rs".into(), focus: false, task: None, project: None, cwd: Some("/t".into()) },
-            // v27: badges.
+            // v29: badges.
             Command::BadgeSet {
                 task: Some("fix-auth".into()),
                 project: Some("web".into()),
@@ -3462,7 +3514,7 @@ mod tests {
             },
             Command::BadgeRemove { task: Some("fix-auth".into()), project: None, key: "ci".into(), cwd: None },
             Command::BadgeList { task: None, project: None, cwd: Some("/t".into()) },
-            // v28: agent-presented reviews.
+            // v30: agent-presented reviews.
             Command::PresentNew {
                 task: Some("fix-auth".into()),
                 project: Some("web".into()),
@@ -3499,7 +3551,7 @@ mod tests {
                 task: Some("fix-auth".into()), project: Some("web".into()), thread: "r1-t3".into(), resolved: false,
                 cwd: Some("/t".into()),
             },
-            // v30: review iterations.
+            // v32: review iterations.
             Command::PresentUpdate {
                 task: None, project: None, review: "r1".into(), head: "HEAD".into(), base: None, show: None,
                 cwd: Some("/t".into()),
@@ -3508,7 +3560,7 @@ mod tests {
                 task: Some("fix-auth".into()), project: Some("web".into()), review: "r2".into(), head: "HEAD".into(),
                 base: Some("main".into()), show: Some("1".into()), cwd: None,
             },
-            // v31: review deletion.
+            // v33: review deletion.
             Command::PresentDelete { task: None, project: None, review: "r1".into(), cwd: Some("/t".into()) },
             Command::PresentDelete { task: Some("fix-auth".into()), project: Some("web".into()), review: "r2".into(), cwd: None },
             Command::Agents,
@@ -3574,6 +3626,7 @@ mod tests {
                 tab: Some("claude".into()),
                 now: true,
                 cwd: None,
+                caller_task: Some("child-1".into()),
             },
             Command::Send {
                 task: None,
@@ -3587,6 +3640,7 @@ mod tests {
                 tab: None,
                 now: false,
                 cwd: Some("/repo/web".into()),
+                caller_task: None,
             },
             Command::Apply { task: "fix-auth".into(), project: Some("web".into()) },
             Command::Diff { task: Some("fix-auth".into()), project: None, full: true, cwd: None },
@@ -3629,8 +3683,8 @@ mod tests {
             },
             Command::ScheduleRun { task: Some("parent-1".into()), project: None, cwd: None },
             // v25: run / setup scripts.
-            Command::Run { task: Some("fix-auth".into()), project: None, setup: false, stop: false, status: false, member: None, cwd: None },
-            Command::Run { task: None, project: None, setup: true, stop: true, status: false, member: Some("api".into()), cwd: Some("/t".into()) },
+            Command::Run { task: Some("fix-auth".into()), project: None, setup: false, stop: false, status: false, member: None, script: None, cwd: None },
+            Command::Run { task: None, project: None, setup: false, stop: true, status: false, member: None, script: Some("Storybook".into()), cwd: Some("/t".into()) },
             Command::ScheduleDelete { task: Some("parent-1".into()), project: None, delete_reports: true, archive_tasks: false, cwd: None },
             Command::ScheduleDelete { task: Some("parent-1".into()), project: None, delete_reports: false, archive_tasks: true, cwd: None },
         ] {
@@ -3776,7 +3830,8 @@ mod tests {
             open_tabs: Some(2),
             diff: Some(DiffStat { files_changed: 3, insertions: 10, deletions: 2, untracked: 1 }),
             group: None,
-            spawned_by: None,
+            spawned_by: Some("api/orchestrate".into()),
+            spawned_by_tab: Some("tab-2".into()),
             org: None,
         };
         for data in [
@@ -4157,11 +4212,13 @@ mod tests {
                 which: "run".into(),
                 targets: vec![RunTarget {
                     member: String::new(),
+                    label: None,
                     script: "npm run dev".into(),
                     tab_id: Some("t1".into()),
                     running: true,
                     outcome: Some("started".into()),
                 }],
+                scripts: vec![RunScript { label: "Storybook".into(), command: "npm run storybook".into(), running: false, tab_id: None }],
             }),
             ReplyData::Schedule(ScheduleData {
                 schedules: vec![ScheduleSummary {

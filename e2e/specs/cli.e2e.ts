@@ -416,7 +416,7 @@ describe("termic prop: tab properties on the sidebar row (GH #358)", () => {
   });
 });
 
-describe("termic view: show a file in a tab (v32)", () => {
+describe("termic view: show a file in a tab (v34)", () => {
   const TASK = "cli-view";
   let taskId: string;
   let taskPath: string;

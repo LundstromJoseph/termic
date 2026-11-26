@@ -130,6 +130,7 @@ export default {
     stateDraft: "draft",
     stateOpen: "open",
     checksFailing: "checks failing",
+    checksRunning: "checks running",
     approved: "approved",
     openOn: "Open on {{forge}}",
     new: "New",
@@ -379,6 +380,12 @@ export default {
     prChecksFailing: "checks failing",
     prChecksPending: "checks running",
     memberMore: "+{{count}} more",
+  },
+  // The needs-you panel (GH #468), AttentionWindow.tsx.
+  attention: {
+    empty: "Nothing is waiting for you.",
+    open: "Open",
+    waiting: "Waiting for you in the terminal.",
   },
   activity: {
     windowTitle: "Activity",

@@ -26,6 +26,9 @@ pub fn parse_claude_jsonl(jsonl: &str) -> Vec<Turn> {
     // empties it (Claude drains its queue when a turn ends). Without these,
     // a long session left consumed prompts on the phone as Queued for good.
     let mut queue: Vec<(String, Option<String>)> = Vec::new();
+    // A tool call's place in `out`, by its id, for its result to land on.
+    let mut calls: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut results: std::collections::HashSet<String> = std::collections::HashSet::new();
     let sent = |queue: &mut Vec<(String, Option<String>)>, text: &str| {
         if let Some(i) = queue.iter().position(|(q, _)| q == text.trim()) {
             queue.remove(i);
@@ -36,6 +39,9 @@ pub fn parse_claude_jsonl(jsonl: &str) -> Vec<Turn> {
         if v.get("type").and_then(|t| t.as_str()) == Some("queue-operation") {
             let text = v.get("content").and_then(|c| c.as_str()).unwrap_or("").trim().to_string();
             match v.get("operation").and_then(|o| o.as_str()) {
+                // A subagent's hand-back is queued like a prompt but is not
+                // the person's: it shows once Claude takes it (below).
+                Some("enqueue") if text.contains("<agent-message") => {}
                 Some("enqueue") if !text.is_empty() => {
                     queue.push((text, v.get("timestamp").and_then(|t| t.as_str()).map(str::to_string)))
                 }
@@ -51,7 +57,23 @@ pub fn parse_claude_jsonl(jsonl: &str) -> Vec<Turn> {
             }
             continue;
         }
-        if v.get("isSidechain").and_then(|s| s.as_bool()) == Some(true) {
+        // A subagent's conversation, and what Claude writes for itself: the
+        // summary it continues from after a compaction is a "user" line
+        // nobody typed (isCompactSummary, isVisibleInTranscriptOnly).
+        let flag = |k: &str| v.get(k).and_then(|s| s.as_bool()) == Some(true);
+        // A subagent's final report, handed back to this session: Claude
+        // writes it as an isMeta "user" line ("Another Claude session sent a
+        // message: <agent-message ...>"). Its own turn, so a client can show
+        // it as the agent's report rather than drop it or call it the user's.
+        if flag("isMeta") && !flag("isSidechain") {
+            let text = v.pointer("/message/content").and_then(|c| c.as_str()).unwrap_or("");
+            if let Some(report) = agent_report(text) {
+                let ts = v.get("timestamp").and_then(|t| t.as_str()).map(str::to_string);
+                out.push(Turn { role: "assistant".into(), text: report, tool: Some("Subagent".into()), ts, detail: None, pending: false });
+                continue;
+            }
+        }
+        if flag("isSidechain") || flag("isCompactSummary") || flag("isVisibleInTranscriptOnly") || flag("isMeta") {
             continue;
         }
         let kind = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
@@ -67,7 +89,7 @@ pub fn parse_claude_jsonl(jsonl: &str) -> Vec<Turn> {
                 let text = text.trim();
                 sent(&mut queue, text);
                 if !text.is_empty() {
-                    out.push(Turn { role: "user".into(), text: text.into(), tool: None, ts });
+                    out.push(Turn { role: "user".into(), text: text.into(), tool: None, ts, detail: None, pending: false });
                 }
             }
             continue;
@@ -79,11 +101,8 @@ pub fn parse_claude_jsonl(jsonl: &str) -> Vec<Turn> {
             queue.clear();
         }
         let Some(content) = v.pointer("/message/content") else { continue };
-        let mut push = |role: &str, text: String, tool: Option<String>| {
-            let text = text.trim().to_string();
-            if !text.is_empty() || tool.is_some() {
-                out.push(Turn { role: role.into(), text, tool, ts: ts.clone() });
-            }
+        let push = |out: &mut Vec<Turn>, role: &str, text: String, tool: Option<String>, detail: Option<String>| {
+            push_turn(out, role, text, tool, ts.clone(), detail)
         };
         match content {
             serde_json::Value::String(text) => {
@@ -95,7 +114,8 @@ pub fn parse_claude_jsonl(jsonl: &str) -> Vec<Turn> {
                 if kind == "user" {
                     sent(&mut queue, text);
                 }
-                push(kind, text.clone(), None);
+                let text = if kind == "user" { unwrap_pastes(text) } else { text.clone() };
+                push(&mut out, kind, text, None, None);
             }
             serde_json::Value::Array(blocks) => {
                 for b in blocks {
@@ -108,11 +128,27 @@ pub fn parse_claude_jsonl(jsonl: &str) -> Vec<Turn> {
                             if kind == "user" {
                                 sent(&mut queue, &text);
                             }
-                            push(kind, text, None);
+                            let text = if kind == "user" { unwrap_pastes(&text) } else { text };
+                            push(&mut out, kind, text, None, None);
                         }
                         Some("tool_use") if kind == "assistant" => {
                             let name = b.get("name").and_then(|n| n.as_str()).unwrap_or("tool").to_string();
-                            push("tool", tool_summary(b.get("input")), Some(name));
+                            if let Some(id) = b.get("id").and_then(|i| i.as_str()) {
+                                calls.insert(id.to_string(), out.len());
+                            }
+                            push(&mut out, "tool", tool_summary(b.get("input")), Some(name), edit_diff(b.get("input")));
+                        }
+                        // A call's result arrives in the next user line,
+                        // by the call's id. An edit keeps its diff: "the
+                        // file was updated" says less than the change.
+                        Some("tool_result") if kind == "user" => {
+                            if let Some(id) = b.get("tool_use_id").and_then(|i| i.as_str()) {
+                                results.insert(id.to_string());
+                            }
+                            let at = b.get("tool_use_id").and_then(|i| i.as_str()).and_then(|i| calls.get(i)).copied();
+                            if let Some(t) = at.and_then(|i| out.get_mut(i)).filter(|t| t.detail.is_none()) {
+                                t.detail = result_text(b.get("content"));
+                            }
                         }
                         _ => {}
                     }
@@ -121,10 +157,46 @@ pub fn parse_claude_jsonl(jsonl: &str) -> Vec<Turn> {
             _ => {}
         }
     }
-    out.extend(queue.into_iter().filter(|(t, _)| !injected(t)).map(|(text, ts)| Turn { role: "queued".into(), text, tool: None, ts }));
+    mark_pending(&mut out, &calls, &results);
+    out.extend(queue.into_iter().filter(|(t, _)| !injected(t)).map(|(text, ts)| Turn { role: "queued".into(), text, tool: None, ts, detail: None, pending: false }));
     let skip = out.len().saturating_sub(TRANSCRIPT_TURNS);
     out.drain(..skip);
     out
+}
+
+/// A prompt with pasted text: the paste is the person's words, the
+/// `<pasted_content id="...">` tags around it are Claude Code's.
+fn unwrap_pastes(text: &str) -> String {
+    // Opening and closing tags both, each with or without attributes:
+    // Claude Code writes `</pasted_content id="c771">` as well as the bare one.
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    loop {
+        let at = [rest.find("<pasted_content"), rest.find("</pasted_content")].into_iter().flatten().min();
+        let Some(at) = at else { break };
+        out.push_str(&rest[..at]);
+        let Some(end) = rest[at..].find('>') else { break };
+        rest = &rest[at + end + 1..];
+    }
+    out.push_str(rest);
+    out.trim().to_string()
+}
+
+/// The report inside a subagent's hand-back (`<agent-message from="…">`):
+/// what follows Claude Code's "The report follows:" preamble, with the two
+/// spaces it indents every line by taken off. None when it is not one.
+fn agent_report(text: &str) -> Option<String> {
+    let start = text.find("<agent-message")?;
+    let body = &text[start..];
+    let body = &body[body.find('>')? + 1..];
+    let body = body.split("</agent-message>").next().unwrap_or(body);
+    let body = match body.find("The report follows:") {
+        Some(i) => &body[i + "The report follows:".len()..],
+        None => body,
+    };
+    let report = body.lines().map(|l| l.strip_prefix("  ").unwrap_or(l)).collect::<Vec<_>>().join("\n");
+    let report = report.trim().to_string();
+    (!report.is_empty()).then_some(report)
 }
 
 /// Text Claude records as a user line that is not the person's words: slash
@@ -155,6 +227,121 @@ fn tool_summary(input: Option<&serde_json::Value>) -> String {
     }
 }
 
+/// The tool calls in `calls` whose result never arrived are still running.
+fn mark_pending(out: &mut [Turn], calls: &std::collections::HashMap<String, usize>, done: &std::collections::HashSet<String>) {
+    for (id, &i) in calls {
+        if !done.contains(id) {
+            if let Some(t) = out.get_mut(i) {
+                t.pending = true;
+            }
+        }
+    }
+}
+
+/// One turn onto `out`, unless it says nothing (a tool call always says
+/// which tool).
+fn push_turn(out: &mut Vec<Turn>, role: &str, text: String, tool: Option<String>, ts: Option<String>, detail: Option<String>) {
+    let text = text.trim().to_string();
+    if !text.is_empty() || tool.is_some() {
+        out.push(Turn { role: role.into(), text, tool, ts, detail, pending: false });
+    }
+}
+
+/// The patch inside a Codex `exec` script: `"*** Begin Patch\n...*** End
+/// Patch"` as a string literal, so its newlines and quotes are escaped.
+/// Without the Begin/End lines, like apply_patch's.
+fn inline_patch(script: &str) -> Option<String> {
+    let start = script.find("*** Begin Patch")? + "*** Begin Patch".len();
+    let end = start + script[start..].find("*** End Patch")?;
+    let body = &script[start..end];
+    let body = if body.contains('\n') {
+        body.to_string()
+    } else {
+        body.replace("\\n", "\n").replace("\\t", "\t").replace("\\\"", "\"").replace("\\'", "'").replace("\\\\", "\\")
+    };
+    let body = body.trim_matches('\n').to_string();
+    (!body.is_empty()).then_some(body)
+}
+
+/// The shell command inside a Codex `exec` script
+/// (`tools.exec_command({cmd:"npm test", ...})`), unescaped: what the call
+/// does, where the script around it is only plumbing.
+fn exec_command_of(script: &str) -> Option<String> {
+    let at = script.find("exec_command(")?;
+    let rest = &script[at..];
+    let key = rest.find("cmd:").or_else(|| rest.find("\"cmd\":"))?;
+    let rest = rest[key..].split_once(':')?.1.trim_start();
+    let quote = rest.chars().next().filter(|c| matches!(c, '"' | '\'' | '`'))?;
+    let mut out = String::new();
+    let mut esc = false;
+    for c in rest[1..].chars() {
+        match (esc, c) {
+            (true, 'n') => { out.push(' '); esc = false; }
+            (true, c) => { out.push(c); esc = false; }
+            (false, '\\') => esc = true,
+            (false, c) if c == quote => return Some(out),
+            (false, c) => out.push(c),
+        }
+    }
+    None
+}
+
+/// Codex wraps a command's output in a header ("Exit code: 0\nWall time:
+/// ...\nOutput:\n"); the output is the part worth showing.
+fn codex_output(text: &str) -> String {
+    match text.split_once("\nOutput:\n") {
+        Some((_, out)) => out.to_string(),
+        None => text.to_string(),
+    }
+}
+
+/// A tool call's detail is cut to this many characters: enough for a
+/// test run's tail or a real diff, not a whole file.
+const DETAIL_CHARS: usize = 4000;
+
+/// `s` cut to `DETAIL_CHARS`, blank lines around it trimmed; None when empty.
+fn bounded(s: &str) -> Option<String> {
+    let s = s.trim_end().trim_start_matches(['\n', '\r']);
+    if s.trim().is_empty() {
+        return None;
+    }
+    Some(if s.chars().count() > DETAIL_CHARS { format!("{}\n...", s.chars().take(DETAIL_CHARS).collect::<String>()) } else { s.to_string() })
+}
+
+/// What an editing call changes, as `-`/`+` lines: Claude's Edit
+/// (`old_string`/`new_string`), MultiEdit (`edits`) and Write (`content`,
+/// all added).
+fn edit_diff(input: Option<&serde_json::Value>) -> Option<String> {
+    let input = input?;
+    let pair = |e: &serde_json::Value| -> Option<String> {
+        let old = e.get("old_string")?.as_str()?;
+        let new = e.get("new_string")?.as_str()?;
+        let mut d: Vec<String> = old.lines().map(|l| format!("-{l}")).collect();
+        d.extend(new.lines().map(|l| format!("+{l}")));
+        Some(d.join("\n"))
+    };
+    if let Some(edits) = input.get("edits").and_then(|e| e.as_array()) {
+        return bounded(&edits.iter().filter_map(pair).collect::<Vec<_>>().join("\n@@\n"));
+    }
+    if let Some(d) = pair(input) {
+        return bounded(&d);
+    }
+    let content = input.get("content")?.as_str()?;
+    input.get("file_path")?;
+    bounded(&content.lines().map(|l| format!("+{l}")).collect::<Vec<_>>().join("\n"))
+}
+
+/// A tool_result's text: a string, or its text blocks joined.
+fn result_text(content: Option<&serde_json::Value>) -> Option<String> {
+    match content? {
+        serde_json::Value::String(s) => bounded(s),
+        serde_json::Value::Array(blocks) => bounded(
+            &blocks.iter().filter_map(|b| b.get("text").and_then(|t| t.as_str())).collect::<Vec<_>>().join("\n"),
+        ),
+        _ => None,
+    }
+}
+
 // ───────────────────────────── codex ──────────────────────────────────
 
 /// Codex's rollout JSONL -> turns. Its `user` messages also carry what
@@ -166,6 +353,8 @@ fn tool_summary(input: Option<&serde_json::Value>) -> String {
 /// the one source that covers both.
 pub fn parse_codex_jsonl(jsonl: &str) -> Vec<Turn> {
     let mut out: Vec<Turn> = Vec::new();
+    let mut calls: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut results: std::collections::HashSet<String> = std::collections::HashSet::new();
     for line in jsonl.lines() {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
         if v.get("type").and_then(|t| t.as_str()) != Some("response_item") {
@@ -174,11 +363,8 @@ pub fn parse_codex_jsonl(jsonl: &str) -> Vec<Turn> {
         let ts = v.get("timestamp").and_then(|t| t.as_str()).map(str::to_string);
         let Some(p) = v.get("payload") else { continue };
         let str_of = |k: &str| p.get(k).and_then(|x| x.as_str()).unwrap_or("");
-        let mut push = |role: &str, text: String, tool: Option<String>| {
-            let text = text.trim().to_string();
-            if !text.is_empty() || tool.is_some() {
-                out.push(Turn { role: role.into(), text, tool, ts: ts.clone() });
-            }
+        let push = |out: &mut Vec<Turn>, role: &str, text: String, tool: Option<String>, detail: Option<String>| {
+            push_turn(out, role, text, tool, ts.clone(), detail)
         };
         match (str_of("type"), str_of("role")) {
             ("message", role @ ("user" | "assistant")) => {
@@ -193,29 +379,66 @@ pub fn parse_codex_jsonl(jsonl: &str) -> Vec<Turn> {
                     .filter(|t| role == "assistant" || !codex_injected(t))
                     .collect::<Vec<_>>()
                     .join("\n");
-                push(role, text, None);
+                push(&mut out, role, text, None, None);
             }
             ("function_call", _) => {
                 let args = serde_json::from_str::<serde_json::Value>(str_of("arguments")).ok();
-                push("tool", tool_summary(args.as_ref()), Some(str_of("name").to_string()));
+                calls.insert(str_of("call_id").to_string(), out.len());
+                push(&mut out, "tool", tool_summary(args.as_ref()), Some(str_of("name").to_string()), None);
             }
-            // apply_patch: its input is the patch, so name the files it touches.
+            // A call's output, by its call_id. apply_patch keeps its patch.
+            ("function_call_output" | "custom_tool_call_output", _) => {
+                results.insert(str_of("call_id").to_string());
+                // A string, an array of content items (`input_text`), or an
+                // object with `content`, by version and tool.
+                let text = match p.get("output") {
+                    Some(serde_json::Value::String(s)) => s.clone(),
+                    Some(serde_json::Value::Array(items)) => {
+                        items.iter().filter_map(|i| i.get("text").and_then(|t| t.as_str())).collect::<Vec<_>>().join("\n")
+                    }
+                    Some(o) => o.get("content").and_then(|c| c.as_str()).unwrap_or("").to_string(),
+                    None => String::new(),
+                };
+                if let Some(t) = calls.get(str_of("call_id")).and_then(|&i| out.get_mut(i)).filter(|t| t.detail.is_none()) {
+                    t.detail = bounded(&codex_output(&text));
+                }
+            }
+            // apply_patch: its input is the patch, so name the files it
+            // touches and keep the patch. Any other custom tool (`exec`, a
+            // script) is summarised by its input; its output is its detail.
             ("custom_tool_call", _) => {
-                let files: Vec<&str> = str_of("input")
-                    .lines()
-                    .filter_map(|l| {
-                        ["*** Update File: ", "*** Add File: ", "*** Delete File: "].iter().find_map(|k| l.strip_prefix(k))
-                    })
-                    .collect();
-                push("tool", one_line(&files.join(", ")), Some(str_of("name").to_string()));
+                calls.insert(str_of("call_id").to_string(), out.len());
+                let input = str_of("input");
+                if str_of("name") == "apply_patch" {
+                    let files: Vec<&str> = input
+                        .lines()
+                        .filter_map(|l| {
+                            ["*** Update File: ", "*** Add File: ", "*** Delete File: "].iter().find_map(|k| l.strip_prefix(k))
+                        })
+                        .collect();
+                    let patch: Vec<&str> = input.lines().filter(|l| !l.starts_with("*** Begin Patch") && !l.starts_with("*** End Patch")).collect();
+                    push(&mut out, "tool", one_line(&files.join(", ")), Some(str_of("name").to_string()), bounded(&patch.join("\n")));
+                } else if let Some(patch) = inline_patch(input) {
+                    // An edit through `exec`: the patch is a string in the script.
+                    let files: Vec<&str> = patch
+                        .lines()
+                        .filter_map(|l| ["*** Update File: ", "*** Add File: ", "*** Delete File: "].iter().find_map(|k| l.strip_prefix(k)))
+                        .collect();
+                    let summary = one_line(&files.join(", "));
+                    push(&mut out, "tool", summary, Some(str_of("name").to_string()), bounded(&patch));
+                } else {
+                    let summary = exec_command_of(input).unwrap_or_else(|| input.to_string());
+                    push(&mut out, "tool", one_line(&summary), Some(str_of("name").to_string()), None);
+                }
             }
             ("web_search_call", _) => {
                 let action = p.get("action");
-                push("tool", tool_summary(action), Some("web_search".into()));
+                push(&mut out, "tool", tool_summary(action), Some("web_search".into()), None);
             }
             _ => {}
         }
     }
+    mark_pending(&mut out, &calls, &results);
     let skip = out.len().saturating_sub(TRANSCRIPT_TURNS);
     out.drain(..skip);
     out
@@ -296,33 +519,60 @@ fn codex_session_cwd(f: &std::path::Path) -> Option<String> {
 /// reads as nothing rather than as noise.
 const AGY_USER: i64 = 14;
 const AGY_AGENT: i64 = 15;
+/// A tool call's result: its call id at [5,4,1], a command's output at
+/// [140,2,3,10,3,4] (measured on agy's run_command, 2026-11).
+const AGY_RESULT: i64 = 132;
 
 pub fn parse_antigravity_steps<'a>(steps: impl IntoIterator<Item = (i64, &'a [u8])>) -> Vec<Turn> {
     use crate::pb;
     let mut out: Vec<Turn> = Vec::new();
-    let mut push = |role: &str, text: String, tool: Option<String>| {
-        let text = text.trim().to_string();
-        if !text.is_empty() || tool.is_some() {
-            out.push(Turn { role: role.into(), text, tool, ts: None });
-        }
-    };
+    // A call's place in `out`, by its id, for its result step to land on.
+    let mut calls: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut results: std::collections::HashSet<String> = std::collections::HashSet::new();
     for (kind, payload) in steps {
         match kind {
-            AGY_USER => push("user", pb::text(payload, &[19, 2]).unwrap_or_default(), None),
+            AGY_USER => push_turn(&mut out, "user", pb::text(payload, &[19, 2]).unwrap_or_default(), None, None, None),
             AGY_AGENT => {
-                push("assistant", pb::text(payload, &[20, 1]).unwrap_or_default(), None);
+                push_turn(&mut out, "assistant", pb::text(payload, &[20, 1]).unwrap_or_default(), None, None, None);
                 for call in pb::get(payload, &[20, 7]) {
                     let Some(name) = pb::text(call, &[2]) else { continue };
                     let args = pb::text(call, &[3]).and_then(|a| serde_json::from_str::<serde_json::Value>(&a).ok());
-                    push("tool", tool_summary(args.as_ref()), Some(name));
+                    if let Some(id) = pb::text(call, &[1]) {
+                        calls.insert(id, out.len());
+                    }
+                    let diff = args.as_ref().and_then(agy_edit_diff);
+                    push_turn(&mut out, "tool", tool_summary(args.as_ref()), Some(name), None, diff);
+                }
+            }
+            // A call's result: a command's terminal output. An edit keeps its diff.
+            AGY_RESULT => {
+                if let Some(id) = pb::text(payload, &[5, 4, 1]) {
+                    results.insert(id);
+                }
+                let at = pb::text(payload, &[5, 4, 1]).and_then(|id| calls.get(&id).copied());
+                if let Some(t) = at.and_then(|i| out.get_mut(i)).filter(|t| t.detail.is_none()) {
+                    t.detail = pb::text(payload, &[140, 2, 3, 10, 3, 4]).and_then(|o| bounded(&o.replace("\r\n", "\n")));
                 }
             }
             _ => {}
         }
     }
+    mark_pending(&mut out, &calls, &results);
     let skip = out.len().saturating_sub(TRANSCRIPT_TURNS);
     out.drain(..skip);
     out
+}
+
+/// What an agy editing call changes, as `-`/`+` lines: edit_file's
+/// `Target`/`Replacement`, write_file's `Content` (all added).
+fn agy_edit_diff(args: &serde_json::Value) -> Option<String> {
+    let s = |k: &str| args.get(k).and_then(|v| v.as_str());
+    if let (Some(old), Some(new)) = (s("Target"), s("Replacement")) {
+        let mut d: Vec<String> = old.lines().map(|l| format!("-{l}")).collect();
+        d.extend(new.lines().map(|l| format!("+{l}")));
+        return bounded(&d.join("\n"));
+    }
+    s("Content").and_then(|c| bounded(&c.lines().map(|l| format!("+{l}")).collect::<Vec<_>>().join("\n")))
 }
 
 /// Read an agy conversation file. Read-only: agy may be writing it (WAL).
@@ -609,6 +859,120 @@ mod tests {
             ]
         );
         assert_eq!(turns[0].ts.as_deref(), Some("2026-01-01T10:00:01Z"));
+        // A command's output is its detail; the patch is apply_patch's.
+        assert_eq!(turns[1].detail.as_deref(), Some("1 failing"));
+        assert_eq!(turns[2].detail.as_deref(), Some("*** Update File: src/login.ts\n@@\n-a\n+b\n*** Add File: src/login.test.ts\n+x"));
+        assert_eq!(turns[3].detail, None);
+    }
+
+    #[test]
+    fn a_codex_custom_tool_that_is_not_a_patch_keeps_its_output() {
+        // Newer Codex: `exec` as a custom tool, outputs as input_text items.
+        let jsonl = [
+            r#"{"type":"response_item","payload":{"type":"custom_tool_call","name":"exec","call_id":"c1","input":"ls -la\nnpm test"}}"#,
+            r#"{"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"c1","output":[{"type":"input_text","text":"total 0"},{"type":"input_text","text":"3 passing"}]}}"#,
+            r#"{"type":"response_item","payload":{"type":"function_call","name":"wait","arguments":"{}","call_id":"c2"}}"#,
+            r#"{"type":"response_item","payload":{"type":"function_call_output","call_id":"c2","output":[{"type":"input_text","text":"done"}]}}"#,
+        ]
+        .join("\n");
+        let t = parse_codex_jsonl(&jsonl);
+        assert_eq!(t[0].text, "ls -la npm test");
+        assert_eq!(t[0].detail.as_deref(), Some("total 0\n3 passing"));
+        assert_eq!(t[1].detail.as_deref(), Some("done"));
+    }
+
+    #[test]
+    fn a_codex_edit_through_exec_shows_its_patch() {
+        let script = r#"const patch = "*** Begin Patch\n*** Update File: src/a.ts\n@@\n-old \"q\"\n+new\n*** End Patch";\ntext(await tools.apply_patch(patch));"#;
+        let jsonl = format!(
+            "{}\n{}",
+            serde_json::json!({"type":"response_item","payload":{"type":"custom_tool_call","name":"exec","call_id":"c1","input":script}}),
+            r#"{"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"c1","output":[{"type":"input_text","text":"Success."}]}}"#,
+        );
+        let t = parse_codex_jsonl(&jsonl);
+        assert_eq!(t[0].text, "src/a.ts");
+        assert_eq!(t[0].detail.as_deref(), Some("*** Update File: src/a.ts\n@@\n-old \"q\"\n+new"));
+        assert_eq!(inline_patch("no patch here"), None);
+    }
+
+    #[test]
+    fn a_codex_exec_call_is_summarised_by_its_command() {
+        assert_eq!(exec_command_of(r#"const r = await tools.exec_command({cmd:"echo \"hi\" && ls", yield_time_ms: 1000}); text(r);"#).as_deref(), Some(r#"echo "hi" && ls"#));
+        assert_eq!(exec_command_of("text(1)"), None);
+        assert_eq!(bounded("\n\nout\n").as_deref(), Some("out"));
+    }
+
+    #[test]
+    fn claude_writes_some_user_lines_for_itself() {
+        let jsonl = [
+            r#"{"type":"user","isCompactSummary":true,"isVisibleInTranscriptOnly":true,"message":{"content":"This session is being continued from a previous conversation."}}"#,
+            r#"{"type":"user","isMeta":true,"message":{"content":[{"type":"text","text":"Base directory for this skill: /x"}]}}"#,
+            r#"{"type":"user","message":{"content":"look: <pasted_content id=\"ab12\">\nline one\n</pasted_content> thanks"}}"#,
+        ]
+        .join("\n");
+        let t: Vec<String> = parse_claude_jsonl(&jsonl).into_iter().map(|t| t.text).collect();
+        assert_eq!(t, vec!["look: \nline one\n thanks".to_string()]);
+        // The closing tag can carry the id too.
+        assert_eq!(unwrap_pastes("<pasted_content id=\"c771\">\nwhat is next?\n</pasted_content id=\"c771\">"), "what is next?");
+    }
+
+    #[test]
+    fn a_tool_call_without_its_result_is_still_running() {
+        let jsonl = [
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"npm test"}}]}}"#,
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t2","name":"Bash","input":{"command":"sleep 60"}}]}}"#,
+        ]
+        .join("\n");
+        let p: Vec<bool> = parse_claude_jsonl(&jsonl).into_iter().map(|t| t.pending).collect();
+        assert_eq!(p, vec![false, true]);
+        let codex = r#"{"type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"make\"}","call_id":"c1"}}"#;
+        assert!(parse_codex_jsonl(codex)[0].pending);
+    }
+
+    #[test]
+    fn a_subagent_report_is_its_own_turn_not_the_users() {
+        let handback = "Another Claude session sent a message:\n<agent-message from=\"a0f6\">\n[Subagent hand-back] The text below is the final report. The report follows:\n  Linux reports itself.\n\n  **Still to do:** run CI.\n</agent-message>";
+        let jsonl = [
+            serde_json::json!({"type":"queue-operation","operation":"enqueue","content": handback}).to_string(),
+            serde_json::json!({"type":"user","isMeta":true,"message":{"content": handback}}).to_string(),
+        ]
+        .join("\n");
+        let t = parse_claude_jsonl(&jsonl);
+        assert_eq!(t.len(), 1, "queued once, shown once it is taken: {t:?}");
+        assert_eq!(t[0].role, "assistant", "drawn as the agent's, like any reply");
+        assert_eq!(t[0].text, "Linux reports itself.\n\n**Still to do:** run CI.");
+        assert_eq!(agent_report("plain text"), None);
+    }
+
+    #[test]
+    fn codex_output_drops_its_header() {
+        assert_eq!(codex_output("Exit code: 0\nWall time: 1s\nOutput:\nok\n"), "ok\n");
+        assert_eq!(codex_output("plain"), "plain");
+    }
+
+    #[test]
+    fn a_claude_tool_call_carries_its_result_or_its_diff() {
+        let jsonl = [
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"npm test"}}]}}"#,
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":[{"type":"text","text":"3 passing"}]}]}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t2","name":"Edit","input":{"file_path":"/Users/u/a.ts","old_string":"a\nb","new_string":"c"}}]}}"#,
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t2","content":"The file was updated."}]}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t3","name":"Write","input":{"file_path":"/Users/u/b.ts","content":"x\ny"}}]}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t4","name":"Read","input":{"file_path":"/Users/u/c.ts"}}]}}"#,
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t4","content":"   "}]}}"#,
+        ]
+        .join("\n");
+        let d: Vec<Option<String>> = parse_claude_jsonl(&jsonl).into_iter().map(|t| t.detail).collect();
+        assert_eq!(d, vec![Some("3 passing".into()), Some("-a\n-b\n+c".into()), Some("+x\n+y".into()), None]);
+    }
+
+    #[test]
+    fn a_tool_detail_is_bounded() {
+        let long = "x".repeat(DETAIL_CHARS + 50);
+        let b = bounded(&long).unwrap();
+        assert!(b.ends_with("\n...") && b.chars().count() == DETAIL_CHARS + 4);
+        assert_eq!(bounded(" \n "), None);
     }
 
     #[test]
@@ -654,6 +1018,22 @@ mod tests {
             inner.extend(ld(7, &[ld(1, b"call_1"), ld(2, name.as_bytes()), ld(3, args.as_bytes())].concat()));
         }
         [int(1, 15), ld(20, &inner)].concat()
+    }
+
+    #[test]
+    fn an_antigravity_call_carries_its_output_or_its_diff() {
+        use crate::pb::enc::*;
+        let call = |id: &str, name: &str, args: &str| ld(7, &[ld(1, id.as_bytes()), ld(2, name.as_bytes()), ld(3, args.as_bytes())].concat());
+        let agent = [int(1, 15), ld(20, &[
+            call("c1", "run_command", r#"{"CommandLine":"npm test"}"#),
+            call("c2", "edit_file", r#"{"Path":"/Users/u/a.ts","Target":"a\nb","Replacement":"c"}"#),
+            call("c3", "write_file", r#"{"Path":"/Users/u/b.ts","Content":"x"}"#),
+        ].concat())].concat();
+        // The result step as agy writes it: the call at 5.4, the terminal's output deep in 140.
+        let result = |id: &str, out: &str| [ld(5, &ld(4, &ld(1, id.as_bytes()))), ld(140, &ld(2, &ld(3, &ld(10, &ld(3, &ld(4, out.as_bytes()))))))].concat();
+        let (r1, r2) = (result("c1", "3 passing\r\ndone"), result("c2", "edited"));
+        let d: Vec<Option<String>> = parse_antigravity_steps([(15, &agent[..]), (132, &r1[..]), (132, &r2[..])]).into_iter().filter(|t| t.role == "tool").map(|t| t.detail).collect();
+        assert_eq!(d, vec![Some("3 passing\ndone".into()), Some("-a\n-b\n+c".into()), Some("+x".into())]);
     }
 
     #[test]

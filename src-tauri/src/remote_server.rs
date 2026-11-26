@@ -215,13 +215,14 @@ fn server_task(s: &Session, task: &str) -> Option<(String, String)> {
     Some((server, t.id.clone()))
 }
 
-/// A phone opened a local task's chat or terminal: its windows read what
-/// its agents finished, as a desktop visit does (App.tsx `remote://seen`).
+/// A phone or a paired computer opened a local task's chat or terminal: its
+/// windows read what its agents finished, as a desktop visit does (App.tsx
+/// `remote://seen`). Phones only, before: a task opened from a paired
+/// computer stayed "done" here, and so in that computer's REMOTE list too.
+/// A paired computer opens a terminal only when its person views the task
+/// (it fetches no transcripts in the background), so this is a real visit.
 /// A server task's "done" is the box's (termic-server marks it seen).
-fn seen_by_phone(s: &Session, task: &str) {
-    if s.client.kind != ClientKind::Phone {
-        return;
-    }
+fn seen_by_remote(s: &Session, task: &str) {
     let (projects, tasks) = s.host.projects_tasks();
     if let Ok(t) = crate::cli_server::resolve_by_name(&projects, &tasks, task, None) {
         crate::server_projects::emit_all("remote://seen", t.id.clone());
@@ -254,7 +255,7 @@ fn handle(s: &Arc<Session>, msg: ClientMsg) {
             if !s.client.drives() {
                 return error(s, "this computer only lets yours reply to its tasks");
             }
-            seen_by_phone(s, &task);
+            seen_by_remote(s, &task);
             open_term(s, &task, tab.as_deref());
         }
         ClientMsg::TermClose {} => close_term(s),
@@ -360,7 +361,7 @@ fn handle(s: &Arc<Session>, msg: ClientMsg) {
                 }
                 let msg = match crate::cli_server::transcript_turns(s.host.as_ref(), &task) {
                     Ok((task_id, turns)) => {
-                        seen_by_phone(&s, &task_id);
+                        seen_by_remote(&s, &task_id);
                         ServerMsg::Transcript { id, task: task_id, turns, error: None }
                     }
                     Err(e) => ServerMsg::Transcript { id, task, turns: Vec::new(), error: Some(e) },
@@ -459,12 +460,17 @@ fn open_term_or_wake(s: &Arc<Session>, task: &str, tab: Option<&str>, wake: bool
             let (projects, tasks) = s.host.projects_tasks();
             let found = crate::cli_server::resolve_by_name(&projects, &tasks, task, None).ok().map(|t| t.id.clone());
             match found {
-                Some(id) if wake && tab.is_none() => {
-                    let (s2, task, id) = (s.clone(), task.to_string(), id);
+                // A tab named too: a phone that started the task asks for its
+                // agent tab by id before the desktop has spawned it (the
+                // view mounts first), and answering "not running" left the
+                // phone on that message for good. Start it, then open that
+                // same tab once; a tab that is still not there says so.
+                Some(id) if wake => {
+                    let (s2, task, id, tab) = (s.clone(), task.to_string(), id, tab.map(str::to_string));
                     std::thread::spawn(move || {
                         let woke = s2.host.rpc("wake_agent", serde_json::json!({ "taskId": id }), std::time::Duration::from_secs(30));
                         match woke {
-                            Ok(_) => open_term_or_wake(&s2, &task, None, false),
+                            Ok(_) => open_term_or_wake(&s2, &task, tab.as_deref(), false),
                             Err(err) => send(&s2, ServerMsg::TermClosed { reason: err }),
                         }
                     });
@@ -707,6 +713,9 @@ fn state_loop(s: &Session) {
                     // Every tab, not only agents: a client switches to a
                     // second agent, a shell or the run output like the strip.
                     .map(|tab| TabRow {
+                        delegated: snap.states.get(&t.id)
+                            .and_then(|st| st.tab_states.iter().find(|x| x.id == tab.id))
+                            .and_then(|x| x.delegated.clone()),
                         // Only agent and run tabs keep a retained output
                         // ring and are addressable by id; a shell or custom
                         // terminal opens on this computer only.
@@ -735,15 +744,24 @@ fn state_loop(s: &Session) {
                 let now = chrono::Utc::now().timestamp_millis();
                 // First sighting of a task at rest: when it was last opened
                 // (or made), not now; after a restart every row said "now".
+                // Done counts as at rest: this map is per connection, so a
+                // phone reconnecting stamped every finished task "now".
+                // When its current turn started, as the webview stamped it: a
+                // client that connects mid-turn counts "Working" from there,
+                // not from when it joined.
+                let started = snap.states.get(&t.id)
+                    .and_then(|st| st.tab_states.iter().filter_map(|x| x.working_since).min())
+                    .filter(|&ms| ms > 0)
+                    .map(|ms| ms.min(now));
                 let first = || {
-                    let at_rest = matches!(state.as_str(), "inactive" | "idle" | "unknown");
+                    let at_rest = matches!(state.as_str(), "inactive" | "idle" | "unknown" | "done");
                     let when = |s: &str| chrono::DateTime::parse_from_rfc3339(s).ok().map(|d| d.timestamp_millis());
                     let rested = t.last_active_at.as_deref().and_then(when).into_iter().chain(when(&t.created)).max();
-                    if at_rest { rested.unwrap_or(now).min(now) } else { now }
+                    if at_rest { rested.unwrap_or(now).min(now) } else if state == "working" { started.unwrap_or(now) } else { now }
                 };
                 let entry = since.entry(t.id.clone()).or_insert_with(|| (state.clone(), first()));
                 if entry.0 != state {
-                    *entry = (state.clone(), now);
+                    *entry = (state.clone(), if state == "working" { started.unwrap_or(now) } else { now });
                 }
                 let activity = screen.as_deref().filter(|_| state == "working").and_then(termic_remote::screen::activity);
                 if state != "waiting" {

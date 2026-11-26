@@ -59,6 +59,7 @@ export default {
     copied: "链接已复制。它只能使用一次,5 分钟内有效。",
   },
   servers: {
+    reposDir: "仓库文件夹",
     sectionTitle: "服务器",
     title: "你的服务器",
     lead: "运行 termic-server 的开发机,例如家里的 Linux 主机或云服务器:你的仓库克隆在那里,代理也在那里运行,这台电脑休眠或合上时它们也会继续工作。",
@@ -112,7 +113,19 @@ export default {
     retry: "重试",
     done: "完成",
   },
+  display: {
+    title: "远程显示",
+    newTask: "任务下方的新建任务行",
+    connectSwitch: "在行上显示连接开关",
+    counts: "折叠的电脑显示计数",
+    inactive: "不活跃项目放在底部",
+    offlineGather: "离线电脑合并为一行",
+    offlineEach: "每台离线电脑单独一行",
+  },
   sidebar: {
+    badgeExperimental: "实验性",
+    offlineCount_one: "{{count}} 台离线",
+    offlineCount_other: "{{count}} 台离线",
     connect: "连接",
     disconnect: "断开连接",
     disconnected: "已断开",
@@ -174,6 +187,9 @@ export default {
     moveToGroup: "移到分组",
     newGroup: "新建分组",
     leaveGroup: "移出分组",
+    newTab: "新建标签页",
+    sameAgent: "同一智能体",
+    restartAgent: "重新启动智能体",
   },
   newTask: {
     fromBranch: "从 {{branch}} 开始",

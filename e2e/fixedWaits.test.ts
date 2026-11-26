@@ -42,6 +42,11 @@ const ALLOWED: Record<string, { count: number; why: string }> = {
       + "unknown-cost reports must NOT flip the label. Nothing fires for what "
       + "does not render",
   },
+  "files.e2e.ts": {
+    count: 1,
+    why: "a negative: a file whose remote no forge serves must NOT get the "
+      + "forge submenu. Nothing fires for a submenu that never renders",
+  },
   "editor.e2e.ts": {
     count: 3,
     why: "a settle window against IPC still in flight from the case before, plus "
@@ -77,10 +82,11 @@ const ALLOWED: Record<string, { count: number; why: string }> = {
       + "real number of waits",
   },
   "peers.e2e.ts": {
-    count: 1,
-    why: "negative: a click on a paired terminal another screen sized must NOT "
-      + "claim the size back (only Continue here does); nothing fires for a "
-      + "term_size that is never sent",
+    count: 2,
+    why: "two negatives: a click on a paired terminal another screen sized must "
+      + "NOT claim the size back (only Continue here does), nothing fires for a "
+      + "term_size that is never sent; and the host re-sending a fold it did not "
+      + "change must NOT undo one opened here",
   },
   "remote.e2e.ts": {
     count: 5,

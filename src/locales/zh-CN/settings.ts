@@ -201,6 +201,10 @@ export default {
   },
 
   notifications: {
+    attentionPanel: {
+      label: "待处理浮窗",
+      hint: "当有代理在等你时，一个小窗口会浮在其他应用之上，显示它的问题和每个回答的按钮。只在有任务等待时出现，不会抢走你当前应用的焦点。",
+    },
     notices: {
       title: "应用内通知",
       hint: "在角落弹出的通知。可在此关闭，也可在通知右上角的 … 菜单中关闭。",
@@ -340,6 +344,7 @@ export default {
     codexHint: "写入 <1>~/.codex/config.toml</1>，并备份当前文件。",
     addToClaude: "添加到 Claude Code",
     claudeHint: "通过 claude 自己的命令注册。需要 Claude Code 2.1.238 或更高版本。",
+    needsTabUpdate: "当前注册配置来自旧版 Termic，尚未包含 X-Termic-Tab。请重新添加并重启运行中的会话，以便回复路由回发起任务的标签页。",
     bindFailed: "端点无法绑定。请查看日志，或将该设置关闭再打开。",
     noToken: "端点未在运行，因此没有令牌",
     adding: "正在添加…",

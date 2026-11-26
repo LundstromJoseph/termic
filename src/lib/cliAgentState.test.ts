@@ -58,15 +58,18 @@ function statesFor(tabs: Record<string, Tab[]>) {
 describe("computeAgentStates aggregation", () => {
   beforeEach(() => useApp.setState({ tasks: [], tabs: {} }));
 
-  it("follows the sidebar precedence: working > attention > done > idle", () => {
+  it("follows the sidebar precedence: attention > working > done > idle", () => {
     const s = statesFor({
       working: [term({ workState: "done" }), term({ workState: "working" })],
       waiting: [term({ workState: "done" }), term({ unread: { reason: "attention" } })],
+      // Asking mid-turn (AskUserQuestion): still working, but blocked on the user.
+      asking: [term({ workState: "working", unread: { reason: "attention" } })],
       done: [term({ workState: "idle" }), term({ workState: "done" })],
       idle: [term({ workState: "idle" })],
     });
     expect(s.working.state).toBe("working");
     expect(s.waiting.state).toBe("waiting");
+    expect(s.asking.state).toBe("waiting");
     expect(s.done.state).toBe("done");
     expect(s.idle.state).toBe("idle");
   });
@@ -221,5 +224,29 @@ describe("per-tab snapshot (tab_states, GH #138 part 2)", () => {
     expect(s.t.tab_states[1]).toMatchObject({
       id: "second", is_default: false, live: false, queued: 0, title: "codex",
     });
+  });
+
+  it("reports split-pane tabs in pane_tab_states without shifting strip tab_states", () => {
+    const s = statesFor({
+      t: [
+        term({ id: "main", is_default: true, ptyId: "pty-1", workState: "idle" }),
+        term({ id: "pane-1", paneId: "leaf-1", is_default: false, ptyId: "pty-2", cli: "codex", workState: "working" }),
+      ],
+    });
+    expect(s.t.tab_states.map(t => t.id)).toEqual(["main"]);
+    expect(s.t.pane_tab_states).toHaveLength(1);
+    expect(s.t.pane_tab_states?.[0]).toMatchObject({
+      id: "pane-1", kind: "agent", cli: "codex", live: true, state: "working", is_default: false,
+    });
+  });
+});
+
+describe("computeTabState working_since", () => {
+  it("reports when the current turn started, only while working", async () => {
+    const { computeTabState } = await import("./cliAgentState");
+    const base = { type: "terminal", id: "t1", title: "claude", cli: "claude" } as any;
+    expect(computeTabState({ ...base, workState: "working", workStartedAt: 1_000 }, [] as any).working_since).toBe(1_000);
+    expect(computeTabState({ ...base, workState: "done", workStartedAt: 1_000 }, [] as any).working_since).toBeNull();
+    expect(computeTabState({ ...base, workState: "working" }, [] as any).working_since).toBeNull();
   });
 });
